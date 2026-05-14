@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comprehensive benchmark: pystata vs stata-fast.
+"""Comprehensive benchmark: pystata vs pystata-x.
 
 Each benchmark case runs in a fresh subprocess that:
 1. Initialises Stata once
@@ -7,7 +7,7 @@ Each benchmark case runs in a fresh subprocess that:
 3. Reports mean/median timing
 
 Usage:
-    cd /Users/tom/projects/stata-fast
+    cd /Users/tom/projects/pystata-x
 
 SPDX-FileCopyrightText: 2025 Thomas Monk <t.d.monk@lse.ac.uk>
 SPDX-License-Identifier: AGPL-3.0-only
@@ -116,7 +116,7 @@ print(f"ROUNDS:{{_n}}")
 print(f"OPS:{{_ops:.1f}}")
 """
 
-# 3. stata-fast _core.run — our optimised wrapper
+# 3. pystata-x _core.run — our optimised wrapper
 SCRIPTS["fast_run"] = f"""\
 import sys, time, math, statistics as _stats
 sys.path.insert(0, "{REPO_SRC}")
@@ -124,7 +124,7 @@ sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
 
-from src.stata_fast._core import run as _run
+from src.pystata_x._core import run as _run
 
 for _ in range({WARMUP}):
     _run("display 1+1")
@@ -150,7 +150,7 @@ print(f"ROUNDS:{{_n}}")
 print(f"OPS:{{_ops:.1f}}")
 """
 
-# 4. stata-fast _core.run with quietly=True
+# 4. pystata-x _core.run with quietly=True
 SCRIPTS["fast_run_quietly"] = f"""\
 import sys, time, math, statistics as _stats
 sys.path.insert(0, "{REPO_SRC}")
@@ -158,7 +158,7 @@ sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
 
-from src.stata_fast._core import run as _run
+from src.pystata_x._core import run as _run
 
 for _ in range({WARMUP}):
     _run("display 1+1", quietly=True)
@@ -184,7 +184,7 @@ print(f"ROUNDS:{{_n}}")
 print(f"OPS:{{_ops:.1f}}")
 """
 
-# 5. stata-fast _core.run with capture=False (fastest possible)
+# 5. pystata-x _core.run with capture=False (fastest possible)
 SCRIPTS["fast_run_nocapture"] = f"""\
 import sys, time, math, statistics as _stats
 sys.path.insert(0, "{REPO_SRC}")
@@ -192,7 +192,7 @@ sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
 
-from src.stata_fast._core import run as _run
+from src.pystata_x._core import run as _run
 
 for _ in range({WARMUP}):
     _run("display 1+1", quietly=True, capture=False)
@@ -264,7 +264,7 @@ sys.path.insert(0, "{REPO_SRC}")
 sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
-from stata_fast._core import run as _run
+from pystata_x._core import run as _run
 '''
 
 # Use same call for both: _run(_code) without special flags
@@ -317,7 +317,7 @@ print(f"ROUNDS:{{_n}}")
 print(f"OPS:{{_ops:.1f}}")
 """
 
-# 9. Echo: stata-fast
+# 9. Echo: pystata-x
 SCRIPTS["fast_echo"] = f"""\
 import sys, time, math, statistics as _stats
 sys.path.insert(0, "{REPO_SRC}")
@@ -325,7 +325,7 @@ sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
 
-from src.stata_fast._core import run as _run
+from src.pystata_x._core import run as _run
 
 for _ in range({WARMUP}):
     _run("display 1+1", echo=True)
@@ -384,8 +384,8 @@ def run_script(name: str, script: str, timeout: int = 60) -> dict | None:
 
 def main():
     print("=" * 70)
-    print("  stata-fast: Command Execution Benchmark")
-    print("  Comparing original pystata vs optimised stata-fast")
+    print("  pystata-x: Command Execution Benchmark")
+    print("  Comparing original pystata vs optimised pystata-x")
     print("=" * 70)
     print()
 

@@ -3,7 +3,7 @@
 
 Tests three scenarios:
 1. Original pystata via stata_setup (baseline)
-2. Our optimised init via src.stata_fast._config.init()
+2. Our optimised init via src.pystata_x._config.init()
 3. Our stata_setup drop-in
 """
 
@@ -25,17 +25,17 @@ stata_setup.config("/Applications/StataNow", "se", splash=False)
 
 OPTIMISED_SCRIPT = '''
 import sys
-sys.path.insert(0, "/Users/tom/projects/stata-fast/src")
+sys.path.insert(0, "/Users/tom/projects/pystata-x/src")
 import time
-from src.stata_fast import _config as fast_config
+from src.pystata_x import _config as fast_config
 fast_config.init("se", st_path="/Applications/StataNow", splash=False)
 '''
 
 OPTIMISED_SETUP_SCRIPT = '''
 import sys
-sys.path.insert(0, "/Users/tom/projects/stata-fast/src")
+sys.path.insert(0, "/Users/tom/projects/pystata-x/src")
 import time
-from src.stata_fast.stata_setup import config
+from src.pystata_x.stata_setup import config
 config("/Applications/StataNow", "se", splash=False)
 '''
 

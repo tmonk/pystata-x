@@ -1,4 +1,4 @@
-"""Benchmark pystata vs stata-fast command execution.
+"""Benchmark pystata vs pystata-x command execution.
 
 Uses subprocess-per-group to measure Stata command execution speed.
 Each subprocess initializes Stata once, then loops over the benchmark
@@ -34,7 +34,7 @@ sys.path.insert(0, "{_REPO_SRC}")
 sys.path.insert(0, "{STATA_ROOT}/utilities")
 import stata_setup
 stata_setup.config("{STATA_ROOT}", "{STATA_EDITION}", splash=False)
-from src.stata_fast._core import run as fast_run
+from src.pystata_x._core import run as fast_run
 """
 
 
@@ -77,7 +77,7 @@ out = go() or ""
         result = subprocess_benchmark(
             FAST_SETUP,
             'fast_run("display 1+1")',
-            "stata-fast.run (simple)", benchmark, min_time=1.0,
+            "pystata-x.run (simple)", benchmark, min_time=1.0,
         )
         assert result is not None
 
@@ -86,7 +86,7 @@ out = go() or ""
         result = subprocess_benchmark(
             FAST_SETUP,
             'fast_run("display 1+1", quietly=True)',
-            "stata-fast.run (quietly)", benchmark, min_time=1.0,
+            "pystata-x.run (quietly)", benchmark, min_time=1.0,
         )
         assert result is not None
 
@@ -95,7 +95,7 @@ out = go() or ""
         result = subprocess_benchmark(
             FAST_SETUP,
             'fast_run("display 1+1", quietly=True, capture=False)',
-            "stata-fast.run (no capture)", benchmark, min_time=1.0,
+            "pystata-x.run (no capture)", benchmark, min_time=1.0,
         )
         assert result is not None
 
@@ -128,7 +128,7 @@ class TestMultiLine:
         result = subprocess_benchmark(
             FAST_SETUP,
             f'fast_run("""{_MULTILINE_CODE}""")',
-            "stata-fast.run (multiline)", benchmark, min_time=2.0,
+            "pystata-x.run (multiline)", benchmark, min_time=2.0,
         )
         assert result is not None
 
@@ -154,7 +154,7 @@ class TestWithEcho:
         result = subprocess_benchmark(
             FAST_SETUP,
             'fast_run("display 1+1", echo=True)',
-            "stata-fast.run (echo=True)", benchmark, min_time=1.0,
+            "pystata-x.run (echo=True)", benchmark, min_time=1.0,
         )
         assert result is not None
 
@@ -184,10 +184,10 @@ out = config.get_output()
         result = subprocess_benchmark(
             FAST_SETUP,
             """\
-from src.stata_fast import _config as fc
+from src.pystata_x import _config as fc
 fc.stlib.StataSO_Execute(fc._encode('display "x"'), False)
 out = fc.get_output()
 """,
-            "stata-fast config.get_output()", benchmark, min_time=1.0,
+            "pystata-x config.get_output()", benchmark, min_time=1.0,
         )
         assert result is not None
