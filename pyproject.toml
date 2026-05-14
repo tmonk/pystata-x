@@ -1,7 +1,7 @@
 [project]
-name = "stata-fast"
+name = "pystata-x"
 version = "0.2.0"
-description = "Optimised pystata fork — fast Stata-Python bridge for AI agents."
+description = "Fast Stata-Python bridge — independent drop-in replacement for pystata."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}
@@ -23,7 +23,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/stata_fast"]
+packages = ["src/pystata_x"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,8 +1,8 @@
-"""Optimised Stata initialisation and configuration.
+"""Independent Stata initialisation and configuration.
 
-Based on StataCorp's pystata/config.py but stripped of Python 2
-compatibility code, IPython/Jupyter auto-detection overhead, and
-redundant preference-loading during init.
+Replacement for StataCorp's pystata/config.py with no Python 2
+compatibility code, no IPython/Jupyter auto-detection overhead, and
+no redundant preference-file I/O during init.
 
 Key improvements
 ----------------
@@ -103,7 +103,7 @@ def _get_st_home(from_file: str | None = None) -> str:
         if parent.name.lower() == "utilities":
             return str(parent.parent)
         if (parent / "utilities").is_dir():
-            # We're in stata-fast package tree — can't auto-detect.
+            # We're in pystata-x package tree — can't auto-detect.
             # User must call statasetup.config(path, ...) explicitly.
             break
     raise ValueError(
