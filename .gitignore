@@ -15,3 +15,6 @@ vendor/
 # Workspace files
 *.log
 .DS_Store
+
+# Pi agent state
+.pi/
