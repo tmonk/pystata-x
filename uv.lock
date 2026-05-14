@@ -254,7 +254,7 @@ wheels = [
 ]
 
 [[package]]
-name = "stata-fast"
+name = "pystata-x"
 version = "0.2.0"
 source = { virtual = "." }
 
