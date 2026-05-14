@@ -136,29 +136,50 @@ def execute(
     quietly: bool = False,
     echo: bool | None = None,
     capture: bool = True,
-) -> tuple[str, int]:
-    """Execute Stata code and return ``(output_text, return_code)``.
+    track_graphs: bool = False,
+) -> ExecuteResult:
+    """Execute Stata code and return result as an ``ExecuteResult``.
 
-    This is the fast internal execution function, designed for programmatic
-    use by headless / AI-agent callers (e.g. ``stata-agent``).
+    Backward-compatible: callers that unpack to ``output, rc = execute(...)``
+    will continue to work because ``ExecuteResult`` is a positional tuple.
+
+    **Execution paths:**
+
+    * **Single-line** (fast path): passed directly to ``StataSO_Execute``.
+    * **Multi-line**: written to a temp do-file and ``include``-d (necessary
+      because ``StataSO_Execute`` does not accept newlines).
+    * **Graph tracking + multi-line**: the graph dir query is **bundled
+      into the same do-file**, eliminating a separate StataSO round-trip.
+    * **Graph tracking + single-line**: the graph dir query runs as a
+      separate StataSO call after the user code (cannot bundle).
+
+    ``set showcommand`` is toggled per-call inside the include path to
+    control command echoing — the ``echo`` parameter on ``StataSO_Execute``
+    only affects the top-level command, not lines inside a do-file.
 
     Parameters
     ----------
     code : str
-        One or more Stata commands.  Multi-line blocks are written to a
-        temporary do-file and executed via ``include``.
+        One or more Stata commands.
     quietly : bool
         If True, prepend ``qui`` to single-line commands (suppress output).
+        For multi-line with quietly=True the code is written to a temp
+        do-file and ``qui include``-d (rare path).
     echo : bool or None
         Whether to echo the command in output.  ``None`` = use global default
         (``config.stconfig.get("cmdshow", "default")``).
     capture : bool
         If False, skip output buffer drain (useful for internal
         commands where you don't need the output text).
+    track_graphs : bool
+        If True, query in-memory graph state after execution.  For
+        multi-line code the query is bundled into the do-file (no extra
+        StataSO call).  For single-line it runs as a separate call.
 
     Returns
     -------
-    (output_text, return_code)
+    ExecuteResult
+        Fields: output, rc, graph_names (None when track_graphs=False).
     """
     stlib, encode, get_output = _resolve_runtime()
 
@@ -172,42 +193,69 @@ def execute(
 
     lines = code.splitlines()
     non_blank = [ln for ln in lines if ln.strip()]
+    is_multiline = len(non_blank) > 1
 
-    # Fast path: single-line command -> StataSO_Execute directly
-    if len(non_blank) == 1:
+    if is_multiline or quietly:
+        # ---- Temp-do-file path (multi-line or quietly=True) ----
+        # StataSO_Execute cannot accept newlines in a single call, so
+        # we write a temp do-file and "include" it.
+        #
+        # When track_graphs=True, the graph dir query is bundled into
+        # the same do-file, saving one StataSO round-trip.
+        if track_graphs:
+            code = code + "\nquietly graph dir, memory"
+
+        _write_temp_do(code)
+
+        # showcommand toggling: StataSO_Execute's echo param only
+        # controls the top-level command (include).  Commands inside
+        # the do-file are controlled by Stata's showcommand setting.
+        if not echo:
+            stlib.StataSO_Execute(
+                encode("set showcommand off"), False
+            )
+
+        stlib.StataSO_ClearOutputBuffer()
+
+        prefix = "qui " if quietly else ""
+        rc = stlib.StataSO_Execute(
+            encode(f'{prefix}include "{_STATA_TEMP_DO}"'), False
+        )
+
+        if not echo:
+            stlib.StataSO_Execute(
+                encode("set showcommand on"), False
+            )
+
+        output = get_output() if capture else ""
+
+        # Bundled graph names (no extra StataSO round-trip)
+        graph_names: list[str] | None = None
+        if track_graphs:
+            graph_names = _read_graph_names()
+
+    else:
+        # ---- Single-line fast path ----
         cmd = non_blank[0]
-
-        # Handle "quietly" prefix
         if quietly:
             cmd = "qui " + cmd
 
         stlib.StataSO_ClearOutputBuffer()
-
         rc = stlib.StataSO_Execute(encode(cmd), echo)
+        output = get_output() if capture else ""
 
-        if capture:
-            output = get_output() or ""
-        else:
-            output = ""
+        # Single-line + track_graphs: separate query (can't bundle)
+        graph_names = None
+        if track_graphs:
+            try:
+                stlib.StataSO_Execute(
+                    encode("quietly graph dir, memory"), 0
+                )
+                graph_names = _read_graph_names()
+            except Exception:
+                graph_names = None
 
-        return (output.strip(), rc)
-
-    # Multi-line: write to temp do-file and include
-    _write_temp_do(code)
-
-    if not echo:
-        stlib.StataSO_Execute(encode("set showcommand off"), False)
-
-    stlib.StataSO_ClearOutputBuffer()
-
-    prefix = "qui " if quietly else ""
-    rc = stlib.StataSO_Execute(encode(f'{prefix}include "{_STATA_TEMP_DO}"'), False)
-
-    if not echo:
-        stlib.StataSO_Execute(encode("set showcommand on"), False)
-
-    output = get_output() if capture else ""
-    return (output.strip(), rc)
+    return ExecuteResult(output.strip(), rc, graph_names)
 
 
 def run(
@@ -241,13 +289,13 @@ def run(
     SystemError
         If Stata returns a non-zero return code.
     """
-    output, rc = execute(cmd, quietly=quietly, echo=echo, capture=True)
+    result = execute(cmd, quietly=quietly, echo=echo, capture=True)
 
-    if output:
-        print(output)
+    if result.output:
+        print(result.output)
 
-    if rc != 0:
-        raise SystemError(output or f"Stata command failed with return code {rc}")
+    if result.rc != 0:
+        raise SystemError(result.output or f"Stata command failed with return code {result.rc}")
 
 
 def get_output() -> str:
