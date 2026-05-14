@@ -40,8 +40,26 @@ _STATA_TEMP_DO_BYTES: bytes | None = None  # resolved lazily
 _INCLUDE_CMD_PREFIX = b'include "'
 _INCLUDE_CMD_SUFFIX = b'"'
 
+# Cached showcommand state — avoid toggling when the current state already
+# matches the requested state.  Stata starts with showcommand on.
+_SHOWCOMMAND_IS_ON: bool = True
+
 
 # ---------- helpers ----------
+
+
+def _set_showcommand(state_on: bool) -> None:
+    """Toggle showcommand only if *state_on* differs from the cached state.
+
+    Does nothing when the current state already matches the requested
+    state (saves ~16 us on consecutive calls with the same echo setting).
+    """
+    global _SHOWCOMMAND_IS_ON
+    if state_on == _SHOWCOMMAND_IS_ON:
+        return
+    cmd = _SHOWCOMMAND_ON if state_on else _SHOWCOMMAND_OFF
+    config.stlib.StataSO_Execute(cmd, 0)
+    _SHOWCOMMAND_IS_ON = state_on
 
 
 def _get_include_cmd_bytes() -> bytes:
@@ -172,9 +190,10 @@ def execute(
     * **Graph tracking + single-line**: the graph dir query runs as a
       separate StataSO call after the user code (cannot bundle).
 
-    ``set showcommand`` is toggled per-call inside the include path to
-    control command echoing — the ``echo`` parameter on ``StataSO_Execute``
-    only affects the top-level command, not lines inside a do-file.
+    ``set showcommand`` is toggled via a cached helper — no-ops when
+    the current state already matches the requested state.  The ``echo``
+    parameter on ``StataSO_Execute`` only affects the top-level command,
+    not lines inside a do-file.
 
     Parameters
     ----------
@@ -221,19 +240,22 @@ def execute(
         # we write a temp do-file and "include" it.
         #
         # When track_graphs=True, the graph dir query is bundled into
-        # the same do-file, saving one StataSO round-trip.
-        # When track_graphs=True, the graph dir query is bundled into
         # the do-file, eliminating a separate StataSO round-trip.
         if track_graphs:
             code = code + "\nquietly graph dir, memory"
 
         _write_temp_do(code)
 
-        # showcommand toggling: StataSO_Execute's echo param only
-        # controls the top-level command (include).  Commands inside
-        # the do-file are controlled by Stata's showcommand setting.
-        if not echo:
-            stlib.StataSO_Execute(_SHOWCOMMAND_OFF, False)
+        # Use cached showcommand state to avoid redundant toggling.
+        # StataSO_Execute's echo param only controls the top-level command
+        # (include).  Commands inside the do-file are controlled by
+        # Stata's showcommand setting, so we must ensure it matches.
+        #
+        # We do NOT restore after the include — the next call will
+        # toggle only if the requested state differs from the current
+        # cached state.  This saves ~16 us on consecutive calls with
+        # the same echo setting.
+        _set_showcommand(not not echo)  # True=showcommand on, False=off
 
         stlib.StataSO_ClearOutputBuffer()
 
@@ -243,9 +265,6 @@ def execute(
             include_cmd = encode("qui ") + include_cmd
 
         rc = stlib.StataSO_Execute(include_cmd, False)
-
-        if not echo:
-            stlib.StataSO_Execute(_SHOWCOMMAND_ON, False)
 
         output = get_output() if capture else ""
 
