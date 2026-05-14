@@ -45,6 +45,62 @@ def _resolve_runtime():
 # Core execution
 # ---------------------------------------------------------------------------
 
+
+class ExecuteResult(tuple):
+    """Result of a Stata command execution.
+
+    Backward-compatible: can be unpacked as ``output, rc = result``
+    because it is a 2-tuple with ``graph_names`` stored as an extra
+    attribute.
+
+    Fields
+    ------
+    output : str
+        The captured Stata output text.
+    rc : int
+        Stata return code (0 = success).
+    graph_names : list[str] | None
+        List of graph names in memory after execution, or None if graph
+        tracking was not requested.
+    """
+
+    def __new__(cls, output: str = "", rc: int = 0,
+                graph_names: list[str] | None = None):
+        obj = tuple.__new__(cls, (output, rc))
+        obj._graph_names = graph_names
+        return obj
+
+    @property
+    def output(self) -> str:
+        return self[0]
+
+    @property
+    def rc(self) -> int:
+        return self[1]
+
+    @property
+    def graph_names(self) -> list[str] | None:
+        return self._graph_names
+
+
+def _read_graph_names() -> list[str] | None:
+    """Read in-memory graph list from Stata's ``r(list)`` via SFI Macro.
+
+    Must be called **immediately after** a ``quietly graph dir, memory``
+    was executed.  No separate StataSO round-trip needed.
+
+    Returns a list of graph names, or None if SFI is unavailable.
+    """
+    try:
+        from sfi import Macro
+        raw = Macro.getGlobal("r(list)")
+        if raw and raw.strip():
+            return raw.split()
+        return []
+    except ImportError:
+        return None
+
+
 def execute(
     code: str,
     *,

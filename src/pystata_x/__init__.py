@@ -15,7 +15,7 @@ statasetup.config()— One-shot Stata initialisation (drop-in for ``stata_setup`
 
 from __future__ import annotations
 
-from pystata_x._core import run, execute, get_output
+from pystata_x._core import run, execute, get_output, ExecuteResult
 from pystata_x import _config as config
 
 __version__ = "0.2.0"
