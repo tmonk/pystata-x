@@ -118,20 +118,27 @@ def _get_executable_path() -> str:
 
 
 def _init_stata(splash: bool) -> int:
-    """Call StataSO_Main to bootstrap the Stata engine."""
+    """Call StataSO_Main to bootstrap the Stata engine.
+
+    This is a direct ctypes binding to Stata's C API.  The argument layout
+    mirrors what the native Stata binary expects on its command line:
+    argv[0] is the program name (empty string = null placeholder), followed
+    by flags ``-q`` (quiet startup) and ``-pyexec <path>`` (Python executable
+    for Stata's embedded Python).
+    """
     stlib.StataSO_Main.restype = c_int
     stlib.StataSO_Main.argtypes = (c_int, POINTER(c_char_p))
 
+    pyexec = _get_executable_path()
+    args = ["", "-q", "-pyexec", pyexec]
     if splash:
-        args = ["-pyexec", _get_executable_path()]
-    else:
-        args = ["", "-q", "-pyexec", _get_executable_path()]
+        args = ["-pyexec", pyexec]
 
-    sarr = (c_char_p * len(args))()
-    sarr[:] = [_encode(a) for a in args]
+    c_argv = (c_char_p * len(args))()
+    for i, a in enumerate(args):
+        c_argv[i] = _encode(a)
 
-    rc = stlib.StataSO_Main(len(args), sarr)
-    return rc
+    return stlib.StataSO_Main(len(args), c_argv)
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +246,13 @@ def check_initialized() -> None:
 @atexit.register
 def shutdown() -> None:
     """Shut down the Stata engine at interpreter exit."""
-    if stinitialized:
-        try:
-            stlib.StataSO_Shutdown.restype = None
-            stlib.StataSO_Shutdown()
-        except Exception:
-            pass
+    if not stinitialized:
+        return
+    try:
+        stlib.StataSO_Shutdown.restype = None
+        stlib.StataSO_Shutdown()
+    except Exception:
+        pass
 
 
 def is_stata_initialized() -> bool:
