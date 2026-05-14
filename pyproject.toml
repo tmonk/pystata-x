@@ -1,0 +1,35 @@
+[project]
+name = "stata-fast"
+version = "0.2.0"
+description = "Optimised pystata fork — fast Stata-Python bridge for AI agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "AGPL-3.0-only"}
+authors = [
+    {name = "Thomas Monk", email = "t.d.monk@lse.ac.uk"},
+]
+dependencies = [
+    # No hard deps — sfi is only available inside Stata's Python process
+]
+
+[project.optional-dependencies]
+numpy = ["numpy"]
+pandas = ["pandas"]
+dev = [
+    "pytest",
+    "pytest-benchmark",
+    "numpy",
+    "pandas",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stata_fast"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-benchmark>=5.2.3",
+]

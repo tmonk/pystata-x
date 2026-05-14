@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Proprietary StataCorp pystata reference — not for redistribution
+vendor/
+
+# Workspace files
+*.log
+.DS_Store
