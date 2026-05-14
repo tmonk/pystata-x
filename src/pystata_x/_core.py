@@ -81,14 +81,18 @@ def _ensure_temp_fd() -> int:
     return _STATA_TEMP_FD
 
 
-def _write_temp_do(code: str) -> None:
-    """Overwrite the temp do-file with *code* using the cached fd.
+def _write_temp_do(code: str, suffix: bytes = b"") -> None:
+    """Overwrite the temp do-file with *code* [+ *suffix*] using the cached fd.
 
     Uses ftruncate + lseek + write to avoid the overhead of repeated
-    open()/close() syscalls (9 µs vs 49 µs on macOS).
+    open()/close() syscalls (9 µs vs 49 µs on macOS).  When *suffix*
+    is provided it is written immediately after *code* (avoids an extra
+    Python string concatenation for bundled graph queries).
     """
     fd = _ensure_temp_fd()
     bdata = code.encode("utf-8")
+    if suffix:
+        bdata = bdata + suffix
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, bdata)
@@ -187,8 +191,10 @@ def execute(
       because ``StataSO_Execute`` does not accept newlines).
     * **Graph tracking + multi-line**: the graph dir query is **bundled
       into the same do-file**, eliminating a separate StataSO round-trip.
-    * **Graph tracking + single-line**: the graph dir query runs as a
-      separate StataSO call after the user code (cannot bundle).
+    * **Graph tracking + single-line + echo=False** (NEW): also bundled via
+      the temp-file path, **avoiding a costly second StataSO round-trip**.
+      For ``echo=True`` it falls back to a separate graph dir call to
+      preserve output content.
 
     ``set showcommand`` is toggled via a cached helper — no-ops when
     the current state already matches the requested state.  The ``echo``
@@ -210,9 +216,10 @@ def execute(
         If False, skip output buffer drain (useful for internal
         commands where you don't need the output text).
     track_graphs : bool
-        If True, query in-memory graph state after execution.  For
-        multi-line code the query is bundled into the do-file (no extra
-        StataSO call).  For single-line it runs as a separate call.
+        If True, query in-memory graph state after execution.  The query
+        is bundled into the do-file for multi-line code and for
+        single-line code where ``echo=False`` — no extra StataSO call.
+        Only single-line + ``echo=True`` uses a separate graph dir call.
 
     Returns
     -------
@@ -229,22 +236,21 @@ def execute(
         else:
             echo = False
 
-    # Use a fast `\n in code` check instead of splitlines()+list comprehension
-    # (~64 ns vs ~164 ns).  This also catches trailing newlines, which
-    # are fine — the include path handles them correctly.
+    # Single-line + track_graphs + echo=False also routes through the
+    # temp-file path so the graph dir query can be bundled, avoiding a
+    # separate costly StataSO_Execute round-trip (~88 us).
     has_newline = "\n" in code
+    need_tempfile = has_newline or quietly or (track_graphs and not echo)
 
-    if has_newline or quietly:
-        # ---- Temp-do-file path (multi-line or quietly=True) ----
-        # StataSO_Execute cannot accept newlines in a single call, so
-        # we write a temp do-file and "include" it.
+    if need_tempfile:
+        # ---- Temp-do-file path ----
+        # StataSO_Execute cannot accept newlines, so multi-statement code
+        # must be written to a temp do-file and include-d.
         #
-        # When track_graphs=True, the graph dir query is bundled into
+        # When track_graphs=True, append the graph dir query directly into
         # the do-file, eliminating a separate StataSO round-trip.
-        if track_graphs:
-            code = code + "\nquietly graph dir, memory"
-
-        _write_temp_do(code)
+        suffix = _GRAPH_DIR_QUERY if track_graphs else b""
+        _write_temp_do(code, suffix)
 
         # Use cached showcommand state to avoid redundant toggling.
         # StataSO_Execute's echo param only controls the top-level command
@@ -273,8 +279,6 @@ def execute(
 
     else:
         # ---- Single-line fast path ----
-        # The code may have trailing whitespace from the newline check
-        # above — only strip when has_newline was true (saves a call).
         cmd = code.strip() if has_newline else code
         if quietly:
             cmd = "qui " + cmd
@@ -283,14 +287,13 @@ def execute(
         rc = stlib.StataSO_Execute(encode(cmd), echo)
         output = get_output() if capture else ""
 
-        # Single-line + track_graphs: separate query (can't bundle)
+        # Single-line + track_graphs + echo=True: cannot bundle via
+        # temp-file because that would change output content.  A
+        # separate graph dir query is the only option.
         graph_names = None
         if track_graphs:
-            try:
-                stlib.StataSO_Execute(_GRAPH_DIR_QUERY, 0)
-                graph_names = _read_graph_names()
-            except Exception:
-                graph_names = None
+            stlib.StataSO_Execute(_GRAPH_DIR_QUERY, 0)
+            graph_names = _read_graph_names()
 
     return ExecuteResult(output.strip(), rc, graph_names)
 
