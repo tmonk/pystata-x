@@ -1,6 +1,7 @@
 name: Build & Test
 
 on:
+  push:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -52,8 +53,8 @@ jobs:
       - name: Test installation in clean environment
         shell: bash
         run: |
-          # Create fresh venv
-          python -m venv test_venv
+          # Create fresh venv using the uv-managed Python
+          uv run python -m venv test_venv
 
           # Activate and install
           if [[ "$RUNNER_OS" == "Windows" ]]; then
