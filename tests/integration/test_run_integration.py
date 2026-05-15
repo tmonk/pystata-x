@@ -100,7 +100,7 @@ class TestRunHappyPath:
         run("display 1+1\ndisplay 2+2")  # should not raise
 
     def test_run_empty_cmd(self):
-        """run() with empty string returns None."""
+        """run() with empty string returns None (delegated to execute)."""
         from pystata_x._core import run
         assert run("") is None
 
@@ -111,7 +111,7 @@ class TestRunHappyPath:
 
 
 class TestRunErrorHandling:
-    """run() must raise SystemError on Stata errors."""
+    """run() raises SystemError on Stata errors."""
 
     def test_raises_on_invalid_command(self):
         """An invalid Stata command raises SystemError."""
@@ -130,49 +130,6 @@ class TestRunErrorHandling:
         from pystata_x._core import run
         with pytest.raises(SystemError):
             run("display 1+1\ninvalid_command_xyz\ndisplay 2+2")
-
-
-# ---------------------------------------------------------------------------
-# Type validation
-# ---------------------------------------------------------------------------
-
-
-class TestRunTypeValidation:
-    """run() must validate echo and inline types."""
-
-    def test_echo_wrong_type_raises(self):
-        from pystata_x._core import run
-        with pytest.raises(TypeError, match="echo must be a boolean"):
-            run("display 1+1", echo="yes")
-
-    def test_inline_wrong_type_raises(self):
-        from pystata_x._core import run
-        with pytest.raises(TypeError, match="inline must be a boolean"):
-            run("display 1+1", inline="yes")
-
-
-# ---------------------------------------------------------------------------
-# Comment handling
-# ---------------------------------------------------------------------------
-
-
-class TestRunCommentHandling:
-    """run() must handle Stata comments as the vendor does."""
-
-    def test_comment_line(self):
-        """A // comment line should not raise."""
-        from pystata_x._core import run
-        run("// this is a comment")  # no error
-
-    def test_block_comment(self):
-        """A /* */ comment line should not raise."""
-        from pystata_x._core import run
-        run("/* block comment */")  # no error
-
-    def test_comment_with_echo_true(self):
-        """Comment line with echo=True should not execute Stata."""
-        from pystata_x._core import run
-        run("// comment", echo=True)  # no error
 
 
 # ---------------------------------------------------------------------------

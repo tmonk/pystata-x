@@ -305,15 +305,16 @@ def run(
     echo: bool | None = None,
     inline: bool | None = None,
 ) -> None:
-    """Execute Stata code with the original ``pystata.stata.run()`` API.
+    """Execute Stata code and print output to stdout.
 
-    This is a drop-in replacement for StataCorp's ``pystata.stata.run()``.
-    The observable behaviour (parameter types, validation, output to stdout,
-    ``SystemError`` on failure, comment handling, single-vs-multi-line
-    dispatch) matches the original Stata API **exactly**.
+    Thin API-compatible wrapper around :func:`execute`.  Accepts the same
+    parameters as StataCorp's ``pystata.stata.run()`` but performs **no**
+    type validation, no empty-cmd short-circuit, no initialization check,
+    and no comment detection of its own — all execution is delegated to
+    the optimised :func:`execute` pipeline.
 
-    Unlike :func:`execute`, this function **prints output to stdout** and
-    **raises ``SystemError``** when Stata returns a non-zero return code.
+    Raises ``SystemError`` when Stata returns a non-zero return code
+    (matching the vendor's observable error behaviour).
 
     Parameters
     ----------
@@ -325,115 +326,20 @@ def run(
         Whether to echo the command in the output.  ``None`` = use the
         global setting (``config.stconfig["cmdshow"]``).
     inline : bool or None
-        Whether to display graphs inline.  ``None`` = use the global
-        setting (``config.stconfig["grshow"]``).  In headless/CLI mode
-        this is effectively a no-op unless a Jupyter kernel is active.
+        Retained for API compatibility (no-op in headless mode;
+        graphs are tracked via :func:`execute`\'s ``track_graphs``).
 
     Raises
     ------
-    TypeError
-        If ``echo`` or ``inline`` is not ``True``, ``False``, or ``None``.
     SystemError
         If Stata has not been initialised yet, or if Stata returns a
         non-zero return code.
     """
-    # Must match vendor order: check_initialized first
-    config.check_initialized()
-
-    # Type validation — vendor raises TypeError for non-bool/non-None
-    if echo is not None:
-        if echo is not True and echo is not False:
-            raise TypeError("echo must be a boolean value")
-
-    if inline is None:
-        inline = config.stconfig.get("grshow", False)
-    else:
-        if inline is not True and inline is not False:
-            raise TypeError("inline must be a boolean value")
-
-    # Vendor clears buffer at the start of every call
-    config.stlib.StataSO_ClearOutputBuffer()
-
-    # Empty cmd → return immediately (vendor behaviour)
-    cmds = cmd.splitlines()
-    if len(cmds) == 0:
-        return
-
-    if len(cmds) == 1:
-        # ---- Single-line path ----
-        # Resolve echo default (None → config default)
-        if echo is None:
-            echo = config.stconfig.get("cmdshow", "default")
-            if echo == "default":
-                echo = False
-
-        line = cmds[0].strip()
-
-        # Comment detection — vendor prints empty line(s) for comments
-        if _is_comment_line(line):
-            if echo is True:
-                if quietly:
-                    print("")
-                else:
-                    print(". " + cmds[0])
-            else:
-                print("")
-            return
-
-        # Execute via core path (raw=True preserves whitespace as vendor does)
-        result = execute(line, quietly=quietly, echo=echo, capture=True, raw=True)
-
-        if result.output:
-            print(result.output)
-
-        if result.rc != 0:
-            raise SystemError(result.output or "failed to execute the specified command")
-
-    else:
-        # ---- Multi-line path ----
-        # Resolve echo default
-        if echo is None:
-            echo = config.stconfig.get("cmdshow", "default")
-
-        # Inline graph handling
-        if inline:
-            config.stlib.StataSO_Execute(
-                config._encode("qui _gr_list on"), False
-            )
-
-        # Execute via core path (handles temp-do-file internally, raw=True)
-        result = execute(cmd, quietly=quietly, echo=echo, capture=True, raw=True)
-
-        if result.output:
-            print(result.output)
-
-        if result.rc != 0:
-            raise SystemError(result.output or "failed to execute the specified command")
-
-        if inline:
-            # Graph display would go here in a Jupyter context
-            config.stlib.StataSO_Execute(
-                config._encode("qui _gr_list off"), False
-            )
-
-
-# Vendor comment-detection helper (for single-line only)
-def _is_comment_line(line: str) -> bool:
-    """Return True if *line* is a Stata comment (// or /*...*/).
-
-    Mirrors the vendor logic from ``pystata.stata.run()`` exactly.
-    """
-    if line.startswith("//"):
-        return True
-    if line.startswith("/*"):
-        # Vendor checks: line.strip() ends with '/', last '*' before that
-        # must have only whitespace between it and the '/'
-        if line.endswith("/"):
-            star_pos = line.rfind("*")
-            if star_pos != -1:
-                if line[star_pos:-1].strip() == "*":
-                    return True
-    return False
+    result = execute(cmd, quietly=quietly, echo=echo, capture=True, raw=True)
+    if result.output:
+        print(result.output)
+    if result.rc != 0:
+        raise SystemError(result.output or "failed to execute the specified command")
 
 
 def get_output() -> str:
