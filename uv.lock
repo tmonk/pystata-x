@@ -1259,11 +1259,13 @@ pandas = [
 [package.dev-dependencies]
 dev = [
     { name = "build" },
+    { name = "hatch" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
     { name = "pytest-cov" },
+    { name = "python-semantic-release" },
     { name = "ruff" },
     { name = "twine" },
 ]
@@ -1288,11 +1290,13 @@ provides-extras = ["numpy", "pandas", "dev"]
 [package.metadata.requires-dev]
 dev = [
     { name = "build", specifier = ">=1.3.0" },
+    { name = "hatch", specifier = ">=1.16.2" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-benchmark", specifier = ">=5.2.3" },
     { name = "pytest-cov", specifier = ">=4.0.0" },
+    { name = "python-semantic-release", specifier = ">=9.8.0" },
     { name = "ruff", specifier = ">=0.4.0" },
     { name = "twine", specifier = ">=6.2.0" },
 ]
