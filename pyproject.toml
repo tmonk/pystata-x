@@ -1,6 +1,6 @@
 [project]
 name = "pystata-x"
-version = "0.1.0"
+version = "1.0.0"
 description = "Fast Stata-Python bridge — independent drop-in replacement for pystata."
 readme = "README.md"
 requires-python = ">=3.11"

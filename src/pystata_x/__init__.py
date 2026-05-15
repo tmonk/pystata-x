@@ -18,5 +18,5 @@ from __future__ import annotations
 from pystata_x._core import run, execute, get_output, ExecuteResult
 from pystata_x import _config as config
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __author__ = "Thomas Monk"
