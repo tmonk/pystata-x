@@ -1,0 +1,25 @@
+name: Test Clean Install
+
+on:
+  push:
+    branches:
+      - '*'
+      - '**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clean install test
+        shell: bash
+        run: |
+          echo "hello"
