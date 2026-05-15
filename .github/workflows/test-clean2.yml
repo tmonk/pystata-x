@@ -1,0 +1,32 @@
+name: Test Clean Install 2
+
+on:
+  push:
+    branches:
+      - '*'
+      - '**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test installation in clean environment
+        shell: bash
+        run: |
+          uv run python -m venv test_venv
+          source test_venv/bin/activate
+          pip install dist/*.whl
+          python -c "
+import pystata_x
+print(f'[OK] Import successful (v{pystata_x.__version__})')
+assert pystata_x.__version__ == '0.1.0', f'Version mismatch: {pystata_x.__version__}'
+"
