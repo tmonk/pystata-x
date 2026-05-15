@@ -72,10 +72,10 @@ jobs:
 
           # Test critical imports and version
           python -c "
-import pystata_x
-print(f'[OK] Import successful (v{pystata_x.__version__})')
-assert pystata_x.__version__ == '0.1.0', f'Version mismatch: {pystata_x.__version__}'
-"
+          import pystata_x
+          print(f'[OK] Import successful (v{pystata_x.__version__})')
+          assert pystata_x.__version__ == '0.1.0', f'Version mismatch: {pystata_x.__version__}'
+          "
         timeout-minutes: 10
 
       - name: Upload build artifacts
