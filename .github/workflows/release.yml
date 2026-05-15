@@ -46,7 +46,7 @@ jobs:
 
       - name: Install release dependencies
         run: |
-          uv sync --python 3.14 --dev
+          uv sync --python 3.14 --all-extras --dev
 
       - name: Sync versions across repo
         run: |

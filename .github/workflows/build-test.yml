@@ -36,7 +36,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --python ${{ matrix.python-version }} --dev
+          uv sync --python ${{ matrix.python-version }} --all-extras --dev
         timeout-minutes: 10
 
       - name: Run tests that don't require Stata
