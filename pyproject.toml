@@ -72,11 +72,12 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v -m 'not slow and not requires_stata'"
+addopts = "-v -m 'not slow and not requires_stata and not optional'"
 markers = [
     "requires_stata: marks tests that need Stata installed (deselect with '-m \"not requires_stata\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "fast: marks tests that complete quickly (default run target)",
+    "optional: optional tests that require additional dependencies (excluded from default run, use -m optional to run)",
 ]
 
 [tool.coverage.run]

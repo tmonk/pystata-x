@@ -108,6 +108,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         fspath = Path(item.fspath).resolve()
 
+        # Optional tests (require additional dependencies)
+        if _in_dir(fspath, tests_root / "optional"):
+            item.add_marker(pytest.mark.optional)
+
         # Unit tests are fast
         if _in_dir(fspath, tests_root / "unit"):
             item.add_marker(pytest.mark.fast)
