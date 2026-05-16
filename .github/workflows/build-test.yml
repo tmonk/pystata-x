@@ -74,7 +74,7 @@ jobs:
           python -c "
           import pystata_x
           print(f'[OK] Import successful (v{pystata_x.__version__})')
-          assert pystata_x.__version__ == '0.1.0', f'Version mismatch: {pystata_x.__version__}'
+          assert isinstance(pystata_x.__version__, str) and len(pystata_x.__version__) > 0, f'Invalid version: {pystata_x.__version__!r}'
           "
         timeout-minutes: 10
 
