@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.1.2 (2026-05-16)
+
+### Bug Fixes
+
+- Mark semantic-release versioning tests as optional
+  ([`6574bee`](https://github.com/tmonk/pystata-x/commit/6574bee84cae02d62a095bf3228aef7426d2126e))
+
+
 ## v0.1.1 (2026-05-16)
 
 ### Bug Fixes
