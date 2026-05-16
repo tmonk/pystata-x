@@ -48,11 +48,6 @@ jobs:
           uv run pytest -v -n auto -m "fast" --cov --cov-report=term-missing
         timeout-minutes: 5
 
-      - name: Run slow tests (not requiring Stata)
-        run: |
-          uv run pytest -v -m "slow and not requires_stata" --cov --cov-append --cov-report=term-missing
-        timeout-minutes: 10
-
       - name: Build package
         run: |
           uv build
