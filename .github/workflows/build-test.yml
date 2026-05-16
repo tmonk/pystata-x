@@ -82,7 +82,6 @@ jobs:
 
   test-slow:
     name: Slow tests (py3.14, ${{ matrix.os }})
-    needs: test-fast
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
