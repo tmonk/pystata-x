@@ -15,13 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test (py${{ matrix.python-version }}, ${{ matrix.os }})
+  test-fast:
+    name: Fast tests (py3.14, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
       fail-fast: false
 
     steps:
@@ -36,18 +35,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.14
+        run: uv python install 3.14
 
       - name: Install dependencies
         run: |
-          uv sync --python ${{ matrix.python-version }} --all-extras --dev
+          uv sync --python 3.14 --all-extras --dev
         timeout-minutes: 10
 
-      - name: Run tests that don't require Stata
+      - name: Run fast tests (unit, parallelised, no Stata needed)
         run: |
-          uv run pytest -v -m "not requires_stata"
-        timeout-minutes: 15
+          uv run pytest -v -n auto -m "fast" --cov --cov-report=term-missing
+        timeout-minutes: 5
 
       - name: Build package
         run: |
@@ -57,20 +56,13 @@ jobs:
       - name: Test installation in clean environment
         shell: bash
         run: |
-          # Create fresh venv using the uv-managed Python
           uv run python -m venv test_venv
-
-          # Activate and install
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             source test_venv/Scripts/activate
           else
             source test_venv/bin/activate
           fi
-
-          # Install built wheel
           pip install dist/*.whl
-
-          # Test critical imports and version
           python -c "
           import pystata_x
           print(f'[OK] Import successful (v{pystata_x.__version__})')
@@ -82,8 +74,51 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: build-artifacts-${{ matrix.os }}-py3.14
           path: |
             dist/
+            *.log
+          retention-days: 7
+
+  test-slow:
+    name: Slow tests (py3.14, ${{ matrix.os }})
+    needs: test-fast
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: |
+          uv sync --python 3.14 --all-extras --dev
+        timeout-minutes: 10
+
+      - name: Run slow tests (not requiring Stata)
+        run: |
+          uv run pytest -v -m "slow and not requires_stata" --cov --cov-append --cov-report=term-missing
+        timeout-minutes: 10
+
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-test-artifacts-${{ matrix.os }}
+          path: |
             *.log
           retention-days: 7

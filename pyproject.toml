@@ -40,6 +40,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.6.1",
     "python-semantic-release>=9.8.0",
     "numpy",
     "pandas",
@@ -71,17 +72,27 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=pystata_x --cov-report=term-missing"
+addopts = "-v -m 'not slow and not requires_stata'"
 markers = [
     "requires_stata: marks tests that need Stata installed (deselect with '-m \"not requires_stata\"')",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "fast: marks tests that complete quickly (default run target)",
 ]
+
+[tool.coverage.run]
+source = ["pystata_x"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.6.1",
     "ruff>=0.4.0",
     "build>=1.3.0",
     "hatch>=1.16.2",
