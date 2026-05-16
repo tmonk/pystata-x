@@ -13,23 +13,13 @@ class TestPackageImport:
         import pystata_x
 
     def test_version(self):
-        """The package exposes a __version__ string."""
+        """The package exposes a non-empty __version__ string derived from git tags."""
         import pystata_x
         assert hasattr(pystata_x, "__version__")
         assert isinstance(pystata_x.__version__, str)
-        assert pystata_x.__version__ == "0.1.0"
-
-    def test_version_consistency(self):
-        """The version in pyproject.toml matches the package version."""
-        import tomllib
-        from pathlib import Path
-        import pystata_x
-
-        root = Path(__file__).resolve().parent.parent
-        pyproject = tomllib.loads(
-            (root / "pyproject.toml").read_text(encoding="utf-8")
-        )
-        assert pyproject["project"]["version"] == pystata_x.__version__
+        assert len(pystata_x.__version__) > 0
+        # Version should follow PEP 440 (basic sanity)
+        assert pystata_x.__version__.startswith(("0.", "1.", "2.")) or "dev" in pystata_x.__version__
 
     def test_exposes_core_api(self):
         """The package exposes the expected public API."""

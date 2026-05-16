@@ -15,8 +15,14 @@ statasetup.config()— One-shot Stata initialisation (drop-in for ``stata_setup`
 
 from __future__ import annotations
 
+from importlib.metadata import version as _metadata_version, PackageNotFoundError as _PackageNotFoundError
+
 from pystata_x._core import run, execute, get_output, ExecuteResult
 from pystata_x import _config as config
 
-__version__ = "0.1.0"
+try:
+    __version__ = _metadata_version("pystata-x")
+except _PackageNotFoundError:
+    __version__ = "0.0.0.dev0"
+
 __author__ = "Thomas Monk"
