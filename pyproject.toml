@@ -40,6 +40,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=4.0.0",
+    "python-semantic-release>=9.8.0",
     "numpy",
     "pandas",
 ]
@@ -85,7 +86,13 @@ dev = [
     "build>=1.3.0",
     "hatch>=1.16.2",
     "twine>=6.2.0",
+    "python-semantic-release>=9.8.0",
     "numpy",
     "pandas",
 ]
+
+[tool.semantic_release]
+branch = "main"
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "v{version}"
 

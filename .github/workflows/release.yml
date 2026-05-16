@@ -54,3 +54,8 @@ jobs:
 
       - name: Build package
         run: uv build
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run semantic-release version
