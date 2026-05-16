@@ -16,6 +16,87 @@ import pytest
 pytestmark = pytest.mark.requires_stata
 
 
+from pathlib import Path
+import os
+import platform
+import sys
+
+# Reuse helpers from tests.conftest
+def _find_stata_root() -> Path | None:
+    """Return the first Stata installation root directory found, or None.
+
+    Version-agnostic — searches by directory-name prefix rather than
+    hardcoding version numbers.
+    """
+    system = platform.system()
+    if system == "Windows":
+        prog_files = Path(r"C:\Program Files")
+        if prog_files.is_dir():
+            for entry in sorted(prog_files.iterdir()):
+                if entry.name.upper().startswith("STATA"):
+                    for f in entry.iterdir():
+                        if f.name.endswith("-64.dll") and f.is_file():
+                            return entry
+        return None
+
+    if system == "Darwin":
+        apps = Path("/Applications")
+        if apps.is_dir():
+            for entry in sorted(apps.iterdir()):
+                if "stata" in entry.name.lower():
+                    return entry
+        return None
+
+    # Linux
+    for parent in [Path("/usr/local"), Path("/opt")]:
+        if parent.is_dir():
+            for entry in sorted(parent.iterdir()):
+                if entry.name.lower().startswith("stata"):
+                    return entry
+    return None
+
+
+def _detect_edition(stata_root: Path) -> str:
+    """Detect Stata edition (be/se/mp) from DLL/library name."""
+    system = platform.system()
+    if system == "Windows":
+        for f in stata_root.iterdir():
+            if f.name.endswith("-64.dll") and f.is_file():
+                stem = f.stem.lower()
+                if "mp" in stem:
+                    return "mp"
+                if "se" in stem:
+                    return "se"
+                if "be" in stem:
+                    return "be"
+                return stem.replace("-64", "").replace("stata", "").strip()
+        return "mp"
+
+    if system == "Darwin":
+        name = stata_root.name.lower()
+        if "mp" in name:
+            return "mp"
+        if "se" in name:
+            return "se"
+        if "be" in name:
+            return "be"
+        if "ic" in name:
+            return "se"
+        return "mp"
+
+    # Linux
+    for f in stata_root.iterdir():
+        if f.name.startswith("libstata") and f.suffix == ".so":
+            stem = f.stem.lower()
+            if "mp" in stem:
+                return "mp"
+            if "se" in stem:
+                return "se"
+            if "be" in stem:
+                return "be"
+    return "mp"
+
+
 @pytest.fixture(autouse=True)
 def _ensure_stata(request):
     """Ensure Stata is initialised before each test (and shut down after)."""
@@ -23,53 +104,11 @@ def _ensure_stata(request):
     from pystata_x.stata_setup import config as stata_config
 
     if not config.stinitialized:
-        # Auto-detect Stata — use common paths
-        import sys
-        import platform
-
-        system = platform.system()
-        if system == "Darwin":
-            # Try common macOS Stata paths
-            candidates = [
-                "/Applications/StataMP.app",
-                "/Applications/StataSE.app",
-                "/Applications/StataBE.app",
-                "/Applications/StataNow/StataMP.app",
-                "/Applications/StataNow/StataSE.app",
-            ]
-            for path in candidates:
-                from pathlib import Path
-                if Path(path).exists():
-                    edition = "mp" if "MP" in path else "se" if "SE" in path else "be"
-                    stata_config(path, edition, splash=False)
-                    break
-            else:
-                pytest.skip("No Stata installation found on macOS")
-        elif system == "Windows":
-            candidates = [
-                r"C:\Program Files\Stata18",
-                r"C:\Program Files\Stata17",
-            ]
-            for path in candidates:
-                from pathlib import Path
-                if Path(path).exists():
-                    stata_config(path, "mp", splash=False)
-                    break
-            else:
-                pytest.skip("No Stata installation found on Windows")
-        elif system == "Linux":
-            candidates = [
-                "/usr/local/stata18",
-                "/usr/local/stata17",
-                "/opt/stata",
-            ]
-            for path in candidates:
-                from pathlib import Path
-                if Path(path).exists():
-                    stata_config(path, "mp", splash=False)
-                    break
-            else:
-                pytest.skip("No Stata installation found on Linux")
+        stata_root = _find_stata_root()
+        if stata_root is None:
+            pytest.skip("No Stata installation found")
+        edition = _detect_edition(stata_root)
+        stata_config(str(stata_root), edition, splash=False)
 
     yield
 
@@ -144,7 +183,7 @@ class TestExecuteIntegration:
         from pystata_x._core import execute
         result = execute("display 1+1")
         assert result.rc == 0
-        assert "1" in result.output
+        assert "2" in result.output
 
     def test_execute_error_returns_nonzero_rc(self):
         from pystata_x._core import execute
@@ -160,8 +199,8 @@ class TestExecuteIntegration:
         from pystata_x._core import execute
         result = execute("display 1+1\ndisplay 2+2")
         assert result.rc == 0
-        assert "1" in result.output
         assert "2" in result.output
+        assert "4" in result.output
 
     def test_execute_with_graph_tracking(self):
         from pystata_x._core import execute

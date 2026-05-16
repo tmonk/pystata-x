@@ -60,7 +60,7 @@ source = "vcs"
 packages = ["src/pystata_x"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/tests", "/uv.lock"]
+exclude = ["/tests", "/uv.lock", "/nul", "/NUL"]
 
 [tool.ruff]
 line-length = 100

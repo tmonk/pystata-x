@@ -92,7 +92,8 @@ def _write_temp_do(code: str, suffix: bytes = b"") -> None:
     fd = _ensure_temp_fd()
     bdata = code.encode("utf-8")
     if suffix:
-        bdata = bdata + suffix
+        # Add a newline separator between the user code and the suffix
+        bdata = bdata + b"\n" + suffix
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, bdata)

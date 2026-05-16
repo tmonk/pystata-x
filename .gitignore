@@ -18,3 +18,8 @@ vendor/
 
 # Pi agent state
 .pi/
+
+# Windows reserved names / stray artifacts
+nul
+NUL
+Nul

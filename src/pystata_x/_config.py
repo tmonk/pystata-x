@@ -207,13 +207,16 @@ def init(
     msg = get_output()
     if rc < 0:
         if rc == -7100:
-            stinitialized = False
+            # StataSO_Main returns -7100 when the license check has an issue,
+            # but the Stata engine is still usable.  This matches the original
+            # StataCorp pystata behaviour: print the splash/license message
+            # and continue initialisation.
             print(msg, end="")
-            raise RuntimeError("Stata license check failed (-7100)")
-        raise RuntimeError(f"Stata initialisation failed (rc={rc}):\n{msg}")
-
-    if msg:
-        print(msg, end="")
+        else:
+            raise RuntimeError(f"Stata initialisation failed (rc={rc}):\n{msg}")
+    else:
+        if msg:
+            print(msg, end="")
 
     sthome = st_path
     stinitialized = True

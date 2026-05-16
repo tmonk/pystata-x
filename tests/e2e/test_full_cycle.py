@@ -7,9 +7,90 @@ and shutdown.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.requires_stata
+
+
+def _find_stata_root() -> Path | None:
+    """Return the first Stata installation root directory found, or None.
+
+    Version-agnostic — searches by directory-name prefix rather than
+    hardcoding version numbers.
+    """
+    import platform
+
+    system = platform.system()
+    if system == "Windows":
+        prog_files = Path(r"C:\Program Files")
+        if prog_files.is_dir():
+            for entry in sorted(prog_files.iterdir()):
+                if entry.name.upper().startswith("STATA"):
+                    for f in entry.iterdir():
+                        if f.name.endswith("-64.dll") and f.is_file():
+                            return entry
+        return None
+
+    if system == "Darwin":
+        apps = Path("/Applications")
+        if apps.is_dir():
+            for entry in sorted(apps.iterdir()):
+                if "stata" in entry.name.lower():
+                    return entry
+        return None
+
+    # Linux
+    for parent in [Path("/usr/local"), Path("/opt")]:
+        if parent.is_dir():
+            for entry in sorted(parent.iterdir()):
+                if entry.name.lower().startswith("stata"):
+                    return entry
+    return None
+
+
+def _detect_edition(stata_root: Path) -> str:
+    """Detect Stata edition (be/se/mp) from DLL/library name."""
+    import platform
+
+    system = platform.system()
+    if system == "Windows":
+        for f in stata_root.iterdir():
+            if f.name.endswith("-64.dll") and f.is_file():
+                stem = f.stem.lower()
+                if "mp" in stem:
+                    return "mp"
+                if "se" in stem:
+                    return "se"
+                if "be" in stem:
+                    return "be"
+                return stem.replace("-64", "").replace("stata", "").strip()
+        return "mp"
+
+    if system == "Darwin":
+        name = stata_root.name.lower()
+        if "mp" in name:
+            return "mp"
+        if "se" in name:
+            return "se"
+        if "be" in name:
+            return "be"
+        if "ic" in name:
+            return "se"
+        return "mp"
+
+    # Linux
+    for f in stata_root.iterdir():
+        if f.name.startswith("libstata") and f.suffix == ".so":
+            stem = f.stem.lower()
+            if "mp" in stem:
+                return "mp"
+            if "se" in stem:
+                return "se"
+            if "be" in stem:
+                return "be"
+    return "mp"
 
 
 @pytest.fixture(scope="module")
@@ -17,43 +98,16 @@ def _init_stata():
     """Initialise Stata once per module."""
     from pystata_x.stata_setup import config as stata_config
     from pystata_x import _config as cfg
-    import platform
-    from pathlib import Path
 
     if cfg.stinitialized:
         yield
         return
 
-    system = platform.system()
-    if system == "Darwin":
-        candidates = [
-            "/Applications/StataMP.app",
-            "/Applications/StataSE.app",
-            "/Applications/StataBE.app",
-            "/Applications/StataNow/StataMP.app",
-            "/Applications/StataNow/StataSE.app",
-        ]
-    elif system == "Windows":
-        candidates = [
-            r"C:\Program Files\Stata18",
-            r"C:\Program Files\Stata17",
-        ]
-    elif system == "Linux":
-        candidates = [
-            "/usr/local/stata18",
-            "/usr/local/stata17",
-            "/opt/stata",
-        ]
-    else:
-        pytest.skip(f"Unsupported platform: {system}")
-
-    for path in candidates:
-        if Path(path).exists():
-            edition = "mp" if "MP" in path else "se" if "SE" in path else "be"
-            stata_config(path, edition, splash=False)
-            break
-    else:
+    stata_root = _find_stata_root()
+    if stata_root is None:
         pytest.skip("No Stata installation found")
+    edition = _detect_edition(stata_root)
+    stata_config(str(stata_root), edition, splash=False)
 
     yield
 
