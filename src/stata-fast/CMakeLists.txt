@@ -46,16 +46,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_compile_definitions(_POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
 endif()
 
-if(MSVC)
-    # MSVC is not C99-compliant by default; we still ask for it, but the
-    # real compatibility is provided by the Universal CRT runtime library.
-    # Silence deprecation warnings for POSIX names (snprintf, strdup, etc.)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    target_compile_options(stata_fast PRIVATE /W4)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
 # ── Library target ─────────────────────────────────────────────────────────
 
 add_library(stata_fast SHARED
@@ -67,6 +57,18 @@ target_include_directories(stata_fast
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+# ── Compiler flags (must be set after add_library) ─────────────────────────
+
+if(MSVC)
+    # MSVC is not C99-compliant by default; we still ask for it, but the
+    # real compatibility is provided by the Universal CRT runtime library.
+    # Silence deprecation warnings for POSIX names (snprintf, strdup, etc.)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    target_compile_options(stata_fast PRIVATE /W4)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 # Platform-specific link dependencies
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
