@@ -26,6 +26,7 @@ from pathlib import Path
 _lib: ctypes.CDLL | None = None   # The loaded libstata_fast shared library
 _ctx: ctypes.c_void_p | None = None  # Opaque C context handle
 _loaded: bool = False              # True after stata_load completes
+_engine_running: bool = False      # True after StataSO_Main (init engine) finishes
 
 # ---------------------------------------------------------------------------
 # Load the C library
@@ -125,7 +126,7 @@ def _load_lib() -> ctypes.CDLL:
 def load(st_path: str, edition: str = "se") -> None:
     """Pre-load libstata (dlopen + dlsym).  Call before :func:`init`
     for minimal init latency (~9 ms vs ~20 ms combined)."""
-    global _ctx, _loaded
+    global _ctx, _loaded, _engine_running
     if _loaded:
         return
     lib = _load_lib()
@@ -135,6 +136,7 @@ def load(st_path: str, edition: str = "se") -> None:
         err = lib.stata_last_error(None) or "unknown error"
         raise RuntimeError(f"stata_load failed: {err}")
     _loaded = True
+    _engine_running = False  # Engine not yet started
 
 
 def init(st_path: str, edition: str = "se", splash: bool = False) -> None:
@@ -143,8 +145,8 @@ def init(st_path: str, edition: str = "se", splash: bool = False) -> None:
     If :func:`load` was called first, only StataSO_Main runs (~9 ms).
     Otherwise loads library first then inits engine (~20 ms total).
     """
-    global _ctx, _loaded
-    if _ctx is not None:
+    global _ctx, _loaded, _engine_running
+    if _engine_running:
         return
 
     lib = _load_lib()
@@ -178,6 +180,7 @@ def init(st_path: str, edition: str = "se", splash: bool = False) -> None:
             err = lib.stata_last_error(None) or "unknown error"
             raise RuntimeError(f"stata_init failed: {err}")
         _loaded = True
+    _engine_running = True
 
 
 def _ensure_ctx():
