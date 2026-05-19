@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/compile_check.dir/compile_check.c.o -o compile_check  -Wl,-rpath,/Users/tom/projects/pystata-x/src/stata-fast/build2 libstata_fast.dylib

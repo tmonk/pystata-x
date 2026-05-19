@@ -2,6 +2,13 @@
 #
 # Makefile for libstata_fast — lightweight C wrapper around libstata.
 #
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  CMake is the PRIMARY build system for cross-platform work.    ║
+# ║  This Makefile is kept for convenience during local iteration  ║
+# ║  on macOS/Linux.  For Linux, Windows, and CI use:             ║
+# ║    cmake -S . -B build && cmake --build build                  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
 # Targets
 #   make          — build shared library
 #   make test     — build and run unit tests

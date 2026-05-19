@@ -64,36 +64,34 @@ exclude = ["/tests", "/uv.lock", "/nul", "/NUL", "*.dylib", "*.so", "*.dll"]
 
 # ── cibuildwheel: pre-built cross-platform wheels ──────────────────────
 [tool.cibuildwheel]
-# Build the C library before each wheel build
-before-all = [
-  "cmake -S src/stata-fast -B src/stata-fast/build -G 'Ninja' -DSTATA_PATH=/usr/local/stata -DSTATA_EDITION=se"
-]
+# Common before-build steps (copy compiled library into wheel)
 before-build = [
   "cmake --build src/stata-fast/build",
   "python3 scripts/copy_lib_to_package.py"
 ]
 
-# Supported platforms
+# Platform-specific CMake configure (stub STATA_PATH — actual Stata not needed
+# for compilation; tests won't run but the library compiles and links).
 [[tool.cibuildwheel.overrides]]
 select = ".*linux_x86_64.*"
 archs = ["x86_64"]
+before-all = [
+  "cmake -S src/stata-fast -B src/stata-fast/build -DSTATA_PATH=/usr/local/stata -DSTATA_EDITION=se"
+]
 
 [[tool.cibuildwheel.overrides]]
-select = ".*macosx.*arm64.*"
-archs = ["arm64"]
+select = ".*macosx.*"
+archs = ["arm64", "x86_64"]
+before-all = [
+  "cmake -S src/stata-fast -B src/stata-fast/build -DSTATA_PATH=/Applications/StataNow -DSTATA_EDITION=se"
+]
 
 [[tool.cibuildwheel.overrides]]
-select = ".*macosx.*x86_64.*"
-archs = ["x86_64"]
-
-[[tool.cibuildwheel.overrides]]
-select = ".*win_amd64.*"
-archs = ["AMD64"]
-
-[[tool.cibuildwheel.overrides]]
-select = ".*win_arm64.*"
-archs = ["ARM64"]
-# Windows ARM cross-compilation: requires MSVC ARM64 toolchain
+select = ".*win_.*"
+archs = ["AMD64", "ARM64"]
+before-all = [
+  "cmake -S src/stata-fast -B src/stata-fast/build -DSTATA_PATH=C:\\Program Files\\Stata -DSTATA_EDITION=se"
+]
 # (installed via Visual Studio Build Tools with "Desktop development for C++"
 #  workload + "C++ ARM64 build tools" component)
 
