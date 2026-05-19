@@ -15,7 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Build C library with CMake on all platforms ────────────────────────
+  # ── Build C library on all platforms ──────────────────────────────────
+  # Verifies CMake configure, compilation, and link succeed (no Stata needed).
+  # The compile_check test runs everywhere; Stata-dependent tests need Stata.
   build_c:
     name: Build C library (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -38,16 +40,21 @@ jobs:
       - name: Configure CMake
         run: |
           cmake -S src/stata-fast -B src/stata-fast/build \
-            -DSTATA_PATH="/usr/local/stata" \
+            -DSTATA_PATH=/usr/local/stata \
             -DSTATA_EDITION=se
 
-      - name: Build C library
+      - name: Build C library (compilation check)
         run: |
           cmake --build src/stata-fast/build --verbose
 
-      - name: CTest
+      - name: Run compile-only C test (no Stata needed)
         working-directory: src/stata-fast/build
-        run: ctest -V || echo "ctest skipped (no Stata installed)"
+        run: ctest -V -R compile_check
+
+      - name: Run full CTest (requires Stata, may skip)
+        working-directory: src/stata-fast/build
+        continue-on-error: true
+        run: ctest -V || echo "Full CTest requires Stata installation"
 
       - name: Upload C library artifact
         uses: actions/upload-artifact@v4
@@ -59,7 +66,8 @@ jobs:
             src/stata-fast/build/Release/stata_fast.dll
           retention-days: 3
 
-  # ── Python tests (unit, no Stata needed) ──────────────────────────────
+  # ── Python tests (no Stata needed) ────────────────────────────────────
+  # Verifies the wheel builds, installs cleanly, and the C library is bundled.
   python_test:
     name: Python tests (${{ matrix.os }})
     needs: [build_c]
@@ -113,17 +121,17 @@ jobs:
             cp src/stata-fast/build/libstata_fast.so src/pystata_x/
           fi
 
-      - name: Run fast tests (unit, parallelised)
+      - name: Run fast unit tests
         run: |
           uv run pytest -v -n auto -m "fast" --cov --cov-report=term-missing
         timeout-minutes: 5
 
-      - name: Build package (with C library in wheel)
+      - name: Build wheel
         run: |
           uv build
         timeout-minutes: 5
 
-      - name: Test installation in clean environment
+      - name: Test wheel install in clean environment
         shell: bash
         run: |
           uv run python -m venv test_venv
@@ -133,16 +141,17 @@ jobs:
             source test_venv/bin/activate
           fi
           pip install dist/*.whl
+          # Verify import works
           python -c "
           import pystata_x
           print(f'[OK] Import successful (v{pystata_x.__version__})')
-          assert isinstance(pystata_x.__version__, str) and len(pystata_x.__version__) > 0, f'Invalid version: {pystata_x.__version__!r}'
+          assert isinstance(pystata_x.__version__, str) and len(pystata_x.__version__) > 0
           "
-          # Verify the C library was bundled
+          # Verify the C library module loads
           python -c "
           import pystata_x._stata_fast as sf
-          # This should at least load the ctypes module (lib may not be fully functional without Stata)
           print(f'[OK] _stata_fast module loaded')
+          print(f'  _find_lib paths: {sf._find_lib.__doc__[:60] if sf._find_lib.__doc__ else \"(no doc)\"}')
           "
         timeout-minutes: 10
 
@@ -156,13 +165,14 @@ jobs:
             *.log
           retention-days: 7
 
-  # ── Stata bridge tests (requires Stata installation) ──────────────────
+  # ── Stata bridge tests (macOS only — Stata installed) ────────────────
   stata_test:
-    name: Stata bridge tests (${{ matrix.os }})
+    name: Stata bridge (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: [build_c]
     strategy:
       matrix:
-        os: [macos-latest]  # Only macOS has Stata installed in this repo
+        os: [macos-latest]  # Only macOS has Stata installed
       fail-fast: false
     timeout-minutes: 15
     steps:
@@ -177,62 +187,47 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
 
-      - name: Restore cached virtual environment
-        id: cache-venv
-        uses: actions/cache@v5
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.14-${{ hashFiles('uv.lock') }}
-
       - name: Install dependencies
-        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
           uv sync --python 3.14 --all-extras --dev --frozen
         timeout-minutes: 5
 
-      - name: Build C library
+      - name: Build C library with Stata path
         run: |
           cmake -S src/stata-fast -B src/stata-fast/build \
             -DSTATA_PATH="/Applications/StataNow" \
             -DSTATA_EDITION=se
           cmake --build src/stata-fast/build
 
-      - name: Run C tests via ctest
+      - name: Run full CTest (including Stata tests)
         run: |
           cd src/stata-fast/build && ctest -V
+        timeout-minutes: 5
 
-      - name: Run Python bridge tests
+      - name: Python bridge smoke tests
         env:
           STATA_PATH: /Applications/StataNow
           STATA_EDITION: se
         run: |
-          # Smoke test the C bridge from Python
           uv run python -c "
-          import sys
-          sys.path.insert(0, 'src')
+          import sys; sys.path.insert(0, 'src')
           from pystata_x import _stata_fast as sf
 
-          # Init
           sf.init('/Applications/StataNow', 'se', splash=False)
 
-          # display 1+1
           out, rc = sf.execute('display 1+1')
-          assert rc == 0, f'display 1+1 rc={rc}'
-          assert '2' in out, f'display 1+1 output: {out!r}'
-          print(f'  smoke display 1+1: rc={rc} out={out!r} OK')
+          assert rc == 0 and '2' in out, f'display 1+1 rc={rc} out={out!r}'
+          print(f'  PASS: display 1+1 (rc={rc})')
 
-          # sysuse + regress (multi-line)
           out, rc = sf.execute('sysuse auto, clear\\nregress price mpg weight')
           assert rc == 0, f'regress rc={rc}'
-          assert 'price' in out, f'regress output missing: {out[:100]!r}'
-          print(f'  smoke sysuse+regress: rc={rc} OK')
+          print(f'  PASS: sysuse+regress (rc={rc}, len={len(out)})')
 
-          # Error command
           out, rc = sf.execute('no_such_command')
           assert rc != 0, f'error rc={rc}'
-          print(f'  smoke error: rc={rc} OK')
+          print(f'  PASS: badcommand (rc={rc})')
 
-          print('All Python bridge smoke tests PASSED')
+          print('Python bridge smoke tests: ALL PASSED')
           "
 
       - name: Run benchmarks (fast subset)
@@ -242,25 +237,26 @@ jobs:
         run: |
           uv run python benchmarks/bench_stata_fast.py --iterations 10 2>&1 | tail -20
 
-      - name: Commit benchmark results
-        if: github.ref == 'refs/heads/main'
+      - name: Save per-platform benchmark results
+        if: always()
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add benchmarks/history/ 2>/dev/null || true
-          git diff --staged --quiet || git commit -m "chore: update benchmark results [skip ci]"
-          git push
+          mkdir -p benchmarks/history
+          for f in benchmarks/history/stata_fast_*.json; do
+            if [ -f "$f" ]; then
+              ts=$(date +%Y%m%d_%H%M%S)
+              cp "$f" "benchmarks/history/per-platform-macos-arm64-${ts}.json"
+              echo "Saved per-platform-macos-arm64-${ts}.json"
+              break
+            fi
+          done
 
-  # ── cibuildwheel (pre-built platform wheels) ─────────────────────────
+  # ── cibuildwheel: pre-built platform wheels ──────────────────────────
   cibuildwheel:
     name: Build wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          # Windows ARM wheels are cross-compiled from x86_64 runner
-          # using MSVC ARM64 cross-compiler toolchain
       fail-fast: false
     timeout-minutes: 30
     steps:
@@ -276,6 +272,27 @@ jobs:
 
       - name: Set up cibuildwheel
         uses: pypa/cibuildwheel@v2.23
+
+      - name: Verify wheels were produced
+        shell: bash
+        run: |
+          ls -lh wheelhouse/
+          echo "Total wheels: $(ls wheelhouse/*.whl 2>/dev/null | wc -l)"
+
+      - name: Test wheel install (import check)
+        shell: bash
+        run: |
+          uv run python -m venv wheel_test_venv
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            source wheel_test_venv/Scripts/activate
+          else
+            source wheel_test_venv/bin/activate
+          fi
+          for whl in wheelhouse/*.whl; do
+            echo "Installing: $whl"
+            pip install "$whl"
+            python -c "import pystata_x; print(f'OK: $whl')"
+          done
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

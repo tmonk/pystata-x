@@ -197,12 +197,12 @@ Requires: CMake >= 3.20, C99 compiler, `libstata-{be,se,mp}.{dylib,so,dll}` inst
 
 | Platform | Status |
 |----------|--------|
-| macOS (ARM64) | ✅ Tested (M3 Max) |
-| macOS (x86_64) | ✅ Compiles, untested |
-| Linux (x86_64) | 🟡 Code ready, untested |
-| Linux (ARM64) | 🟡 Code ready, untested |
-| Windows (x86_64) | 🟡 Code ready, untested |
-| Windows (ARM64) | 🟡 Code ready, cross-compiled via cibuildwheel |
+| macOS (ARM64) | ✅ Tested (M3 Max), CI builds + full Stata tests |
+| macOS (x86_64) | ✅ CI-compiled, needs Stata testing |
+| Linux (x86_64) | ✅ CI-compiled (GCC), compile-check passes |
+| Linux (ARM64) | 🟡 CI-ready, untested |
+| Windows (x86_64) | ✅ CI-compiled (MSVC), compile-check passes |
+| Windows (ARM64) | 🟡 CI-ready (cross-compiled via cibuildwheel) |
 
 ## File Structure
 

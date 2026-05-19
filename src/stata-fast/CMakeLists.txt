@@ -90,9 +90,23 @@ elseif(APPLE)
     )
 endif()
 
-# ── Test executable ────────────────────────────────────────────────────────
+# ── Compilation smoke test (no Stata needed) ─────────────────────────────
 
 enable_testing()
+
+# This executable only verifies the header compiles and the library links.
+# It does NOT call any Stata API function, so it runs without Stata installed.
+add_executable(compile_check
+    compile_check.c
+)
+target_link_libraries(compile_check PRIVATE stata_fast)
+
+add_test(NAME compile_check
+    COMMAND compile_check
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── Test executable (requires Stata at runtime) ────────────────────────────
 
 add_executable(test_stata_fast
     test_stata_fast.c
@@ -114,6 +128,12 @@ set_tests_properties(test_stata_fast PROPERTIES
     ENVIRONMENT "STATA_PATH=${STATA_PATH};STATA_EDITION=${STATA_EDITION}"
 )
 
+# Disable Stata-dependent test on CI where Stata is unavailable
+# (tests still run when STATA_PATH points to a valid installation)
+set_property(TEST test_stata_fast PROPERTY
+    SKIP_RETURN_CODE 77
+)
+
 # ── Installation ───────────────────────────────────────────────────────────
 
 include(GNUInstallDirs)
@@ -126,7 +146,7 @@ install(TARGETS stata_fast
 install(FILES stata_fast.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-install(TARGETS test_stata_fast
+install(TARGETS test_stata_fast compile_check
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     OPTIONAL
 )
