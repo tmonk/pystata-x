@@ -277,7 +277,7 @@ def _read_elf_syms(path: str) -> dict[str, int]:
         (e_ident, e_type, e_machine, e_version, e_entry,
          e_phoff, e_shoff, e_flags, e_ehsize, e_phentsize,
          e_phnum, e_shentsize, e_shnum, e_shstrndx) = struct.unpack(
-            endian + "16sHHIIQQQIHHHH", ehdr
+            endian + "16sHHIQQQIHHHHHH", ehdr
         )
 
         # Read section header string table
@@ -853,7 +853,7 @@ def _add_elf_metadata(path: str, manifest: dict) -> None:
         (e_ident, e_type, e_machine, e_version, e_entry,
          e_phoff, e_shoff, e_flags, e_ehsize, e_phentsize,
          e_phnum, e_shentsize, e_shnum, e_shstrndx) = struct.unpack(
-            endian + "16sHHIIQQQIHHHH", ehdr
+            endian + "16sHHIQQQIHHHHHH", ehdr
         )
 
         f.seek(e_shoff + e_shstrndx * e_shentsize)
