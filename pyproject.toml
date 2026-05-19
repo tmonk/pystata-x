@@ -64,6 +64,10 @@ exclude = ["/tests", "/uv.lock", "/nul", "/NUL", "*.dylib", "*.so", "*.dll"]
 
 # ── cibuildwheel: pre-built cross-platform wheels ──────────────────────
 [tool.cibuildwheel]
+# Top-level before-all (fallback for any un-matched platform)
+before-all = [
+  "cmake -S src/stata-fast -B src/stata-fast/build -DSTATA_PATH=/usr/local/stata -DSTATA_EDITION=se"
+]
 # Common before-build steps (copy compiled library into wheel)
 before-build = [
   "cmake --build src/stata-fast/build",
@@ -72,8 +76,10 @@ before-build = [
 
 # Platform-specific CMake configure (stub STATA_PATH — actual Stata not needed
 # for compilation; tests won't run but the library compiles and links).
+# The select pattern matches cibuildwheel build identifiers like
+# cp312-manylinux_x86_64, cp312-macosx_arm64, cp312-win_amd64.
 [[tool.cibuildwheel.overrides]]
-select = ".*linux_x86_64.*"
+select = ".*manylinux.*|.*musllinux.*"
 archs = ["x86_64"]
 before-all = [
   "cmake -S src/stata-fast -B src/stata-fast/build -DSTATA_PATH=/usr/local/stata -DSTATA_EDITION=se"

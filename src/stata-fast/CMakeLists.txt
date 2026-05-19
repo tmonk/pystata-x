@@ -51,7 +51,7 @@ if(MSVC)
     # real compatibility is provided by the Universal CRT runtime library.
     # Silence deprecation warnings for POSIX names (snprintf, strdup, etc.)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    target_compile_options(libstata_fast PRIVATE /W4)
+    target_compile_options(stata_fast PRIVATE /W4)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
