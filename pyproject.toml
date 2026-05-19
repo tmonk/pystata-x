@@ -22,7 +22,8 @@ classifiers = [
 ]
 dependencies = [
     # capstone for ARM64 instruction decoding (archived manifest + auto-detect)
-    "capstone>=5.0.0",
+    # capstone>=6.0.0a5+ provides abi3 wheels for all platforms (including win_arm64)
+    "capstone>=6.0.0a5",
 ]
 
 [project.urls]
