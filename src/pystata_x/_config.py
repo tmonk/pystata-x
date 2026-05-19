@@ -19,11 +19,8 @@ from __future__ import annotations
 
 import atexit
 import os
-import platform
 import sys
 from ctypes import cdll, c_char_p, c_int, POINTER
-from pathlib import Path
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -64,8 +61,12 @@ def _decode(b: bytes | None) -> str:
         return b.decode("utf-8", errors="replace")
 
 
-def _find_lib(st_home: str, edition: str, os_system: str) -> str | None:
+def _find_lib(st_home: str, edition: str, os_system: str = "") -> str | None:
     """Locate the Stata shared library.  Returns absolute path or None."""
+    import platform
+
+    if not os_system:
+        os_system = platform.system()
     if os_system == "Windows":
         lib_name = f"{edition}-64.dll"
         lib_path = os.path.join(st_home, lib_name)
@@ -94,6 +95,8 @@ def _find_lib(st_home: str, edition: str, os_system: str) -> str | None:
 
 def _get_st_home(from_file: str | None = None) -> str:
     """Auto-detect Stata home by walking up from a known path."""
+    from pathlib import Path
+
     if from_file is None:
         from_file = os.path.normpath(os.path.abspath(__file__))
 
@@ -188,7 +191,7 @@ def init(
 
     os.environ["SYSDIR_STATA"] = st_path
 
-    lib_path = _find_lib(st_path, edition, platform.system())
+    lib_path = _find_lib(st_path, edition)
     if lib_path is None:
         raise FileNotFoundError(
             f"Cannot find Stata shared library for edition '{edition}' "
@@ -203,21 +206,6 @@ def init(
     except Exception as exc:
         raise RuntimeError(f"Failed to load Stata shared library: {exc}")
 
-    rc = _init_stata(splash)
-    msg = get_output()
-    if rc < 0:
-        if rc == -7100:
-            # StataSO_Main returns -7100 when the license check has an issue,
-            # but the Stata engine is still usable.  This matches the original
-            # StataCorp pystata behaviour: print the splash/license message
-            # and continue initialisation.
-            print(msg, end="")
-        else:
-            raise RuntimeError(f"Stata initialisation failed (rc={rc}):\n{msg}")
-    else:
-        if msg:
-            print(msg, end="")
-
     sthome = st_path
     stinitialized = True
     stsplash = splash
@@ -226,15 +214,43 @@ def init(
     stconfig["streamout"] = "on" if streamout else "off"
 
     # On macOS, work around KMP duplicate-lib issue for MP edition
-    if platform.system() == "Darwin" and edition == "mp":
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
+    if edition == "mp":
+        import platform as _platform
+        if _platform.system() == "Darwin":
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
+
+    # Bootstrap the Stata engine immediately (StataSO_Main).
+    # This is the single most expensive init step (~75-85 ms) but
+    # ensures the first execute() / run() call is equally fast.
+    rc = _init_stata(splash)
+    msg = get_output()
+    if rc < 0:
+        if rc == -7100:
+            print(msg, end="")
+        else:
+            raise RuntimeError(
+                f"Stata engine bootstrap failed (rc={rc}):\n{msg}"
+            )
+    else:
+        if msg:
+            print(msg, end="")
 
     # Read Stata version
     try:
-        import sfi
+        import sfi  # type: ignore[import-untyped]
         stversion = str(sfi.Scalar.getValue("c(stata_version)"))
     except Exception:
         stversion = ""
+
+
+def bootstrap_stata_engine() -> None:
+    """Ensure the Stata C engine has been bootstrapped.
+
+    This is a no-op after :func:`init` — the engine bootstrap is
+    performed during ``init()`` so that the first ``execute()`` /
+    ``run()`` call has no additional startup latency.
+    """
+    pass
 
 
 def check_initialized() -> None:
