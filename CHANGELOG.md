@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.1.3 (2026-05-19)
+
+### Continuous Integration
+
+- **release**: Remove redundant PyPI publish workflow dispatch
+  ([`70f55e3`](https://github.com/tmonk/pystata-x/commit/70f55e35fd07f6544abf423b5b71dc9d8b4a0e27))
+
+### Performance Improvements
+
+- **init**: Defer engine bootstrap to reduce config latency
+  ([`2f0781a`](https://github.com/tmonk/pystata-x/commit/2f0781a3609716a089c00ef9d13c2834e941c388))
+
+- **init**: Inline engine bootstrap for fast first execute
+  ([`bcd7b4a`](https://github.com/tmonk/pystata-x/commit/bcd7b4a14a8ee04c4112c56de80fee05cc524dbd))
+
+### Testing
+
+- **perf**: Add cold-start initialization benchmark
+  ([`035c99b`](https://github.com/tmonk/pystata-x/commit/035c99bcdde402702f417fedc653acbeb08ee346))
+
+
 ## perf/init-10x (unreleased — exploration branch)
 
 ### Performance
