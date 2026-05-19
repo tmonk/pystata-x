@@ -291,6 +291,8 @@ class TestCallStoreString:
 class TestCallSetScalar:
     @patch("pystata_x.sfi._engine._PLATFORM", "arm64")
     def test_arm64_set_scalar(self, eng):
+        # Add _stscalsave to SYMS so _sym_addr finds it
+        eng._SYMS["_stscalsave"] = 0x79c820
         # Mock CFUNCTYPE cast for _stscalsave
         mock_fn = MagicMock(return_value=0)
         eng.ctypes.cast.return_value = mock_fn
@@ -307,6 +309,9 @@ class TestCallSetScalar:
 class TestCallSetStrScalar:
     @patch("pystata_x.sfi._engine._PLATFORM", "arm64")
     def test_arm64_set_strscalar(self, eng):
+        # Add symbols to SYMS so _sym_addr finds them
+        eng._SYMS["_xgso_newcp_fast_code"] = 0x8a9e84
+        eng._SYMS["_put_xgso_scalar"] = 0x6c9340
         # Two casts: xgso_fn and put_fn
         mock_xgso = MagicMock(return_value=0xDEAD)
         mock_put = MagicMock(return_value=0)
@@ -320,6 +325,8 @@ class TestCallSetStrScalar:
 
     @patch("pystata_x.sfi._engine._PLATFORM", "arm64")
     def test_xgso_fails(self, eng):
+        eng._SYMS["_xgso_newcp_fast_code"] = 0x8a9e84
+        eng._SYMS["_put_xgso_scalar"] = 0x6c9340
         mock_xgso = MagicMock(return_value=0)  # NULL GSO
         mock_put = MagicMock(return_value=0)
         eng.ctypes.cast.side_effect = [mock_xgso, mock_put]
@@ -360,13 +367,19 @@ class TestCallCreateValuelabel:
 
 
 class TestReadCounts:
+    @patch("pystata_x.sfi._engine._PLATFORM", "arm64")
     def test_read_obs_count(self, eng):
-        eng.ctypes.c_int32.from_address.return_value.value = 74
+        eng._arm64_setup_push_fns()  # sets up _pushint_fn etc
+        eng._arm64_pop_and_read_double.return_value = 74.0
         assert eng.read_obs_count() == 74
+        eng._arm64_pop_and_read_double.assert_called_once()
 
+    @patch("pystata_x.sfi._engine._PLATFORM", "arm64")
     def test_read_var_count(self, eng):
-        eng.ctypes.c_int32.from_address.return_value.value = 12
+        eng._arm64_setup_push_fns()
+        eng._arm64_pop_and_read_double.return_value = 12.0
         assert eng.read_var_count() == 12
+        eng._arm64_pop_and_read_double.assert_called_once()
 
 
 # ── ARM64 argument type dispatch ─────────────────────────────────

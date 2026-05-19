@@ -563,27 +563,192 @@ def discover_symbols(path: str) -> dict[str, int]:
 
 
 def filter_bist_symbols(symbols: dict) -> dict[str, int]:
-    """Filter symbol dict to retain only _bist_* and related symbols.
+    """Filter symbol dict to retain all needed symbols for _engine.py.
 
     Includes:
     - _bist_*
     - _bi_st_*
-    - _pushint, _pushdbl, _pushstr, _pushflt
     - _StataSO_*
     - _stpy_* (reference markers, these need embedded Python)
-    - _m_mktsmatsto, _m_tsmatreal_element, _m_tsmat_char_val, _getmaxstack
+    - Private internal functions used by the engine for scalar/matrix ops
 
     Returns filtered dict.
     """
+    # Known private internal functions used in _engine.py / _core.py.
+    # These are non-external ("was a private external") symbols found via
+    # nm -m on the dylib.  Not all exist in every Stata version; the
+    # auto-generation only includes those that are actually present.
+    _EXTRA_SYMS: set[str] = {
+        # Push/stack helpers (standard ARM64 ABI)
+        "_pushint", "_pushdbl", "_pushstr", "_pushflt",
+        # Matrix type support
+        "_m_mktsmatsto",
+        # Scalar set operations (standard ARM64 ABI, not internal stack)
+        "_stscalsave",           # call_set_scalar()
+        "_xgso_newcp_fast_code", # call_set_strscalar() — create GSO from string
+        "_put_xgso_scalar",      # call_set_strscalar() — put GSO as scalar
+    }
     filtered = {}
     for name, addr in symbols.items():
         if name.startswith("_bist_") or name.startswith("_bi_st_") or \
            name.startswith("_StataSO_") or name.startswith("_stpy_") or \
-           name in ("_pushint", "_pushdbl", "_pushstr", "_pushflt",
-                    "_m_mktsmatsto", "_m_tsmatreal_element",
-                    "_m_tsmat_char_val", "_getmaxstack"):
+           name in _EXTRA_SYMS:
             filtered[name] = addr
     return filtered
+
+
+def _find_macho_text_slice(raw_bytes: bytes) -> Optional[tuple[bytes, int]]:
+    """Extract the thin Mach-O arm64 slice from a (possibly fat) binary.
+
+    Returns (thin_bytes, slice_offset_in_file) or None if not found.
+    slice_offset_in_file is the file offset of the thin Mach-O start.
+    """
+    if len(raw_bytes) < 4:
+        return None
+    fat_magic_le = struct.unpack("<I", raw_bytes[:4])[0]
+    is_fat = fat_magic_le == FAT_CIGAM or raw_bytes[:4] == b"\xca\xfe\xba\xbe"
+
+    slice_start = 0
+    if is_fat:
+        # FAT_MAGIC is big-endian
+        fat_endian = ">"
+        narch = struct.unpack(fat_endian + "I", raw_bytes[4:8])[0]
+        target_cputype = _current_macho_cputype()
+        for i in range(narch):
+            entry_off = 8 + i * 20
+            cputype = struct.unpack(fat_endian + "I", raw_bytes[entry_off:entry_off + 4])[0]
+            if cputype == target_cputype:
+                slice_start = struct.unpack(fat_endian + "I", raw_bytes[entry_off + 8:entry_off + 12])[0]
+                break
+        if slice_start == 0:
+            return None
+        thin_bytes = raw_bytes[slice_start:]
+    else:
+        thin_bytes = raw_bytes
+    return thin_bytes, slice_start
+
+
+def _macho_vmaddr_to_fileoff(thin_bytes: bytes, vmaddr: int) -> Optional[int]:
+    """Convert a vmaddr to file offset in a thin Mach-O binary."""
+    if len(thin_bytes) < 32:
+        return None
+    ncmds = struct.unpack_from("<I", thin_bytes, 16)[0]
+    offset = 32  # after mach_header_64
+    for _ in range(ncmds):
+        if offset + 8 > len(thin_bytes):
+            return None
+        cmd, cmdsz = struct.unpack_from("<II", thin_bytes, offset)
+        if cmd == 0x19:  # LC_SEGMENT_64
+            segname = thin_bytes[offset + 8:offset + 24].decode().rstrip("\x00")
+            vmaddr_seg = struct.unpack_from("<Q", thin_bytes, offset + 24)[0]
+            fileoff_seg = struct.unpack_from("<Q", thin_bytes, offset + 40)[0]
+            vmsize = struct.unpack_from("<Q", thin_bytes, offset + 32)[0]
+            if vmaddr_seg <= vmaddr < vmaddr_seg + vmsize:
+                return vmaddr - vmaddr_seg + fileoff_seg
+        offset += cmdsz
+    return None
+
+
+def discover_data_offsets(path: str) -> Optional[dict]:
+    """Discover STACK_PTR_OFFSET and ERR_ADDR_RELATIVE from ARM64 binary disassembly.
+
+    Uses capstone to disassemble _pushdbl and _st_store_u, extracting
+    the runtime data page base and field offsets from adrp+add pairs.
+
+    Returns dict with "stack_ptr_delta" and "err_addr_delta" (int, delta from _BASE),
+    or None for non-ARM64 binaries or if discovery fails.
+    """
+    import capstone as cs
+
+    all_syms = discover_symbols(path)
+    if "_pushdbl" not in all_syms or "_st_store_u" not in all_syms:
+        return None  # Not ARM64 or missing required symbols
+
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    result = _find_macho_text_slice(raw)
+    if result is None:
+        return None  # Not a Mach-O binary
+    thin_bytes, slice_offset = result
+
+    # Known data page base (confirmed: shared between _pushdbl and _st_store_u)
+    adrp_page: Optional[int] = None
+    stack_ptr_delta: Optional[int] = None
+    err_addr_delta: Optional[int] = None
+
+    md = cs.Cs(cs.CS_ARCH_ARM64, cs.CS_MODE_ARM)
+
+    # Need to track: for each function, find adrp+add pairs that reference
+    # the runtime data page and record the computed delta (page + field offset).
+    # Both _pushdbl and _st_store_u use the same page base.
+    for fn_name in ("_pushdbl", "_st_store_u"):
+        vm = all_syms.get(fn_name)
+        if vm is None:
+            continue
+        foff = _macho_vmaddr_to_fileoff(thin_bytes, vm)
+        if foff is None:
+            continue
+        fn_bytes = raw[slice_offset + foff:slice_offset + foff + 256]
+
+        # Track adrp targets: {register_name: page}
+        adrp_regs: dict[str, int] = {}
+        for insn in md.disasm(fn_bytes, vm):
+            if insn.mnemonic == "adrp":
+                # Parse: "adrp x8, #0x39b7000"
+                parts = insn.op_str.split(",")
+                if len(parts) >= 2:
+                    reg = parts[0].strip()
+                    target_str = parts[1].strip()
+                    if target_str.startswith("#0x"):
+                        page = int(target_str[1:], 16)
+                    elif target_str.startswith("#"):
+                        page = int(target_str[1:])
+                    else:
+                        continue
+                    adrp_regs[reg] = page
+
+            if insn.mnemonic == "add" and insn.op_str.count(",") >= 2:
+                parts = insn.op_str.split(",")
+                dst_reg = parts[0].strip()
+                src_reg = parts[1].strip()
+                imm_part = parts[2].strip()
+                if dst_reg in adrp_regs and src_reg == dst_reg:
+                    if imm_part.startswith("#0x"):
+                        imm_val = int(imm_part[1:], 16)
+                    elif imm_part.startswith("#"):
+                        imm_val = int(imm_part[1:])
+                    else:
+                        continue
+                    page = adrp_regs[dst_reg]
+                    delta = page + imm_val
+
+                    # Classify by the offset value
+                    if imm_val == 0x108:
+                        stack_ptr_delta = delta
+                        adrp_page = page
+                    elif imm_val == 0x11c:
+                        err_addr_delta = delta
+                        adrp_page = page
+
+    # Validate: both offsets must be found and share the same page base
+    if adrp_page is not None and stack_ptr_delta is not None and err_addr_delta is not None:
+        return {
+            "stack_ptr_delta": stack_ptr_delta,
+            "err_addr_delta": err_addr_delta,
+        }
+
+    # Fallback: if we found the page but only one offset, try to compute the other
+    if adrp_page is not None and stack_ptr_delta is not None and err_addr_delta is None:
+        # Error field is at page + 0x11c (20 bytes after stack pointer field at +0x108)
+        # This is a documented struct-field relationship within the runtime data area.
+        err_addr_delta = adrp_page + 0x11c
+        return {
+            "stack_ptr_delta": stack_ptr_delta,
+            "err_addr_delta": err_addr_delta,
+        }
+
+    return None
 
 
 def build_manifest(path: str, output_path: Optional[str] = None,
@@ -603,6 +768,7 @@ def build_manifest(path: str, output_path: Optional[str] = None,
     fmt = _detect_format(path)
     all_syms = discover_symbols(path)
     bist_syms = filter_bist_symbols(all_syms)
+    data_offsets = discover_data_offsets(path)
 
     manifest = {
         "sha256": fhash,
@@ -612,6 +778,7 @@ def build_manifest(path: str, output_path: Optional[str] = None,
         "n_total_symbols": len(all_syms),
         "n_bist_symbols": len(bist_syms),
         "symbols": bist_syms,
+        "data_offsets": data_offsets,  # None for x86_64
     }
 
     if fmt == "macho":

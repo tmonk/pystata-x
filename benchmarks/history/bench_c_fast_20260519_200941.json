@@ -1,0 +1,21 @@
+{
+  "timestamp": "20260519_200941",
+  "commit": "current",
+  "fast_path_configured": true,
+  "results": {
+    "C_get_nobs_us": 0.39,
+    "C_get_varname_us": 1.45,
+    "C_get_double_us": 0.7,
+    "C_get_string_us": 0.7,
+    "Python_getObsTotal_us": 2.28,
+    "Python_getVarName_us": 7.86,
+    "Python_getDouble_us": 3.02,
+    "Python_getString_us": 2.98
+  },
+  "speedup": {
+    "getObsTotal": 5.8,
+    "getVarName": 5.4,
+    "getDouble": 4.3,
+    "getString": 4.3
+  }
+}

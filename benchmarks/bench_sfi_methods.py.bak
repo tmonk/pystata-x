@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Simplified per-method SFI benchmarks.
+
+Runs all benchmarks in a single Python subprocess for pystata_x
+and a single Stata session for official sfi.py.
+"""
+
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+DATA_DIR = HERE / "data"
+HIST_DIR = HERE / "history"
+HIST_DIR.mkdir(exist_ok=True)
+REPO_ROOT = HERE.parent
+SRC_DIR = str(REPO_ROOT / "src")
+
+DTA_CANDIDATES = sorted(DATA_DIR.glob("benchmark_*.dta"))
+DTA_PATH = str(DTA_CANDIDATES[0]) if DTA_CANDIDATES else None
+
+STATA_APP = "/Applications/StataNow/StataSE.app/Contents/MacOS/stata-se"
+PYTHON = sys.executable
+
+N_WARMUP = 3
+N_MEASURED = 10
+
+# Each entry: (class_name, method_name, args_dict_or_empty)
+SFI_BENCHMARKS = [
+    # Data class
+    ("Data", "getObsTotal", {}),
+    ("Data", "getVarCount", {}),
+    ("Data", "getVarName", {"varno": 0}),
+    ("Data", "getVarLabel", {"varno": 0}),
+    ("Data", "getVarType", {"varno": 0}),
+    ("Data", "getVarIndex", {"name": "v001"}),
+    ("Data", "getVarFormat", {"varno": 0}),
+    ("Data", "getDouble", {"varno": 0, "obs": 0}),
+    ("Data", "getString", {"varno": 26, "obs": 0}),
+    ("Data", "storeDouble", {"varno": 0, "obs": 0, "val": 42.0}),
+    ("Data", "isVarTypeStr", {"varno": 26}),
+    ("Data", "isVarTypeNumeric", {"varno": 0}),
+    ("Data", "getStrVarWidth", {"varno": 0}),
+    ("Data", "isAlias", {"varno": 0}),
+    ("Data", "getMaxStrLength", {}),
+    ("Data", "getMaxVars", {}),
+    # Macro class
+    ("Macro", "getGlobal", {"name": "c(current_date)"}),
+    ("Macro", "setGlobal", {"name": "_bm", "value": "1"}),
+    ("Macro", "delGlobal", {"name": "_bm"}),
+    ("Macro", "getLocal", {"name": "anything"}),
+    ("Macro", "setLocal", {"name": "_bmlocal", "value": "2"}),
+    # Scalar class
+    ("Scalar", "getValue", {"name": "c(level)"}),
+    ("Scalar", "setValue", {"name": "_bms", "value": 1.0}),
+    ("Scalar", "getString", {"name": "c(current_date)"}),
+    # Missing class
+    ("Missing", "isMissing", {"value": 0.0}),
+    ("Missing", "getValue", {}),
+    ("Missing", "getMissing", {}),
+    ("Missing", "parseIsMissing", {"s": "."}),
+    # ValueLabel class
+    ("ValueLabel", "exists", {"name": "catlabels"}),
+    ("ValueLabel", "getNames", {}),
+    ("ValueLabel", "getLabel", {"name": "catlabels", "value": 1}),
+    # SFIToolkit class
+    ("SFIToolkit", "abbrev", {"name": "summarize", "n": 4}),
+    ("SFIToolkit", "isValidName", {"name": "v001"}),
+    ("SFIToolkit", "getTempName", {}),
+    ("SFIToolkit", "getTempFile", {}),
+    ("SFIToolkit", "macroExpand", {"macro_spec": "$S_level"}),
+    ("SFIToolkit", "displayln", {"s": "hello"}),
+    ("SFIToolkit", "error", {"rc": 1}),
+    ("SFIToolkit", "formatValue", {"value": 123.456, "fmt": "%9.2f"}),
+    ("SFIToolkit", "isFmt", {"fmt": "%9.2f"}),
+    ("SFIToolkit", "isNumFmt", {"fmt": "%9.2f"}),
+    ("SFIToolkit", "isStrFmt", {"fmt": "%9s"}),
+    ("SFIToolkit", "strToName", {"s": "my variable name"}),
+    ("SFIToolkit", "makeVarName", {"name": "my var"}),
+    ("SFIToolkit", "pollnow", {}),
+    ("SFIToolkit", "pollstd", {}),
+]
+
+
+def run_px():
+    """Run all benchmarks via pystata_x in a single subprocess."""
+    # Build setup + benchmark execution
+    measurements = []
+    for cls, method, kwargs in SFI_BENCHMARKS:
+        if not kwargs:
+            measurements.append(f"('{cls}.{method}', lambda: {cls}.{method}())")
+        else:
+            kw_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            measurements.append(f"('{cls}.{method}', lambda: {cls}.{method}({kw_str}))")
+
+    full_script = f"""
+import sys, time, json, gc
+import os
+os.environ["PYTHONUNBUFFERED"] = "1"
+sys.path.insert(0, {SRC_DIR!r})
+from pystata_x.stata_setup import config
+config('/Applications/StataNow', 'se', splash=False)
+from pystata_x._core import run
+run('use "{DTA_PATH}", clear', quietly=True)
+from pystata_x.sfi._core import Data, Macro, Scalar, Missing, ValueLabel, SFIToolkit
+
+n_warmup = {N_WARMUP}
+n_measured = {N_MEASURED}
+results = {{}}
+
+for key, fn in [
+    {',\n    '.join(measurements)}
+]:
+    for _ in range(n_warmup):
+        fn()
+    times = []
+    for _ in range(n_measured):
+        t0 = time.perf_counter()
+        fn()
+        t1 = time.perf_counter()
+        times.append((t1 - t0) * 1_000_000)
+    results[key] = times
+
+sys.stdout.write(json.dumps(results))
+sys.stdout.flush()
+sys.stderr.write("DONE\n")
+sys.stderr.flush()
+"""
+
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    r = subprocess.run([PYTHON, "-c", full_script],
+                       capture_output=True, text=True, timeout=120,
+                       env=env)
+
+    if r.returncode != 0:
+        print(f"  [ERROR] rc={r.returncode}")
+        if r.stderr:
+            print(f"  [stderr] {r.stderr[:1000]}")
+        if r.stdout:
+            print(f"  [stdout] {r.stdout[:1000]}")
+        # SIGSEGV: return what we have from stderr
+        for line in r.stderr.strip().split("\n"):
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    pass
+        return {}
+
+    # Parse JSON from stdout
+    for line in r.stdout.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"  [ERROR] JSON parse: {e}")
+                print(f"  [raw] {line[:200]}")
+                return {}
+    return {}
+
+
+def run_of():
+    """Run official sfi.py benchmarks via Stata subprocess."""
+    results = {}
+
+    # Build Stata script - one per benchmark to avoid state issues
+    for cls, method, kwargs in SFI_BENCHMARKS:
+        # Build the Python call
+        if not kwargs:
+            py_call = f"sfi.{cls}.{method}()"
+        else:
+            kw_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            py_call = f"sfi.{cls}.{method}({kw_str})"
+
+        script = f"""
+use "{DTA_PATH}", clear
+python:
+import time, json
+n_warmup = {N_WARMUP}
+n_measured = {N_MEASURED}
+times = []
+for _ in range(n_warmup):
+    {py_call}
+for _ in range(n_measured):
+    t0 = time.perf_counter()
+    {py_call}
+    t1 = time.perf_counter()
+    times.append((t1 - t0) * 1_000_000)
+print("{cls}.{method}" + "|" + json.dumps(times))
+end
+exit, STATA
+"""
+
+        r = subprocess.run([STATA_APP, "-q", "do", "-"],
+                           input=script.encode(), capture_output=True, timeout=60)
+        stdout = r.stdout.decode() if r.stdout else ""
+        for line in stdout.split("\n"):
+            line = line.strip()
+            if "|" in line and line.startswith(f"{cls}.{method}|"):
+                try:
+                    key, json_str = line.split("|", 1)
+                    times = json.loads(json_str)
+                    results[key] = times
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    return results
+
+
+def _stats_us(times):
+    if not times:
+        return {}
+    s = sorted(times)
+    n = len(s)
+    return {
+        "n": n,
+        "mean_us": sum(s) / n,
+        "median_us": s[n // 2],
+        "min_us": s[0],
+        "max_us": s[-1],
+        "p10_us": s[int(n * 0.1)],
+        "p90_us": s[int(n * 0.9)],
+        "std_us": (sum((x - sum(s) / n) ** 2 for x in s) / (n - 1)) ** 0.5 if n > 1 else 0,
+    }
+
+
+def main():
+    print("=" * 70)
+    print("  PER-SFI-METHOD BENCHMARKS")
+    print(f"  Dataset: {DTA_PATH}")
+    print(f"  Iterations: {N_WARMUP} warm + {N_MEASURED} measured")
+    print("=" * 70)
+
+    if not DTA_PATH:
+        print("ERROR: No dataset. Run generate_dataset.py first.")
+        return
+
+    print("\n[1/2] Running pystata_x methods...")
+    px_data = run_px()
+    print(f"  Got {len(px_data)} results")
+
+    print("\n[2/2] Running official sfi.py methods...")
+    of_data = run_of()
+    print(f"  Got {len(of_data)} results")
+
+    # Combine
+    all_keys = sorted(set(px_data.keys()) | set(of_data.keys()))
+    methods = {}
+    for key in all_keys:
+        methods[key] = {
+            "pystata_x": _stats_us(px_data.get(key, [])),
+            "official_sfi": _stats_us(of_data.get(key, [])),
+        }
+        px_med = methods[key]["pystata_x"].get("median_us", 0)
+        of_med = methods[key]["official_sfi"].get("median_us", 0)
+        if of_med > 0 and px_med > 0:
+            methods[key]["speedup"] = of_med / px_med
+        elif px_med > 0 and of_med == 0:
+            methods[key]["speedup"] = float("inf")
+        else:
+            methods[key]["speedup"] = 0.0
+
+    # Summary table
+    print("\n" + "-" * 80)
+    print(f"  {'Method':<35s} {'pystata_x (μs)':<18s} {'sfi (μs)':<18s} {'Speedup':<10s}")
+    print("-" * 80)
+    faster = 0
+    slower = 0
+    missing = 0
+    for key in sorted(methods.keys()):
+        m = methods[key]
+        px = m["pystata_x"].get("median_us", 0)
+        of = m["official_sfi"].get("median_us", 0)
+        sp = m["speedup"]
+        if sp == float("inf"):
+            sp_str = "ONLY_PX"
+        elif sp > 0:
+            sp_str = f"×{sp:.1f}"
+        else:
+            sp_str = "N/A"
+        px_str = f"{px:.1f}" if px > 0 else "N/A"
+        of_str = f"{of:.1f}" if of > 0 else "N/A"
+        print(f"  {key:<35s} {px_str:<18s} {of_str:<18s} {sp_str:<10s}")
+        if px > 0 and of > 0:
+            if sp >= 1:
+                faster += 1
+            else:
+                slower += 1
+        elif px > 0 and of == 0:
+            missing += 1
+    print("-" * 80)
+    print(f"\n  pystata_x faster: {faster}  slower: {slower}  "
+          f"missing official sfi: {missing}")
+
+    # Save
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=REPO_ROOT, timeout=5
+        ).stdout.strip() or "unknown"
+    except Exception:
+        commit = "unknown"
+
+    out = {
+        "meta": {"timestamp": ts, "commit": commit, "dataset": DTA_PATH,
+                 "n_warmup": N_WARMUP, "n_measured": N_MEASURED},
+        "methods": methods,
+    }
+    out_path = HIST_DIR / f"bench_sfi_methods_{ts}_{commit}.json"
+    with open(out_path, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"\nSaved: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

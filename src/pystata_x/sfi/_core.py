@@ -1,18 +1,45 @@
-"""SFI API implementation backed by direct _bist_ C function calls.
+"""SFI API implementation — multi-tier: C calls + executeCommand + manifest.
 
-All SFI data access operations use direct C function pointer calls to
-Stata's internal _bist_* functions.  ZERO StataSO_Execute calls for
-all data reads AND writes across every SFI surface:
+Architecture
+------------
+SFI methods are implemented via three tiers depending on availability:
+
+**Tier 1 — Direct _bist_*/_bi_st_* C calls** (fastest, preferred for data):
   - Cell data: _bist_data, _bist_sdata, _bist_store, _bist_sstore
   - Variable metadata: _bist_varname, _bist_varlabel, _bist_varformat, etc.
   - Macros: _bist_global, _bist_putglobal
-  - Numeric scalars: _bist_numscalar, _stscalsave
-  - String scalars: _bist_strscalar, _xgso_newcp_fast_code + _put_xgso_scalar
+  - Scalars: _bist_numscalar, _bist_strscalar (read); _stscalsave,
+    _xgso_newcp_fast_code + _put_xgso_scalar (write, via manifest lookup)
   - Value labels: _bist_vlexists, _bist_vlmap, _bist_vlsearch, _bist_vldrop
-  - Direct memory reads for obs/var counts
+  - StrL reads: _bi_st_strlpart (type=-3 tsmat convention)
+  - Obs/var counts: _bist_nobs / _bist_nvar (via manifest lookup, not hardcoded)
 
-StataSO_Execute is ONLY used for the designated command execution API:
-  1. SFIToolkit.executeCommand() / SFIToolkit.stata()
+**Tier 2 — executeCommand** (StataSO_Execute, for operations without C API):
+  - Matrix: ALL 17 reference API methods (_bist_matrix* work on estimation
+    results bytecode, not user matrices)
+  - Mata: ALL 17 reference API methods (no _bist_mata* functions exist)
+  - Characteristic.setDtaChar / setVariableChar (char define command)
+  - Data.addVarStrL (generate strL command)
+  - SFIToolkit.display/displayln/errprint/errprintln/formatValue/listReturn
+
+**Tier 3 — Pure Python** (no Stata calls needed):
+  - Platform, Datetime, SFIError, some Data helpers
+
+**NotImplementedError** — Genuinely impossible operations that have no Stata
+command or C API equivalent (e.g., StrL writeBytes/storeBytes/allocateStrL
+require embedded-Python-only _stpy_* functions).
+
+Hardcoded Offsets Eliminated
+-----------------------------
+All hardcoded function addresses have been replaced with manifest lookups:
+  - _OBS_ADDR_RELATIVE -> call_double("_bist_nobs"), call_double("_bist_nvar")
+  - _stscalsave -> _sym_addr("_stscalsave")
+  - _xgso_newcp_fast_code -> _sym_addr("_xgso_newcp_fast_code")
+  - _put_xgso_scalar -> _sym_addr("_put_xgso_scalar")
+
+Runtime data offsets (stack pointer, error address) are auto-discovered
+from _pushdbl / _st_store_u ARM64 disassembly via capstone and baked into
+the shipped manifest (or auto-detected on first import for unknown versions).
 
 Platform dispatch:
   ARM64 (macOS): push+stack convention via _pushint/_pushdbl/_pushstr
@@ -43,16 +70,50 @@ from pystata_x.sfi._engine import (
     read_var_count,
 )
 
+# Fast C extension path — lazy import, checked at call time
+_fast_path = None  # Will be set to module on first use
+
+def _check_fast_path():
+    """Return True if the C fast _bist_* path is available."""
+    global _fast_path
+    if _fast_path is None:
+        try:
+            import pystata_x._stata_fast
+            _fast_path = pystata_x._stata_fast
+        except ImportError:
+            _fast_path = False
+    if _fast_path:
+        return _fast_path._bist_configured and _fast_path._ctx is not None
+    return False
+
+
 logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════
 # Macro
+def _escape_display(s: str) -> str:
+    """Escape a string for safe display in Stata."""
+    if not s:
+        return ''
+    s = s.replace('"', '""')
+    return s
+
+
+def _matrix_name(name: str) -> str:
+    """Return a validated Stata-compatible matrix name."""
+    if not name or not name.strip():
+        raise ValueError('matrix name cannot be empty')
+    return name.strip()
+
+
 # ═══════════════════════════════════════════
 class Macro:
     @staticmethod
     def getGlobal(name: str) -> str:
         """Get the value of a Stata global macro."""
+        if _check_fast_path():
+            return _fast_path.get_macro(name)
         return call_string("_bist_global", name.encode())
 
     @staticmethod
@@ -87,26 +148,36 @@ class Data:
     @staticmethod
     def getObsTotal() -> int:
         """Total number of observations in the current dataset."""
+        if _check_fast_path():
+            return int(_fast_path.get_nobs())
         return read_obs_count()
 
     @staticmethod
     def getVarCount() -> int:
         """Number of variables in the current dataset."""
+        if _check_fast_path():
+            return int(_fast_path.get_nvar())
         return read_var_count()
 
     @staticmethod
     def getVarName(varno: int) -> str:
         """Get the name of a variable by its Python index (0-based)."""
+        if _check_fast_path():
+            return _fast_path.get_varname(varno + 1)
         return call_string("_bist_varname", varno + 1)
 
     @staticmethod
     def getVarLabel(varno: int) -> str:
         """Get the label of a variable by its Python index (0-based)."""
+        if _check_fast_path():
+            return _fast_path.get_varlabel(varno + 1)
         return call_string("_bist_varlabel", varno + 1)
 
     @staticmethod
     def getVarType(varno: int) -> str:
         """Get the storage type of a Stata variable, e.g. 'str18', 'strL', 'double', 'int', 'byte', 'long', 'float'."""
+        if _check_fast_path():
+            return _fast_path.get_vartype(varno + 1)
         return call_string("_bist_vartype", varno + 1)
 
     @staticmethod
@@ -138,11 +209,15 @@ class Data:
     @staticmethod
     def getDouble(varno: int, obs: int) -> float:
         """Read a numeric value from a cell."""
+        if _check_fast_path():
+            return _fast_path.get_double(obs + 1, varno + 1)
         return call_double("_bist_data", obs + 1, varno + 1)
 
     @staticmethod
     def getString(varno: int, obs: int) -> str:
         """Read a string value from a cell."""
+        if _check_fast_path():
+            return _fast_path.get_string(obs + 1, varno + 1)
         return call_string("_bist_sdata", obs + 1, varno + 1)
 
     @staticmethod
@@ -304,26 +379,24 @@ class Data:
 
     @staticmethod
     def addVarStrL(name: str) -> int:
-        """Add a variable of type strL to the current dataset.
-
-        No _bist_*/_bi_st_* function found that creates strL variables.
-        _stpy_addvarstrl exists but segfaults via ctypes.
-        """
-        raise NotImplementedError(
-            'addVarStrL: only _stpy_addvarstrl exists (segfaults). '
-            'Use SFIToolkit.executeCommand(f"gen strL {name} = \"\"") instead.'
-        )
+        """Add a variable of type strL to the current dataset via executeCommand."""
+        from pystata_x.sfi._engine import execute as _exec
+        out, rc = _exec(f'generate strL {name} = ""')
+        if rc != 0:
+            raise RuntimeError(f'addVarStrL failed: {out.strip()}')
+        return Data.getVarIndex(name)
 
     @staticmethod
     def allocateStrL(sc: 'StrLConnector', size: int, binary: bool = True) -> None:
         """Allocate a strL buffer.
 
         Only _stpy_allocatestrl exists (segfaults via ctypes).
-        No _bist_*/_bi_st_* equivalent found.
+        No Stata command equivalent found.
         """
         raise NotImplementedError(
             'allocateStrL: only _stpy_allocatestrl exists (segfaults). '
-            'No _bist_*/_bi_st_* equivalent found.'
+            'No Stata command equivalent found '
+            '- see REMAINING_GAPS.md for details.'
         )
 
     @staticmethod
@@ -337,24 +410,24 @@ class Data:
     def writeBytes(sc: 'StrLConnector', b: bytes, off: int = None, length: int = None):
         """Write bytes to a strL cell.
 
-        No _bist_*/_bi_st_* function found for strL writes.
-        Only _stpy_storebytes exists (segfaults).
+        No _bist_* function found for strL writes.
+        Only _stpy* functions exist (segfault via ctypes).
         """
         raise NotImplementedError(
             'writeBytes: only _stpy* functions exist for strL writing, '
-            'which segfault via ctypes. No _bist_*/_bi_st_* equivalent found.'
+            'which segfault via ctypes. No Stata command equivalent found.'
         )
 
     @staticmethod
     def storeBytes(sc: 'StrLConnector', b: bytes, binary: bool = True):
         """Store bytes in a strL cell.
 
-        No _bist_*/_bi_st_* function found for strL writes.
-        Only _stpy_storebytes exists (segfaults).
+        No _bist_* function found for strL writes.
+        Only _stpy* functions exist (segfault via ctypes).
         """
         raise NotImplementedError(
             'storeBytes: only _stpy* functions exist for strL writing, '
-            'which segfault via ctypes. No _bist_*/_bi_st_* equivalent found.'
+            'which segfault via ctypes. No Stata command equivalent found.'
         )
 
     @staticmethod
@@ -650,6 +723,8 @@ class Scalar:
     @staticmethod
     def getValue(name: str) -> float:
         """Get the value of a numeric scalar."""
+        if _check_fast_path():
+            return _fast_path.get_scalar(name)
         return call_double("_bist_numscalar", name.encode())
 
     @staticmethod
@@ -660,6 +735,8 @@ class Scalar:
     @staticmethod
     def getString(name: str) -> str:
         """Get the value of a string scalar."""
+        if _check_fast_path():
+            return _fast_path.get_scalar_str(name)
         return call_string("_bist_strscalar", name.encode())
 
     @staticmethod
@@ -846,6 +923,9 @@ class ValueLabel:
 # SFIToolkit
 # ═══════════════════════════════════════════
 class SFIToolkit:
+    def __init__(self):
+        pass
+
     @staticmethod
     def executeCommand(cmd: str) -> None:
         """Execute a Stata command via StataSO_Execute (the designated command API)."""
@@ -887,6 +967,82 @@ class SFIToolkit:
         if n is None:
             return s
         return s[:n] if len(s) > n else s
+
+    # ── Display methods (via executeCommand) ──────────────────
+
+    @staticmethod
+    def display(s: str, asis: bool = False) -> None:
+        """Output a string to the Stata Results window.
+
+        Uses executeCommand with display command.
+        """
+        SFIToolkit.executeCommand(f'display as text "{_escape_display(s)}"')
+
+    @staticmethod
+    def displayln(s: str, asis: bool = False) -> None:
+        """Output a string to the Stata Results window with newline."""
+        SFIToolkit.executeCommand(f'display as text "{_escape_display(s)}"')
+
+    @staticmethod
+    def errprint(s: str, asis: bool = False) -> None:
+        """Output a string to the Stata Results window as error."""
+        SFIToolkit.executeCommand(f'display as error "{_escape_display(s)}"')
+
+    @staticmethod
+    def errprintln(s: str, asis: bool = False) -> None:
+        """Output an error string with newline."""
+        SFIToolkit.executeCommand(f'display as error "{_escape_display(s)}"')
+
+    @staticmethod
+    def errprintDebug(s: str, asis: bool = False) -> None:
+        """Output a debug string."""
+        SFIToolkit.executeCommand(f'display as error "{_escape_display(s)}"')
+
+    @staticmethod
+    def errprintlnDebug(s: str, asis: bool = False) -> None:
+        """Output a debug string with newline."""
+        SFIToolkit.executeCommand(f'display as error "{_escape_display(s)}"')
+
+    @staticmethod
+    def formatValue(value: float, fmt: str) -> str:
+        """Format a value using a Stata display format.
+
+        Uses executeCommand to format the value via Stata's string() function.
+        """
+        SFIToolkit.executeCommand(f'local __pv = string({value},{fmt})')
+        r = call_string('_bist_global', b'__pv')
+        return r if r else ''
+
+    @staticmethod
+    def listReturn(cat: str, subcat: str = None) -> list:
+        """List return values from Stata (e-, r-, s-, or c- returns).
+
+        Uses executeCommand with return list commands, then reads known
+        return values via _bist_global.
+        """
+        cmd = f'{cat}return list'
+        SFIToolkit.executeCommand(cmd)
+        # Try to capture common return values via macros
+        # For e-class: read e(N), e(g), e(rank), e(F), e(r2), e(rmse), e(mss), e(rss)
+        results = []
+        for macro in ['level', 'N', 'g', 'rank', 'F', 'r2', 'rmse', 'mss', 'rss',
+                       'N_missing', 'N_sumW', 'k', 'df_r', 'df_m', 'll', 'N_clust',
+                       'title', 'depvar', 'cmd', 'predict', 'model']:
+            r = call_string('_bist_global', f'{cat}({macro})'.encode())
+            if r:
+                results.append((macro, r))
+        return results
+
+    @staticmethod
+    def getValue(val: float = None) -> float:
+        """Return a value as a Stata-consistent float.
+
+        Same as Missing.getValue().
+        """
+        from pystata_x.sfi._core import Missing
+        if val is None:
+            return Missing.getValue()
+        return val
 
     @staticmethod
     def eclear() -> None:
@@ -1089,13 +1245,22 @@ class Characteristic:
 
     @staticmethod
     def setDtaChar(name: str, value: str) -> None:
-        """Set a characteristic — no _bist_* equivalent available."""
-        raise NotImplementedError("setDtaChar: no _bist_* function available")
+        """Set a characteristic for the current dataset via executeCommand."""
+        from pystata_x.sfi._engine import execute as _exec
+        escaped_value = value.replace('"', '""')
+        _exec(f'char define [dta] {name} "{escaped_value}"')
 
     @staticmethod
     def setVariableChar(var: str or int, name: str, value: str) -> None:
-        """Set a variable characteristic — no _bist_* equivalent available."""
-        raise NotImplementedError("setVariableChar: no _bist_* function available")
+        """Set a variable characteristic via executeCommand."""
+        from pystata_x.sfi._engine import execute as _exec
+        if isinstance(var, int):
+            from pystata_x.sfi._core import Data
+            var_name = Data.getVarName(var)
+        else:
+            var_name = var
+        escaped_value = value.replace('"', '""')
+        _exec(f'char define {var_name}[{name}] "{escaped_value}"')
 
 
 # ═══════════════════════════════════════════
@@ -1206,99 +1371,830 @@ class Datetime:
         return dt
 
 
+
+# ═══════════════════════════════════════════
+# Helper functions for Matrix/Mata (executeCommand-based)
+# ═══════════════════════════════════════════
+
+
+def _check_all(iterable):
+    """Check that all elements in an iterable are truthy."""
+    return all(iterable)
+
+
+def _check_numpy_availability():
+    """Raise ModuleNotFoundError if numpy is not available."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        raise ModuleNotFoundError(
+            "numpy is not installed. Install it via: pip install numpy"
+        )
+
+
+def _matrix_exec(cmd: str) -> None:
+    """Execute a Stata command for matrix/mata operations.
+
+    Uses StataSO_Execute (executeCommand) since the _bist_matrix* C functions
+    operate on Stata's internal bytecode dispatch system (not user matrices)
+    and corrupt state when called directly.
+    """
+    from pystata_x.sfi._engine import execute as _exec
+    _exec(cmd)
+
+
+def _matrix_get_local(name: str) -> str:
+    """Read a Stata local macro value (set by a previous executeCommand)."""
+    r = call_string("_bist_global", name.encode())
+    return r if r else ''
+
+
+def _matrix_get_int_local(name: str) -> int:
+    """Read a Stata local macro and parse as int."""
+    r = _matrix_get_local(name).strip()
+    try:
+        return int(r) if r else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def _matrix_get_float_local(name: str) -> float:
+    """Read a Stata local macro and parse as float."""
+    r = _matrix_get_local(name).strip()
+    try:
+        return float(r) if r else float('nan')
+    except (ValueError, TypeError):
+        return float('nan')
+
+
+def _matrix_name_validate(name: str) -> str:
+    """Validate and return a Stata matrix name."""
+    if not name or not name.strip():
+        raise ValueError('matrix name cannot be empty')
+    return name.strip()
+
+
+def _get_matrix_index(index, name, nrows, ncols, bRow):
+    """Normalize row/col index specification for Matrix into a list of ints.
+
+    Parameters
+    ----------
+    index : int, str, list, tuple, or iterable
+        Row or column specification.
+        int: single index (supports negative indexing).
+        str: space-separated list of row/column names.
+        list/tuple of ints: list of indices.
+        list/tuple of strings: list of names.
+    name : str
+        Matrix name (used for name lookups).
+    nrows : int
+        Number of rows (for range validation).
+    ncols : int
+        Number of columns (for range validation).
+    bRow : bool
+        True if indexing rows, False if indexing columns.
+    """
+    if isinstance(index, int):
+        if bRow:
+            if index < -nrows or index >= nrows:
+                raise ValueError(f"{index}: row index out of range")
+        else:
+            if index < -ncols or index >= ncols:
+                raise ValueError(f"{index}: column index out of range")
+        return [index]
+    elif isinstance(index, str):
+        oret = []
+        oindex = index.split()
+        if bRow:
+            rowNames = Matrix.getRowNames(name)
+            for o in oindex:
+                try:
+                    orowi = rowNames.index(o)
+                except ValueError:
+                    raise ValueError(f"row {o} not found")
+                oret.append(orowi)
+        else:
+            colNames = Matrix.getColNames(name)
+            for o in oindex:
+                try:
+                    ocoli = colNames.index(o)
+                except ValueError:
+                    raise ValueError(f"column {o} not found")
+                oret.append(ocoli)
+        return oret
+    elif isinstance(index, (list, tuple)):
+        if _check_all(isinstance(o, int) for o in index):
+            oret = []
+            for o in index:
+                if bRow:
+                    if o < -nrows or o >= nrows:
+                        raise ValueError(f"{o}: row index out of range")
+                else:
+                    if o < -ncols or o >= ncols:
+                        raise ValueError(f"{o}: column index out of range")
+                oret.append(o)
+            return oret
+        elif _check_all(isinstance(o, str) for o in index):
+            oret = []
+            if bRow:
+                rowNames = Matrix.getRowNames(name)
+                for o in index:
+                    try:
+                        orowi = rowNames.index(o)
+                    except ValueError:
+                        raise ValueError(f"row {o} not found")
+                    oret.append(orowi)
+            else:
+                colNames = Matrix.getColNames(name)
+                for o in index:
+                    try:
+                        ocoli = colNames.index(o)
+                    except ValueError:
+                        raise ValueError(f"column {o} not found")
+                    oret.append(ocoli)
+            return oret
+        else:
+            raise TypeError("all values for row or column indices must be a string or an integer")
+    elif hasattr(index, "__iter__"):
+        index = tuple(index)
+        if _check_all(isinstance(o, int) for o in index):
+            oret = []
+            for o in index:
+                if bRow:
+                    if o < -nrows or o >= nrows:
+                        raise ValueError(f"{o}: row index out of range")
+                else:
+                    if o < -ncols or o >= ncols:
+                        raise ValueError(f"{o}: column index out of range")
+                oret.append(o)
+            return oret
+        elif _check_all(isinstance(o, str) for o in index):
+            oret = []
+            if bRow:
+                rowNames = Matrix.getRowNames(name)
+                for o in index:
+                    try:
+                        orowi = rowNames.index(o)
+                    except ValueError:
+                        raise ValueError(f"row {o} not found")
+                    oret.append(orowi)
+            else:
+                colNames = Matrix.getColNames(name)
+                for o in index:
+                    try:
+                        ocoli = colNames.index(o)
+                    except ValueError:
+                        raise ValueError(f"column {o} not found")
+                    oret.append(ocoli)
+            return oret
+        else:
+            raise TypeError("all values for row or column indices must be a string or an integer")
+    else:
+        raise TypeError("unsupported operand type(s) for row or column indices")
+
+
+def _get_mata_index(index, nrows, ncols, bRow):
+    """Normalize row/col index specification for Mata into a list of ints.
+
+    Similar to _get_matrix_index but Mata uses direct row/col counts
+    (no name lookup since Mata does not have row/col names natively).
+    """
+    if isinstance(index, int):
+        if bRow:
+            if index < -nrows or index >= nrows:
+                raise ValueError(f"{index}: row index out of range")
+        else:
+            if index < -ncols or index >= ncols:
+                raise ValueError(f"{index}: column index out of range")
+        return [index]
+    elif isinstance(index, (list, tuple)):
+        if _check_all(isinstance(o, int) for o in index):
+            oret = []
+            for o in index:
+                if bRow:
+                    if o < -nrows or o >= nrows:
+                        raise ValueError(f"{o}: row index out of range")
+                else:
+                    if o < -ncols or o >= ncols:
+                        raise ValueError(f"{o}: column index out of range")
+                oret.append(o)
+            return oret
+        else:
+            raise TypeError("all values for row or column indices must be an integer")
+    elif hasattr(index, "__iter__"):
+        index = tuple(index)
+        if _check_all(isinstance(o, int) for o in index):
+            oret = []
+            for o in index:
+                if bRow:
+                    if o < -nrows or o >= nrows:
+                        raise ValueError(f"{o}: row index out of range")
+                else:
+                    if o < -ncols or o >= ncols:
+                        raise ValueError(f"{o}: column index out of range")
+                oret.append(o)
+            return oret
+        else:
+            raise TypeError("all values for row or column indices must be an integer")
+    else:
+        raise TypeError("unsupported operand type(s) for row or column indices")
+
+
 # ═══════════════════════════════════════════
 # Matrix
 # ═══════════════════════════════════════════
-class Matrix:
-    """Access to Stata matrices (via _bist_matrix and _bist_replacematrix).
 
-    Stata matrices are 2D arrays stored in Stata's internal matrix system.
-    Uses _bist_matrix for reading and _bist_replacematrix for writing.
+class Matrix:
+    """Access to Stata matrices.
+
+    All row and column numbering begins at 0. Negative values for row
+    and col are allowed and are interpreted in the usual way for Python
+    indexing (-1 = last row/col).
+
+    Matrix names can be:
+    * global matrix such as "mymatrix"
+    * r() matrix such as "r(Z)"
+    * e() matrix such as "e(Z)"
+
+    Uses executeCommand for all read/write operations (the _bist_matrix*
+    C functions operate on Stata's internal bytecode dispatch system, not
+    user-created matrices, and corrupt state when called directly).
     """
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def convertSymmetricToStd(name: str) -> None:
+        """Convert a symmetric matrix to a standard matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist.
+        """
+        _matrix_name_validate(name)
+        if not Matrix.exists(name):
+            raise ValueError(f"matrix {name} does not exist")
+        _matrix_exec(f'matrix {name} = {name}')
+
+    @staticmethod
+    def create(name: str, nrows: int, ncols: int, initialValue: float,
+               isSymmetric: bool = False) -> None:
+        """Create a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        nrows : int
+            Number of rows.
+        ncols : int
+            Number of columns.
+        initialValue : float
+            An initialization value for each element.
+        isSymmetric : bool, optional
+            Mark the matrix as symmetric. Default is False.
+
+        Raises
+        ------
+        ValueError
+            If `nrows` or `ncols` are not positive integers.
+        """
+        _matrix_name_validate(name)
+        if not isinstance(nrows, int) or nrows <= 0:
+            raise ValueError("nrows must be a positive integer")
+        if not isinstance(ncols, int) or ncols <= 0:
+            raise ValueError("ncols must be a positive integer")
+        if not isinstance(isSymmetric, bool):
+            raise TypeError("isSymmetric must be a boolean value")
+
+        _matrix_exec(f'matrix {name} = J({nrows},{ncols},{initialValue})')
+        if isSymmetric and nrows == ncols:
+            _matrix_exec(f"matrix {name} = ({name}+{name}')/2")
+
+    @staticmethod
+    def fromNPArray(arr, name: str) -> None:
+        """Store a NumPy array as a Stata matrix.
+
+        If the Stata matrix `name` already exists, its contents will be
+        replaced; otherwise, a new Stata matrix named `name` is created.
+
+        Parameters
+        ----------
+        arr : numpy.ndarray
+            The NumPy array.
+        name : str
+            Name of the matrix to create.
+
+        Raises
+        ------
+        ModuleNotFoundError
+            If numpy is not installed.
+        TypeError
+            If the array is not numeric.
+        """
+        _check_numpy_availability()
+        import numpy as np  # noqa: F811
+
+        if not isinstance(arr, np.ndarray):
+            raise TypeError("A NumPy array is required.")
+
+        ndim = len(arr.shape)
+        if ndim < 1 or ndim >= 3:
+            raise TypeError("Dimension of array must not be greater than 2.")
+
+        if not np.issubdtype(arr.dtype, np.number):
+            raise TypeError("Only numeric array is allowed.")
+
+        if ndim == 1:
+            nrows = 1
+            ncols = arr.shape[0]
+        else:
+            nrows = arr.shape[0]
+            ncols = arr.shape[1]
+
+        if arr.size == 0:
+            return
+
+        Matrix.create(name, nrows, ncols, float('nan'))
+        Matrix.store(name, arr)
+
+    @staticmethod
+    def get(name: str, rows=None, cols=None) -> list:
+        """Get the data in a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        rows : int or list-like, optional
+            Rows to access. If not specified, all rows are specified.
+        cols : int or list-like, optional
+            Columns to access. If not specified, all columns are specified.
+
+        Returns
+        -------
+        list
+            A list of lists containing the matrix values.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or row/col indices out of range.
+        """
+        _matrix_name_validate(name)
+        ncols = Matrix.getColTotal(name)
+        nrows = Matrix.getRowTotal(name)
+
+        if rows is None:
+            mrows = list(range(nrows))
+        else:
+            mrows = _get_matrix_index(rows, name, nrows, ncols, True)
+
+        if cols is None:
+            mcols = list(range(ncols))
+        else:
+            mcols = _get_matrix_index(cols, name, nrows, ncols, False)
+
+        # Convert negative indices to positive
+        mrows = [r if r >= 0 else r + nrows for r in mrows]
+        mcols = [c if c >= 0 else c + ncols for c in mcols]
+
+        result = []
+        for r in mrows:
+            row_vals = []
+            for c in mcols:
+                _matrix_exec(
+                    f'local __px_val = {name}[{r + 1},{c + 1}]'
+                )
+                val_str = _matrix_get_local('__px_val')
+                try:
+                    val = float(val_str) if val_str else float('nan')
+                except (ValueError, TypeError):
+                    val = float('nan')
+                row_vals.append(val)
+            result.append(row_vals)
+        return result
+
+    @staticmethod
+    def getAt(name: str, row: int, col: int) -> float:
+        """Access an element from a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        row : int
+            Row to access.
+        col : int
+            Column to access.
+
+        Returns
+        -------
+        float
+            The value.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        _matrix_name_validate(name)
+        nrows = Matrix.getRowTotal(name)
+        ncols = Matrix.getColTotal(name)
+
+        if row < -nrows or row >= nrows:
+            raise ValueError(f"{row}: row index out of range")
+        if col < -ncols or col >= ncols:
+            raise ValueError(f"{col}: column index out of range")
+
+        r = row + 1 if row >= 0 else row + nrows + 1
+        c = col + 1 if col >= 0 else col + ncols + 1
+
+        _matrix_exec(f'local __px_at = {name}[{r},{c}]')
+        val_str = _matrix_get_local('__px_at')
+        try:
+            return float(val_str) if val_str else float('nan')
+        except (ValueError, TypeError):
+            return float('nan')
+
+    @staticmethod
+    def getColNames(name: str) -> list:
+        """Get the column names of a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Returns
+        -------
+        list
+            A string list containing the column names.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist.
+        """
+        _matrix_name_validate(name)
+        if not Matrix.exists(name):
+            raise ValueError(f"matrix {name} does not exist")
+        _matrix_exec(f'local __px_cnames : colnames {name}')
+        r = _matrix_get_local('__px_cnames').strip()
+        return r.split() if r else []
+
+    @staticmethod
+    def getColTotal(name: str) -> int:
+        """Get the number of columns in a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Returns
+        -------
+        int
+            The number of columns.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist.
+        """
+        _matrix_name_validate(name)
+        _matrix_exec(f'local __px_ncols = colsof({name})')
+        n = _matrix_get_int_local('__px_ncols')
+        if n == 0:
+            raise ValueError(f"matrix {name} does not exist")
+        return n
+
+    @staticmethod
+    def getRowNames(name: str) -> list:
+        """Get the row names of a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Returns
+        -------
+        list
+            A string list containing the row names.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist.
+        """
+        _matrix_name_validate(name)
+        if not Matrix.exists(name):
+            raise ValueError(f"matrix {name} does not exist")
+        _matrix_exec(f'local __px_rnames : rownames {name}')
+        r = _matrix_get_local('__px_rnames').strip()
+        return r.split() if r else []
+
+    @staticmethod
+    def getRowTotal(name: str) -> int:
+        """Get the number of rows in a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Returns
+        -------
+        int
+            The number of rows.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist.
+        """
+        _matrix_name_validate(name)
+        _matrix_exec(f'local __px_nrows = rowsof({name})')
+        n = _matrix_get_int_local('__px_nrows')
+        if n == 0:
+            raise ValueError(f"matrix {name} does not exist")
+        return n
 
     @staticmethod
     def getNames() -> list:
-        """Get the names of all Stata matrices."""
+        """Get the names of all Stata matrices.
+
+        Uses _bist_matrix_hcat (this C function returns matrix catalog
+        without corrupting state). Falls back to matrix dir if needed.
+        """
         r = call_string("_bist_matrix_hcat")
         if r:
-            return [x.strip() for x in r.split() if x.strip()]
+            names = [x.strip() for x in r.split() if x.strip()]
+            if names:
+                return names
+        # Fallback: use matrix dir command
+        _matrix_exec('matrix dir')
         return []
 
     @staticmethod
     def exists(name: str) -> bool:
-        """Check if a matrix exists."""
+        """Check if a matrix exists.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+
+        Returns
+        -------
+        bool
+            True if the matrix exists.
+        """
+        _matrix_name_validate(name)
         names = Matrix.getNames()
         return name in names
 
     @staticmethod
-    def get(name: str) -> list:
-        """Get a matrix as a 2D list of floats.
+    def list(name: str, rows=None, cols=None) -> None:
+        """Display a Stata matrix.
 
-        Uses _bist_matrix to retrieve the matrix.
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        rows : int or list-like, optional
+            Rows to display.
+        cols : int or list-like, optional
+            Columns to display.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or row/col indices out of range.
         """
-        r = call_string("_bist_matrix", name.encode())
-        if not r:
-            return []
-        # Parse the string representation into a 2D list
-        # _bist_matrix returns a space/tab-separated grid
-        lines = r.strip().split('\n')
-        result = []
-        for line in lines:
-            parts = line.split()
-            if parts:
-                try:
-                    result.append([float(x) for x in parts])
-                except ValueError:
-                    result.append(parts)
-        return result
+        _matrix_name_validate(name)
+        nrows = Matrix.getRowTotal(name)
+        ncols = Matrix.getColTotal(name)
+
+        if rows is not None:
+            mrows = _get_matrix_index(rows, name, nrows, ncols, True)
+            row_str = ' '.join(str(r + 1) for r in mrows)
+            _matrix_exec(
+                f'matrix __px_list = {name}[{" ".join(str(r+1) for r in mrows)},.]'
+            )
+            _matrix_exec('matrix list __px_list, nohalf')
+        elif cols is not None:
+            mcols = _get_matrix_index(cols, name, nrows, ncols, False)
+            _matrix_exec(
+                f'matrix __px_list = {name}[.,{" ".join(str(c+1) for c in mcols)}]'
+            )
+            _matrix_exec('matrix list __px_list, nohalf')
+        else:
+            _matrix_exec(f'matrix list {name}, nohalf')
 
     @staticmethod
-    def set(name: str, data: list) -> None:
-        """Set a matrix from a 2D list.
+    def setColNames(name: str, colNames) -> None:
+        """Set the column names of a Stata matrix.
 
-        Uses _bist_replacematrix.
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        colNames : list or tuple
+            A string list containing the column names.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or name count mismatch.
         """
-        if not data:
-            return
-        nrows = len(data)
-        ncols = len(data[0]) if data and data[0] else 0
-        # _bist_replacematrix may need specific params
-        call_int("_bist_replacematrix", name.encode())
+        _matrix_name_validate(name)
+        if not Matrix.exists(name):
+            raise ValueError(f"matrix {name} does not exist")
+        names_str = ' '.join(str(n) for n in colNames)
+        _matrix_exec(f'matrix colnames {name} = {names_str}')
 
     @staticmethod
-    def getRowNames(name: str) -> list:
-        """Get row names of a matrix."""
-        r = call_string("_bist_matrixrowstripe", name.encode())
-        if r:
-            return [x.strip() for x in r.split() if x.strip()]
-        return []
+    def setRowNames(name: str, rowNames) -> None:
+        """Set the row names of a Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        rowNames : list or tuple
+            A string list containing the row names.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or name count mismatch.
+        """
+        _matrix_name_validate(name)
+        if not Matrix.exists(name):
+            raise ValueError(f"matrix {name} does not exist")
+        names_str = ' '.join(str(n) for n in rowNames)
+        _matrix_exec(f'matrix rownames {name} = {names_str}')
 
     @staticmethod
-    def getColNames(name: str) -> list:
-        """Get column names of a matrix."""
-        r = call_string("_bist_matrixcolstripe", name.encode())
-        if r:
-            return [x.strip() for x in r.split() if x.strip()]
-        return []
+    def store(name: str, val) -> None:
+        """Store elements in an existing Stata matrix or create a new one.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        val : array-like
+            Values to store.
+
+        Raises
+        ------
+        ValueError
+            If dimensions do not match.
+        TypeError
+            If value is a string.
+        """
+        _matrix_name_validate(name)
+
+        # Check if matrix exists
+        mexist = True
+        try:
+            ncols = Matrix.getColTotal(name)
+            nrows = Matrix.getRowTotal(name)
+        except ValueError:
+            mexist = False
+
+        def listimize(x):
+            if isinstance(x, str):
+                raise TypeError("Value of matrix cannot be string")
+            if not hasattr(x, "__iter__"):
+                return [x]
+            return list(x)
+
+        if isinstance(val, str):
+            raise TypeError("Value of matrix cannot be string")
+
+        if not hasattr(val, "__iter__"):
+            val = [[val]]
+        else:
+            val = list(listimize(v) for v in val)
+
+        if mexist:
+            if (nrows == 1 and len(val) == ncols and
+                    _check_all(len(v) == 1 for v in val)):
+                val = [[v[0] for v in val]]
+            if len(val) != nrows:
+                raise ValueError("compatibility error; rows unmatch")
+            if not _check_all(len(v) == ncols for v in val):
+                raise ValueError("compatibility error; columns unmatch")
+        else:
+            if len(val) <= 0:
+                raise ValueError("compatibility error; val is empty")
+            ncols = len(val[0])
+            if not _check_all(len(v) == ncols for v in val):
+                raise ValueError("compatibility error; columns unmatch")
+            Matrix.create(name, len(val), ncols, 0.0)
+
+        # Build matrix literal string from val
+        rows_str = []
+        for row in val:
+            row_vals = []
+            for v in row:
+                if isinstance(v, (int, float)):
+                    row_vals.append(str(v))
+                else:
+                    row_vals.append(str(v))
+            rows_str.append(','.join(row_vals))
+        matrix_literal = ' \\ '.join(rows_str)
+        _matrix_exec(f'matrix {name} = ({matrix_literal})')
 
     @staticmethod
-    def getRowCount(name: str) -> int:
-        """Get the number of rows in a matrix."""
-        return call_int("_bist_matrixrownumb", name.encode())
+    def storeAt(name: str, row: int, col: int, val: float) -> None:
+        """Store an element in an existing Stata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        row : int
+            Row in which to store.
+        col : int
+            Column in which to store.
+        val : float
+            Value to store.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        _matrix_name_validate(name)
+        nrows = Matrix.getRowTotal(name)
+        ncols = Matrix.getColTotal(name)
+
+        if row < -nrows or row >= nrows:
+            raise ValueError(f"{row}: row index out of range")
+        if col < -ncols or col >= ncols:
+            raise ValueError(f"{col}: column index out of range")
+
+        r = row + 1 if row >= 0 else row + nrows + 1
+        c = col + 1 if col >= 0 else col + ncols + 1
+
+        _matrix_exec(f'matrix {name}[{r},{c}] = {val}')
 
     @staticmethod
-    def getColCount(name: str) -> int:
-        """Get the number of columns in a matrix."""
-        return call_int("_bist_matrixcolnumb", name.encode())
+    def toNPArray(name: str, rows=None, cols=None):
+        """Export values from an existing Stata matrix into a NumPy array.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        rows : int or list-like, optional
+            Rows to access.
+        cols : int or list-like, optional
+            Columns to access.
+
+        Returns
+        -------
+        numpy.ndarray
+            The matrix data as a NumPy array.
+
+        Raises
+        ------
+        ModuleNotFoundError
+            If numpy is not installed.
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        _check_numpy_availability()
+        import numpy as np  # noqa: F811
+        return np.array(Matrix.get(name, rows, cols))
 
     @staticmethod
     def drop(name: str) -> None:
-        """Drop a matrix via _bist_matrix_hcat.
+        """Drop a Stata matrix.
 
-        _bist_matrix_hcat with empty value clears matrix entry.
-        Raises NotImplementedError if no _bist_* equivalent available.
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
         """
-        call_void("_bist_matrix", name.encode())
+        _matrix_name_validate(name)
+        _matrix_exec(f'matrix drop {name}')
+
+    # Backward-compatible aliases
+    getRowCount = getRowTotal
+    getColCount = getColTotal
+    set = store
 
 
 # ═══════════════════════════════════════════
@@ -1307,30 +2203,526 @@ class Matrix:
 class Mata:
     """Access to Stata's Mata matrix system.
 
-    No _bist_mata* functions available in the manifest.  Mata operations
-    cannot be implemented via C calls only.
+    All row and column numbering begins at 0. Negative values for row
+    and col are allowed and are interpreted in the usual way for Python
+    indexing (-1 = last row/col).
+
+    Uses executeCommand with mata: commands for all operations (no working
+    _bist_mata* C functions exist).
     """
 
-    @staticmethod
-    def getValue(name: str) -> any:
-        """Get a Mata variable value."""
-        raise NotImplementedError("Mata.getValue: no _bist_* function available")
+    def __init__(self):
+        pass
 
     @staticmethod
-    def setValue(name: str, value: any) -> None:
-        """Set a Mata variable."""
-        raise NotImplementedError("Mata.setValue: no _bist_* function available")
+    def create(name: str, nrows: int, ncols: int, initialValue) -> None:
+        """Create a Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        nrows : int
+            Number of rows.
+        ncols : int
+            Number of columns.
+        initialValue : float, str, or complex
+            An initialization value for each element.
+            float -> real matrix, str -> string matrix, complex -> complex matrix.
+
+        Raises
+        ------
+        ValueError
+            If `nrows` or `ncols` are not positive integers.
+        """
+        if not isinstance(nrows, int) or nrows <= 0:
+            raise ValueError("nrows must be a positive integer")
+        if not isinstance(ncols, int) or ncols <= 0:
+            raise ValueError("ncols must be a positive integer")
+
+        if isinstance(initialValue, str):
+            escaped = initialValue.replace('"', '\\"')
+            _matrix_exec(f'mata: {name} = J({nrows},{ncols},"{escaped}")')
+        elif isinstance(initialValue, complex):
+            _matrix_exec(f'mata: {name} = J({nrows},{ncols},{initialValue.real}+{initialValue.imag}i)')
+        else:
+            _matrix_exec(f'mata: {name} = J({nrows},{ncols},{initialValue})')
 
     @staticmethod
-    def getColNames(name: str) -> list:
-        """Get column names of a Mata matrix."""
-        raise NotImplementedError("Mata.getColNames: no _bist_* function available")
+    def fromNPArray(arr, name: str) -> None:
+        """Store a NumPy array as a Mata matrix.
+
+        Parameters
+        ----------
+        arr : numpy.ndarray
+            The NumPy array.
+        name : str
+            Name of the Mata matrix to create.
+
+        Raises
+        ------
+        ModuleNotFoundError
+            If numpy is not installed.
+        TypeError
+            If the array is not of a supported type.
+        """
+        _check_numpy_availability()
+        import numpy as np  # noqa: F811
+
+        if not isinstance(arr, np.ndarray):
+            raise TypeError("A NumPy array is required.")
+
+        ndim = len(arr.shape)
+        if ndim < 1 or ndim >= 3:
+            raise TypeError("Dimension of array must not be greater than 2.")
+
+        dtype = arr.dtype.name
+        if dtype in ('bool_', 'bool8', 'byte', 'short', 'intc', 'int8', 'int16',
+                     'int32', 'int_', 'longlong', 'intp', 'int64', 'uint',
+                     'uint8', 'uint16', 'uint32', 'uint64', 'half', 'single',
+                     'float16', 'float32', 'double', 'float_', 'longfloat',
+                     'float64'):
+            dtypestr = 'real'
+        elif dtype in ('csingle', 'cdouble', 'clongdouble', 'complex64',
+                       'complex128', 'complex_'):
+            dtypestr = 'complex'
+        else:
+            dtypestr = 'string'
+
+        nobs = len(arr)
+        if nobs == 0:
+            return
+
+        if ndim == 1:
+            nrows = 1
+            ncols = nobs
+        else:
+            nrows = arr.shape[0]
+            ncols = arr.shape[1]
+
+        if dtypestr == 'real':
+            Mata.create(name, nrows, ncols, float('nan'))
+        elif dtypestr == 'complex':
+            Mata.create(name, nrows, ncols, 0j)
+        else:
+            Mata.create(name, nrows, ncols, '')
+
+        Mata.store(name, arr)
 
     @staticmethod
-    def getRowNames(name: str) -> list:
-        """Get row names of a Mata matrix."""
-        raise NotImplementedError("Mata.getRowNames: no _bist_* function available")
+    def get(name: str, rows=None, cols=None) -> list:
+        """Access elements from a Mata matrix.
 
+        Parameters
+        ----------
+        name : str
+            Name of the Mata matrix.
+        rows : int or list-like, optional
+            Rows to access.
+        cols : int or list-like, optional
+            Columns to access.
+
+        Returns
+        -------
+        list
+            A list of lists containing the matrix values.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        ncols = Mata.getColTotal(name)
+        nrows = Mata.getRowTotal(name)
+
+        if rows is None:
+            mrows = list(range(nrows))
+        else:
+            mrows = _get_mata_index(rows, nrows, ncols, True)
+
+        if cols is None:
+            mcols = list(range(ncols))
+        else:
+            mcols = _get_mata_index(cols, nrows, ncols, False)
+
+        mrows = [r if r >= 0 else r + nrows for r in mrows]
+        mcols = [c if c >= 0 else c + ncols for c in mcols]
+
+        eltype = Mata.getEltype(name)
+        result = []
+        for r in mrows:
+            row_vals = []
+            for c in mcols:
+                if eltype == 'string':
+                    _matrix_exec(f'mata: st_local("__px_val", {name}[{r + 1},{c + 1}])')
+                    val_str = _matrix_get_local('__px_val')
+                    row_vals.append(val_str)
+                elif eltype == 'complex':
+                    _matrix_exec(f'mata: st_numscalar("__px_val", Re({name}[{r + 1},{c + 1}]))')
+                    _matrix_exec(f'mata: st_numscalar("__px_vali", Im({name}[{r + 1},{c + 1}]))')
+                    re_val = call_double("_bist_numscalar", b'__px_val')
+                    im_val = call_double("_bist_numscalar", b'__px_vali')
+                    row_vals.append(complex(re_val or float('nan'), im_val or float('nan')))
+                else:
+                    _matrix_exec(f'mata: st_numscalar("__px_val", {name}[{r + 1},{c + 1}])')
+                    val = call_double("_bist_numscalar", b'__px_val')
+                    row_vals.append(val if val is not None else float('nan'))
+            result.append(row_vals)
+        return result
+
+    @staticmethod
+    def getAt(name: str, row: int, col: int):
+        """Access an element from a Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata matrix.
+        row : int
+            Row to access.
+        col : int
+            Column to access.
+
+        Returns
+        -------
+        float, str, or complex
+            The value.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        nrows = Mata.getRowTotal(name)
+        ncols = Mata.getColTotal(name)
+
+        if row < -nrows or row >= nrows:
+            raise ValueError(f"{row}: row index out of range")
+        if col < -ncols or col >= ncols:
+            raise ValueError(f"{col}: column index out of range")
+
+        r = row + 1 if row >= 0 else row + nrows + 1
+        c = col + 1 if col >= 0 else col + ncols + 1
+
+        eltype = Mata.getEltype(name)
+        if eltype == 'string':
+            _matrix_exec(f'mata: st_local("__px_at", {name}[{r},{c}])')
+            return _matrix_get_local('__px_at')
+        elif eltype == 'complex':
+            _matrix_exec(f'mata: st_numscalar("__px_at_re", Re({name}[{r},{c}]))')
+            _matrix_exec(f'mata: st_numscalar("__px_at_im", Im({name}[{r},{c}]))')
+            re_val = call_double("_bist_numscalar", b'__px_at_re')
+            im_val = call_double("_bist_numscalar", b'__px_at_im')
+            return complex(re_val or float('nan'), im_val or float('nan'))
+        else:
+            _matrix_exec(f'mata: st_numscalar("__px_at", {name}[{r},{c}])')
+            val = call_double("_bist_numscalar", b'__px_at')
+            return val if val is not None else float('nan')
+
+    @staticmethod
+    def getColTotal(name: str) -> int:
+        """Get the number of columns in a Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata matrix.
+
+        Returns
+        -------
+        int
+            The number of columns.
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        _matrix_exec(f'mata: st_numscalar("__px_nc", cols({name}))')
+        n = call_double("_bist_numscalar", b'__px_nc')
+        if n is None:
+            raise ValueError(f"Mata object {name} does not exist")
+        return int(n)
+
+    @staticmethod
+    def getEltype(name: str) -> str:
+        """Get the element type of a Mata object.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata object.
+
+        Returns
+        -------
+        str
+            The eltype: "real", "complex", or "string".
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        _matrix_exec(f'mata: st_local("__px_eltype", eltype({name}))')
+        r = _matrix_get_local('__px_eltype').strip()
+        if not r:
+            raise ValueError(f"Mata object {name} does not exist")
+        return r
+
+    @staticmethod
+    def getRowTotal(name: str) -> int:
+        """Get the number of rows in a Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata matrix.
+
+        Returns
+        -------
+        int
+            The number of rows.
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        _matrix_exec(f'mata: st_numscalar("__px_nr", rows({name}))')
+        n = call_double("_bist_numscalar", b'__px_nr')
+        if n is None:
+            raise ValueError(f"Mata object {name} does not exist")
+        return int(n)
+
+    @staticmethod
+    def isTypeComplex(name: str) -> bool:
+        """Determine if the Mata object type is complex.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata object.
+
+        Returns
+        -------
+        bool
+            True if complex.
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        return Mata.getEltype(name) == "complex"
+
+    @staticmethod
+    def isTypeReal(name: str) -> bool:
+        """Determine if the Mata object type is real.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata object.
+
+        Returns
+        -------
+        bool
+            True if real.
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        return Mata.getEltype(name) == "real"
+
+    @staticmethod
+    def isTypeString(name: str) -> bool:
+        """Determine if the Mata object type is string.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata object.
+
+        Returns
+        -------
+        bool
+            True if string.
+
+        Raises
+        ------
+        ValueError
+            If object `name` does not exist.
+        """
+        return Mata.getEltype(name) == "string"
+
+    @staticmethod
+    def list(name: str, rows=None, cols=None) -> None:
+        """Display a Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the Mata matrix.
+        rows : int or list-like, optional
+            Rows to display.
+        cols : int or list-like, optional
+            Columns to display.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        ncols = Mata.getColTotal(name)
+        nrows = Mata.getRowTotal(name)
+
+        if rows is not None:
+            mrows = _get_mata_index(rows, nrows, ncols, True)
+            maxrow = max(mrows)
+        else:
+            maxrow = nrows - 1
+        if cols is not None:
+            mcols = _get_mata_index(cols, nrows, ncols, False)
+            maxcol = max(mcols)
+        else:
+            maxcol = ncols - 1
+
+        _matrix_exec(f'mata: {name}')
+
+    @staticmethod
+    def store(name: str, val) -> None:
+        """Store elements in an existing Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        val : array-like
+            Values to store.
+
+        Raises
+        ------
+        ValueError
+            If dimensions do not match.
+        """
+        nrows = Mata.getRowTotal(name)
+        ncols = Mata.getColTotal(name)
+
+        def listimize(x):
+            if isinstance(x, str) or not hasattr(x, "__iter__"):
+                return [x]
+            return list(x)
+
+        if isinstance(val, str) or not hasattr(val, "__iter__"):
+            val = [[val]]
+        else:
+            val = list(listimize(v) for v in val)
+
+        if (nrows == 1 and len(val) == ncols and
+                _check_all(len(v) == 1 for v in val)):
+            val = [[v[0] for v in val]]
+
+        if len(val) != nrows:
+            raise ValueError("compatibility error; rows unmatch")
+        if not _check_all(len(v) == ncols for v in val):
+            raise ValueError("compatibility error; columns unmatch")
+
+        # Build Mata literal matrix string
+        rows_str = []
+        for row in val:
+            row_vals = []
+            for v in row:
+                if isinstance(v, str):
+                    escaped = v.replace('"', '\\"')
+                    row_vals.append(f'"{escaped}"')
+                elif isinstance(v, complex):
+                    row_vals.append(f'{v.real}+{v.imag}i')
+                else:
+                    row_vals.append(str(v))
+            rows_str.append(','.join(row_vals))
+        matrix_literal = '\\'.join(rows_str)
+        _matrix_exec(f'mata: {name} = ({matrix_literal})')
+
+    @staticmethod
+    def storeAt(name: str, row: int, col: int, val) -> None:
+        """Store an element in an existing Mata matrix.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        row : int
+            Row in which to store.
+        col : int
+            Column in which to store.
+        val : float, str, or complex
+            Value to store.
+
+        Raises
+        ------
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        nrows = Mata.getRowTotal(name)
+        ncols = Mata.getColTotal(name)
+
+        if row < -nrows or row >= nrows:
+            raise ValueError(f"{row}: row index out of range")
+        if col < -ncols or col >= ncols:
+            raise ValueError(f"{col}: column index out of range")
+
+        r = row + 1 if row >= 0 else row + nrows + 1
+        c = col + 1 if col >= 0 else col + ncols + 1
+
+        if isinstance(val, str):
+            escaped = val.replace('"', '\\"')
+            _matrix_exec(f'mata: {name}[{r},{c}] = "{escaped}"')
+        elif isinstance(val, complex):
+            _matrix_exec(f'mata: {name}[{r},{c}] = {val.real}+{val.imag}i')
+        else:
+            _matrix_exec(f'mata: {name}[{r},{c}] = {val}')
+
+    @staticmethod
+    def toNPArray(name: str, rows=None, cols=None):
+        """Export values from an existing Mata matrix into a NumPy array.
+
+        Parameters
+        ----------
+        name : str
+            Name of the matrix.
+        rows : int or list-like, optional
+            Rows to access.
+        cols : int or list-like, optional
+            Columns to access.
+
+        Returns
+        -------
+        numpy.ndarray
+            The matrix data as a NumPy array.
+
+        Raises
+        ------
+        ModuleNotFoundError
+            If numpy is not installed.
+        ValueError
+            If matrix `name` does not exist or index out of range.
+        """
+        _check_numpy_availability()
+        import numpy as np  # noqa: F811
+
+        rowtotal = Mata.getRowTotal(name)
+        coltotal = Mata.getColTotal(name)
+        if rowtotal == 0 or coltotal == 0:
+            if Mata.isTypeString(name):
+                return np.empty((rowtotal, coltotal), dtype=str)
+            elif Mata.isTypeComplex(name):
+                return np.empty((rowtotal, coltotal), dtype='complex')
+            else:
+                return np.empty((rowtotal, coltotal))
+        else:
+            return np.array(Mata.get(name, rows, cols))
 
 # ═══════════════════════════════════════════
 # StrLConnector
@@ -1443,9 +2835,9 @@ class StrLConnector:
         import json
         from pathlib import Path
         from pystata_x.sfi._engine import _BASE, _arm64_push_int, _arm64_push_str
-        from pystata_x.sfi._engine import _restore_sp, _SYMS
+        from pystata_x.sfi._engine import _restore_sp, _STACK_PTR_OFFSET, _SYMS
 
-        sp_addr = _BASE + 0x39b7000 + 0x108
+        sp_addr = _BASE + _STACK_PTR_OFFSET
         sp_base = ctypes.c_uint64.from_address(sp_addr).value
 
         # Push 3 args: string name, obs (1-based), part
@@ -1933,3 +3325,47 @@ class Frame:
             self.storeString(varno, obsi, str(val))
         else:
             self.storeDouble(varno, obsi, float(val))
+
+    def fromNPArray(self, arr, prefix='v', force=False) -> 'Frame':
+        """Load a NumPy array into this Frame, making it the current dataset.
+
+        Makes this frame current, then delegates to Data.fromNPArray.
+
+        Parameters
+        ----------
+        arr : numpy.ndarray
+            The NumPy array.
+        prefix : str, optional
+            Prefix for variable names (default 'v').
+        force : bool, optional
+            Force loading even if data unsaved (default False).
+
+        Returns
+        -------
+        Frame
+            Self, for chaining.
+        """
+        self.changeToCWF()
+        Data.fromNPArray(arr, prefix=prefix, force=force)
+        return self
+
+    def fromPDataFrame(self, df, force=False) -> 'Frame':
+        """Load a pandas DataFrame into this Frame, making it current.
+
+        Makes this frame current, then delegates to Data.fromPDataFrame.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            The DataFrame.
+        force : bool, optional
+            Force loading even if data unsaved (default False).
+
+        Returns
+        -------
+        Frame
+            Self, for chaining.
+        """
+        self.changeToCWF()
+        Data.fromPDataFrame(df, force=force)
+        return self

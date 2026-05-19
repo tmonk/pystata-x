@@ -6,22 +6,11 @@ On ARM64 macOS, ALL _bist_* functions use Stata's proprietary internal calling
 convention (NOT the standard ARM64 AAPCS64 ABI).  They read arguments from and
 push results to Stata's internal expression stack rather than using registers.
 
-Confirmed by disassembly analysis and empirical testing (2026-05-19):
-  - _bist_nobs reads obs count from internal memory (0x39c7000+0xf7c),
-    converts to double, and pushes result via _pushdbl.  Ignores w0.
-  - _bist_global checks w0 as mode flag: 0=skip/return, 1=execute.
-    Reads macro name pointer from internal stack, pushes result as tsmat.
-  - _bist_varname checks w0 == 2 for pop-2 mode, reads 1 arg from stack
-    otherwise.  Pushes string result as length-prefixed tsmat.
-  - _bist_data checks w0 == 2 for alternate pop, always reads 2 args
-    from stack (obs, var), pushes double result.
-  - Direct CFUNCTYPE(c_int) calls do NOT crash but the w0 return value
-    is UNPREDICTABLE leftover register content, not the function's result.
-
 Therefore on ARM64 we MUST use the push+stack+pop pattern for ALL _bist_*:
   1. Push arguments via _pushint / _pushdbl / _pushstr (these DO use std ARM64 ABI).
   2. Call _bist_* via CFUNCTYPE(None) — no register args.
-  3. Read result from Stata's internal stack (SP at 0x39b7000+0x108).
+  3. Read result from Stata's internal stack (SP at _BASE + stack_ptr_delta)
+     where stack_ptr_delta is discovered from ARM64 disassembly of _pushdbl.
      - For doubles/ints: tsmat[0] -> *(double*)data or *(int32*)data
      - For strings: *(char**)(tsmat[0]) -> [uint32 len][char data]
   4. Restore SP to pre-push value (consumes the result from Stata's stack).
@@ -32,21 +21,8 @@ Push function signatures (ALL standard ARM64 ABI, confirmed via disasm):
   _pushstr(char *str, len)   - string ptr in x0, length in x1
 
 _bi_st_* Calling Convention (cracked 2026-05-19):
-  The _bi_st_* function family (_bi_st_strlpart, _bi_st_unab, _bi_st_addalias)
-  uses the SAME push+stack convention as _bist_*, but with a critical
-  difference in argument typing:
-    - _pushint() creates tsmats with type=0 at offset +0x34
-    - _pushstr() creates tsmats with type=-3 (0xfffd) at offset +0x34
-    - _bi_st_* functions REQUIRE type=-3 for their FIRST argument
-  
-  Rule: The first arg to any _bi_st_* function MUST be pushed via _pushstr().
-  Example (_bi_st_strlpart):
-    _pushstr(var_name)       # arg1: variable name (type=-3 tsmat)
-    _pushint(obs_1based)     # arg2: observation
-    _pushint(part)           # arg3: byte count
-    CFUNCTYPE(None)(w0=3)    # call with 3 args
-    # Result written IN-PLACE into the string tsmat (modifies buffer)
-
+  Same push+stack convention as _bist_*, but first argument MUST use
+  _pushstr (type=-3 tsmat convention).
   See docs/bi_st_analysis.md for full tsmat structure and function catalog.
 
 On x86_64 Linux, _bist_* functions use standard SysV ABI (arguments in
@@ -61,23 +37,15 @@ Internal stack layout (tsmat):
     tsmat[0]  ->  struct { uint32 len; char data[len]; }
     The string is at *(char**)tsmat[0] + 4, length is *(uint32*)*(char**)tsmat[0].
 
-Cell Read Convention (ARM64, confirmed 2026-05-19):
-  _bist_data(obs, var) and _bist_sdata(obs, var) both use 1-based
-  observation AND variable indexing on ARM64.  The tsmat from _pushint
-  stores the int at tsmat[0x28]=1 (data slot ID), and _bist_data uses
-  _no_of_vars to count entities from the var tsmat.  Because _pushint
-  sets tsmat[0x28]=1, _no_of_vars returns 1, and _bidata_u is called
-  with nvars=1.  The actual obs/var indices come from the tsf (tsmat
-  structure) data pointer, which in _pushint points to the double value.
-
-  Therefore Python callers must pass (obs+1, var+1) for compatibility
-  with the 1-based internal convention.
-
 Symbol Discovery
 ----------------
 1. Ship a pre-computed manifest.json keyed by SHA256 of the binary.
 2. At init: hash the loaded library -> look up in manifest -> use addresses.
 3. Fallback: parse the binary dynamically via _manifest.discover_symbols().
+
+Runtime data offsets (stack pointer, error address) are also auto-discovered
+from ARM64 disassembly of _pushdbl and _st_store_u via capstone, at build time
+(shipped manifest) or at first import (auto-detect).  No hardcoded addresses.
 """
 import ctypes
 import hashlib
@@ -105,9 +73,16 @@ if _manifest_path.exists():
         _MANIFEST = json.load(_f)
 _SYMS: dict = _MANIFEST.get("symbols", {})
 
-# Stata internal stack pointer offset
-# _pushdbl at 0x56bb5c does: adrp x8, 0x39b7000; add x8, x8, #0x108
-_STACK_PTR_OFFSET: int = 0x39b7000 + 0x108
+# Internal data offset constants — set lazily below after _PLATFORM
+# and _find_lib are defined.  Shipped manifest populates them at module
+# level; auto-discovery (unknown Stata version) runs when needed.
+_STACK_PTR_OFFSET: int = 0
+_ERR_ADDR_RELATIVE: int = 0
+
+_DATA_OFFSETS: dict = _MANIFEST.get("data_offsets", {}) or {}
+if _DATA_OFFSETS:
+    _STACK_PTR_OFFSET = _DATA_OFFSETS["stack_ptr_delta"]
+    _ERR_ADDR_RELATIVE = _DATA_OFFSETS.get("err_addr_delta", 0)
 
 
 # ─── Public helpers ────────────────────────────────────────────────
@@ -149,6 +124,19 @@ def _check_platform() -> str:
 
 _PLATFORM: str = _check_platform()
 
+# Auto-discover data offsets from binary if shipped manifest didn't match
+# (unknown Stata version).  Only on ARM64 where these offsets are needed.
+if _PLATFORM == "arm64" and not _DATA_OFFSETS and _STACK_PTR_OFFSET == 0:
+    try:
+        _lib_path = _find_lib()
+        from pystata_x.sfi._manifest import discover_data_offsets
+        _offsets = discover_data_offsets(_lib_path)
+        if _offsets:
+            _STACK_PTR_OFFSET = _offsets["stack_ptr_delta"]
+            _ERR_ADDR_RELATIVE = _offsets.get("err_addr_delta", 0)
+    except Exception:
+        pass
+
 
 def _file_sha256(path: str) -> str:
     """Compute SHA256 of a file."""
@@ -163,24 +151,77 @@ def _file_sha256(path: str) -> str:
 
 
 def _ensure_symbols(lib_path: str) -> None:
-    """Ensure _SYMS is populated.  Tries manifest by hash, then dynamic parsing."""
+    """Ensure _SYMS is populated with known symbols for this binary.
+
+    Multi-tier strategy:
+    1. Load shipped manifest.json — if SHA256 matches, use its symbols.
+    2. Scan manifests/ directory for other shipped manifests by SHA256.
+    3. Fall back to dynamic binary parsing, then permanently cache
+       the result to a manifest file keyed by SHA256.
+    """
     global _SYMS, _MANIFEST
     if _SYMS:
         return
 
-    # Try manifest by hash
     fhash = _file_sha256(lib_path)
+
+    # Tier 1: Check shipped manifest.json (current directory)
     if _MANIFEST.get("sha256") == fhash:
         _SYMS = _MANIFEST.get("symbols", {})
         if _SYMS:
             return
 
-    # Fallback: dynamic binary parsing (works with hash mismatch too)
+    # Tier 1b: Check manifests/ directory for other pre-built files
+    manifests_dir = _HERE / "manifests"
+    if manifests_dir.is_dir():
+        for mfile in sorted(manifests_dir.glob("manifest-*.json")):
+            try:
+                with open(mfile) as _f:
+                    mdata = json.load(_f)
+                if mdata.get("sha256") == fhash:
+                    _MANIFEST = mdata
+                    _SYMS = mdata.get("symbols", {})
+                    if _SYMS:
+                        return
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    # Tier 2: Dynamic binary parsing
     try:
         from pystata_x.sfi._manifest import discover_symbols, filter_bist_symbols
 
         all_syms = discover_symbols(lib_path)
         _SYMS = filter_bist_symbols(all_syms)
+
+        # Also discover data offsets (ARM64 only) and cache them
+        try:
+            from pystata_x.sfi._manifest import discover_data_offsets as _ddo
+            _ddo_offsets = _ddo(lib_path)
+            # Update module-level offsets in case auto-discovery failed at
+            # import time but succeeds now (defensive — unlikely in practice).
+            if _ddo_offsets:
+                global _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
+                if _STACK_PTR_OFFSET == 0:
+                    _STACK_PTR_OFFSET = _ddo_offsets["stack_ptr_delta"]
+                    _ERR_ADDR_RELATIVE = _ddo_offsets.get("err_addr_delta", 0)
+        except Exception:
+            _ddo_offsets = None
+
+        # Permanently cache the generated manifest for this SHA256
+        _MANIFEST = {
+            "sha256": fhash,
+            "platform": sys.platform,
+            "n_bist_symbols": len(_SYMS),
+            "symbols": _SYMS,
+            "data_offsets": _ddo_offsets,
+        }
+        # Save to manifests/ directory if it exists, else to manifest.json
+        if manifests_dir.is_dir():
+            cache_path = manifests_dir / f"manifest-{fhash[:16]}.json"
+        else:
+            cache_path = _HERE / "manifest.json"
+        with open(cache_path, "w") as _f:
+            json.dump(_MANIFEST, _f, indent=2)
     except Exception as exc:
         raise RuntimeError(
             f"Cannot discover symbol table in {lib_path}: {exc}"
@@ -243,6 +284,22 @@ def _save_sp() -> int:
 def _restore_sp(sp_val: int) -> None:
     """Restore Stata stack pointer to a previous value."""
     ctypes.c_uint64.from_address(_stack_ptr_addr()).value = sp_val
+
+
+# Cache for ctypes function wrappers keyed by (addr, restype, *argtypes)
+# Creating CFUNCTYPE wrappers is expensive (~1 μs) — cache them.
+_FN_CACHE: dict[tuple[int, str], ctypes._CFuncPtr] = {}
+
+
+def _get_fn(addr: int, restype, *argtypes) -> ctypes._CFuncPtr:
+    """Get or create a cached ctypes function wrapper."""
+    sig_parts = [getattr(restype, "__name__", str(restype))]
+    sig_parts.extend(getattr(a, "__name__", str(a)) for a in argtypes)
+    key = (addr, ",".join(sig_parts))
+    if key not in _FN_CACHE:
+        fn_type = ctypes.CFUNCTYPE(restype, *argtypes)
+        _FN_CACHE[key] = ctypes.cast(addr, fn_type)
+    return _FN_CACHE[key]
 
 
 def _arm64_push_int(val: int) -> None:
@@ -410,6 +467,15 @@ def initialize():
 
     _INITIALIZED = True
 
+    # Try to set up the fast C _bist_* call path.
+    # If the C extension (libstata_fast) is loaded and configured,
+    # subsequent SFI calls will bypass Python-level ctypes overhead.
+    try:
+        from pystata_x import _stata_fast as _fast_c
+        _fast_c.setup_bist()  # auto-resolves params from _engine module
+    except Exception:
+        pass  # Fast C path not available — fall back to Python path
+
 
 # ─── Function callers ──────────────────────────────────────────────
 
@@ -432,7 +498,7 @@ def call_int(name: str, *args) -> Optional[int]:
         _arm64_push_args(args)
         # Pass arg count as w0 (mode flag for _bist_* functions)
         w0 = len(args) if args else 0
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(w0)
         return _arm64_pop_and_read_int(sp_before)
     else:
@@ -456,7 +522,7 @@ def call_double(name: str, *args) -> Optional[float]:
         sp_before = _save_sp()
         _arm64_push_args(args)
         w0 = len(args) if args else 0
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(w0)
         return _arm64_pop_and_read_double(sp_before)
     else:
@@ -480,7 +546,7 @@ def call_string(name: str, *args) -> Optional[str]:
         sp_before = _save_sp()
         _arm64_push_args(args)
         w0 = len(args) if args else 0
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(w0)
         return _arm64_pop_and_read_string(sp_before)
     else:
@@ -503,7 +569,7 @@ def call_void(name: str, *args) -> None:
         sp_before = _save_sp()
         _arm64_push_args(args)
         w0 = len(args) if args else 0
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(w0)
         _restore_sp(sp_before)
     else:
@@ -539,7 +605,7 @@ def _arm64_push_args(args: tuple) -> None:
 
 def _cast_fn(rt, restype, *argtypes):
     """Cast a raw address to a CFUNCTYPE with given return and arg types."""
-    return ctypes.cast(rt, ctypes.CFUNCTYPE(restype, *argtypes))
+    return _get_fn(rt, restype, *argtypes)
 
 
 def _call_std_int(rt: int, args: tuple) -> Optional[int]:
@@ -598,16 +664,16 @@ def _call_std_string(rt: int, args: tuple) -> Optional[str]:
 def _call_std_void(rt: int, args: tuple) -> None:
     """Call _bist_* via standard ABI (void return)."""
     if len(args) == 0:
-        ctypes.cast(rt, ctypes.CFUNCTYPE(None))()
+        _get_fn(rt, None)()
     elif len(args) == 1:
         if isinstance(args[0], bytes):
-            ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_char_p))(args[0])
+            _get_fn(rt, None, ctypes.c_char_p)(args[0])
         elif isinstance(args[0], int):
-            ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))(args[0])
+            _get_fn(rt, None, ctypes.c_int)(args[0])
         elif isinstance(args[0], float):
-            ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_double))(args[0])
+            _get_fn(rt, None, ctypes.c_double)(args[0])
     elif len(args) == 2:
-        ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_char_p))(
+        _get_fn(rt, None, ctypes.c_char_p, ctypes.c_char_p)(
             args[0], args[1]
         )
 
@@ -620,9 +686,11 @@ def _decode(b: Optional[bytes]) -> Optional[str]:
 
 # ─── Store / Write operations (ARM64 only) ─────────────────────────
 
-# Error code location used by _bist_store, _bist_sstore, etc.
-# _st_store_u writes to 0x39b7000 + 0x11c on error; on success it's 0.
-_ERR_ADDR_RELATIVE: int = 0x39b7000 + 0x11c
+# Error status after store operations.
+# _bist_store / _bist_sstore write to an internal Stata error variable
+# (at _BASE + err_addr_delta) on failure; it is 0 on success.
+# The offset is discovered from _st_store_u's ARM64 disassembly via
+# _manifest.discover_data_offsets() and baked into the shipped manifest.
 
 
 def _read_stata_err() -> int:
@@ -651,7 +719,7 @@ def call_store_double(name: str, obs: int, var: int, val: float) -> int:
         _arm64_push_int(var)
         # _pushdbl takes a double* — create a buffer and push its address
         _arm64_push_double(val)
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(3)
         rc = _read_stata_err()
         _restore_sp(sp_before)
@@ -683,7 +751,7 @@ def call_store_string(name: str, obs: int, var: int, val: bytes) -> int:
         _arm64_push_int(obs)
         _arm64_push_int(var)
         _arm64_push_str(val)
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(3)
         rc = _read_stata_err()
         _restore_sp(sp_before)
@@ -723,7 +791,12 @@ def call_set_scalar(name: str, value: float) -> int:
     """
     if not _INITIALIZED:
         initialize()
-    addr = _BASE + 0x79c820  # _stscalsave
+    addr_vm = _sym_addr("_stscalsave")
+    if addr_vm is None:
+        # Fallback: use executeCommand
+        execute(f"scalar {name} = {value}")
+        return 0
+    addr = _BASE + addr_vm
     if _PLATFORM == "arm64":
         fn = ctypes.cast(
             addr,
@@ -745,12 +818,18 @@ def call_set_strscalar(name: str, value: str) -> int:
         initialize()
     if _PLATFORM == "arm64":
         val_bytes = value.encode()
+        xgso_vm = _sym_addr("_xgso_newcp_fast_code")
+        put_vm = _sym_addr("_put_xgso_scalar")
+        if xgso_vm is None or put_vm is None:
+            # Fallback: use executeCommand
+            execute(f'scalar {name} = "{value}"')
+            return 0
         xgso_fn = ctypes.cast(
-            _BASE + 0x8a9e84,  # _xgso_newcp_fast_code
+            _BASE + xgso_vm,
             ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_char_p),
         )
         put_fn = ctypes.cast(
-            _BASE + 0x6c9340,  # _put_xgso_scalar
+            _BASE + put_vm,
             ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p),
         )
         gso = xgso_fn(0x82, len(val_bytes) + 1, val_bytes)
@@ -785,7 +864,7 @@ def call_vlmodify(label_name: str, value: int, text: str) -> int:
         _arm64_push_str(label_name.encode())
         _arm64_push_int(value)
         _arm64_push_str(text.encode())
-        fn = ctypes.cast(rt, ctypes.CFUNCTYPE(None, ctypes.c_int))
+        fn = _get_fn(rt, None, ctypes.c_int)
         fn(3)
         rc = _read_stata_err()
         _restore_sp(sp_before)
@@ -814,29 +893,33 @@ def call_create_valuelabel(name: str) -> int:
     return call_vlmodify(name, 0, f"_{name}")
 
 
-# ─── Direct memory reads (platform-independent obs/var counts) ─────
-
-# From _bist_nobs disassembly:
-#   adrp x8, 0x39c7000   -> x8 = _BASE + 0x39c7000
-#   add  x8, x8, #0xf7c  -> x8 = _BASE + 0x39c7000 + 0xf7c
-#   ldr  s0, [x8]         -> load int32 (obs count)
-_OBS_ADDR_RELATIVE: int = 0x39c7000 + 0xf7c
+# ─── Obs/var counts via _bist_nobs / _bist_nvar (manifest lookup) ──
 
 
 def read_obs_count() -> int:
-    """Read obs count directly from Stata's internal memory."""
+    """Read obs count via _bist_nobs manifest function.
+
+    _bist_nobs returns a float (Stata internal), cast to int.
+    """
     if not _INITIALIZED:
         initialize()
-    addr = _BASE + _OBS_ADDR_RELATIVE
-    return ctypes.c_int32.from_address(addr).value
+    val = call_double("_bist_nobs")
+    if val is None:
+        return -1
+    return int(val)
 
 
 def read_var_count() -> int:
-    """Read variable count directly from Stata's internal memory."""
+    """Read variable count via _bist_nvar manifest function.
+
+    _bist_nvar returns a float (Stata internal), cast to int.
+    """
     if not _INITIALIZED:
         initialize()
-    addr = _BASE + _OBS_ADDR_RELATIVE - 4
-    return ctypes.c_int32.from_address(addr).value
+    val = call_double("_bist_nvar")
+    if val is None:
+        return -1
+    return int(val)
 
 
 # ─── Engine commands (via StataSO_Execute) ─────────────────────────

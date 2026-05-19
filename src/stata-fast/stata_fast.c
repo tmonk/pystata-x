@@ -103,6 +103,8 @@ struct stata_ctx {
 
     char          errmsg[512];     /* last error message               */
     int           has_error;       /* non-zero when errmsg is set      */
+
+    bist_ctx_t    bist;            /* fast _bist_* call context        */
 };
 
 /* ------------------------------------------------------------------ */
@@ -541,6 +543,419 @@ void* stata_sign_bist(void* base, uint64_t vmaddr) {
     if (vmaddr == 0) return NULL;
     uint8_t* raw = (uint8_t*)base + vmaddr;
     return stata_sign_ptr((void*)raw);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Fast _bist_* call path                                             */
+/* ------------------------------------------------------------------ */
+
+bist_ctx_t* stata_bist_ctx_new(uint64_t base_addr,
+                               uint64_t stack_ptr_off,
+                               uint64_t err_addr_off) {
+    bist_ctx_t* bctx = (bist_ctx_t*)calloc(1, sizeof(bist_ctx_t));
+    if (!bctx) return NULL;
+    bctx->base_addr     = base_addr;
+    bctx->stack_ptr_off = stack_ptr_off;
+    bctx->err_addr_off  = err_addr_off;
+    bctx->configured    = 1;
+    /* fn_addrs are all NULL (calloc), to be filled via set_fn */
+    return bctx;
+}
+
+void stata_bist_ctx_free(bist_ctx_t* bctx) {
+    free(bctx);
+}
+
+void stata_bist_configure(bist_ctx_t* bctx, uint64_t base_addr,
+                          uint64_t stack_ptr_off, uint64_t err_addr_off) {
+    if (!bctx) return;
+    bctx->base_addr     = base_addr;
+    bctx->stack_ptr_off = stack_ptr_off;
+    bctx->err_addr_off  = err_addr_off;
+    bctx->configured    = 1;
+}
+
+int stata_bist_set_fn(bist_ctx_t* bctx, int slot_id, void* fn_addr) {
+    if (!bctx) return -1;
+    if (slot_id < 0 || slot_id >= BIST_MAX_SLOTS) return -1;
+    bctx->fns[slot_id] = fn_addr;
+    return 0;
+}
+
+uint64_t stata_bist_get_sp(bist_ctx_t* bctx) {
+    if (!bctx || !bctx->configured) return 0;
+    return *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+}
+
+void stata_bist_set_sp(bist_ctx_t* bctx, uint64_t sp_val) {
+    if (!bctx || !bctx->configured) return;
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_val;
+}
+
+int stata_bist_get_err(bist_ctx_t* bctx) {
+    if (!bctx || !bctx->configured) return -1;
+    return *(int32_t*)(bctx->base_addr + bctx->err_addr_off);
+}
+
+/*
+ * ARM64: push+stack convention implementation.
+ * Called internally by the typed wrappers below.
+ */
+#if defined(__arm64__) || defined(__aarch64__)
+
+static double bist_push_and_call_double(bist_ctx_t* bctx, int slot_id,
+                                        int n_int_args, const int64_t* int_args) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return 0.0;
+
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    /* Push int args */
+    void (*pushint)(int64_t) = (void(*)(int64_t))bctx->fns[BIST_PUSHINT];
+    for (int i = 0; i < n_int_args; i++) {
+        pushint(int_args[i]);
+    }
+
+    /* Call bist function with arg count in w0 */
+    ((void(*)(int))fn)(n_int_args);
+
+    /* Read double result from Stata's internal stack */
+    uint64_t sp = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+    uint64_t tsmat = *(uint64_t*)sp;
+    double result = *(double*)*(uint64_t*)tsmat;
+
+    /* Restore stack pointer */
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+
+    return result;
+}
+
+static char* bist_push_and_call_string(bist_ctx_t* bctx, int slot_id,
+                                       int n_int_args, const int64_t* int_args) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return NULL;
+
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    void (*pushint)(int64_t) = (void(*)(int64_t))bctx->fns[BIST_PUSHINT];
+    for (int i = 0; i < n_int_args; i++) {
+        pushint(int_args[i]);
+    }
+
+    ((void(*)(int))fn)(n_int_args);
+
+    /* Read string result from Stata's internal stack.
+     * All pointer reads must be null-checked (the _bist_* function
+     * may return nothing on error, leaving the stack unchanged). */
+    uint64_t sp = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+    if (!sp) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t tsmat = *(uint64_t*)sp;
+    if (!tsmat) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t data_buf = *(uint64_t*)tsmat;
+    if (!data_buf) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t str_ptr = *(uint64_t*)data_buf;
+    if (!str_ptr) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint32_t slen = *(uint32_t*)str_ptr;
+
+    char* result = NULL;
+    if (slen > 0) {
+        result = (char*)malloc(slen);
+        if (result) {
+            memcpy(result, (void*)(str_ptr + 4), slen);
+            /* Trim trailing null bytes */
+            while (slen > 0 && result[slen - 1] == '\0') slen--;
+            result[slen] = '\0';
+        }
+    } else {
+        result = strdup("");
+    }
+
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+
+    return result;
+}
+
+static double bist_push_str_and_call_double(bist_ctx_t* bctx, int slot_id,
+                                            const char* str_arg) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return 0.0;
+
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    /* Push string arg via _pushstr */
+    void (*pushstr)(const char*, size_t) = (void(*)(const char*, size_t))bctx->fns[BIST_PUSHSTR];
+    size_t len = strlen(str_arg);
+    pushstr(str_arg, len);
+
+    ((void(*)(int))fn)(1);
+
+    uint64_t sp = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+    uint64_t tsmat = *(uint64_t*)sp;
+    double result = *(double*)*(uint64_t*)tsmat;
+
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+
+    return result;
+}
+
+static char* bist_push_str_and_call_string(bist_ctx_t* bctx, int slot_id,
+                                           const char* str_arg) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return NULL;
+
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    void (*pushstr)(const char*, size_t) = (void(*)(const char*, size_t))bctx->fns[BIST_PUSHSTR];
+    size_t len = strlen(str_arg);
+    pushstr(str_arg, len);
+
+    ((void(*)(int))fn)(1);
+
+    uint64_t sp = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+    if (!sp) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t tsmat = *(uint64_t*)sp;
+    if (!tsmat) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t data_buf = *(uint64_t*)tsmat;
+    if (!data_buf) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint64_t str_ptr = *(uint64_t*)data_buf;
+    if (!str_ptr) { *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved; return NULL; }
+    uint32_t slen = *(uint32_t*)str_ptr;
+
+    char* result = NULL;
+    if (slen > 0) {
+        result = (char*)malloc(slen);
+        if (result) {
+            memcpy(result, (void*)(str_ptr + 4), slen);
+            while (slen > 0 && result[slen - 1] == '\0') slen--;
+            result[slen] = '\0';
+        }
+    } else {
+        result = strdup("");
+    }
+
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+
+    return result;
+}
+
+#else /* x86_64 / Windows — standard ABI, direct calls */
+
+/* For non-ARM64 platforms, we fall back to C function pointer calls.
+ * These use standard SysV (x86_64) or Microsoft x64 (Windows) ABI,
+ * so no push+stack convention is needed. */
+
+static double bist_std_call_double(bist_ctx_t* bctx, int slot_id,
+                                   int n_int_args, const int64_t* int_args) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return 0.0;
+    if (n_int_args == 0)  return ((double(*)(void))fn)();
+    if (n_int_args == 1)  return ((double(*)(int64_t))fn)(int_args[0]);
+    if (n_int_args == 2)  return ((double(*)(int64_t,int64_t))fn)(int_args[0], int_args[1]);
+    return 0.0;
+}
+
+static char* bist_std_call_string(bist_ctx_t* bctx, int slot_id,
+                                  int n_int_args, const int64_t* int_args) {
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return NULL;
+    const char* s = NULL;
+    if (n_int_args == 0)  s = ((const char*(*)(void))fn)();
+    if (n_int_args == 1)  s = ((const char*(*)(int64_t))fn)(int_args[0]);
+    if (n_int_args == 2)  s = ((const char*(*)(int64_t,int64_t))fn)(int_args[0], int_args[1]);
+    return s ? strdup(s) : NULL;
+}
+
+#endif /* __arm64__ */
+
+/*
+ * Typed wrapper functions — these are the actual API.
+ * Each wraps the appropriate internal push+call implementation
+ * (ARM64 or standard) and makes a single call from Python via ctypes.
+ */
+
+double stata_bist_call_d0(bist_ctx_t* bctx, int slot_id) {
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_double(bctx, slot_id, 0, NULL);
+#else
+    return bist_std_call_double(bctx, slot_id, 0, NULL);
+#endif
+}
+
+double stata_bist_call_d1i(bist_ctx_t* bctx, int slot_id, int64_t arg1) {
+    int64_t args[1] = { arg1 };
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_double(bctx, slot_id, 1, args);
+#else
+    return bist_std_call_double(bctx, slot_id, 1, args);
+#endif
+}
+
+double stata_bist_call_d2i(bist_ctx_t* bctx, int slot_id,
+                           int64_t arg1, int64_t arg2) {
+    int64_t args[2] = { arg1, arg2 };
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_double(bctx, slot_id, 2, args);
+#else
+    return bist_std_call_double(bctx, slot_id, 2, args);
+#endif
+}
+
+double stata_bist_call_d1s(bist_ctx_t* bctx, int slot_id,
+                           const char* str_arg) {
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_str_and_call_double(bctx, slot_id, str_arg);
+#else
+    if (!str_arg) return 0.0;
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return 0.0;
+    return ((double(*)(const char*))fn)(str_arg);
+#endif
+}
+
+char* stata_bist_call_s0(bist_ctx_t* bctx, int slot_id) {
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_string(bctx, slot_id, 0, NULL);
+#else
+    return bist_std_call_string(bctx, slot_id, 0, NULL);
+#endif
+}
+
+char* stata_bist_call_s1i(bist_ctx_t* bctx, int slot_id, int64_t arg1) {
+    int64_t args[1] = { arg1 };
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_string(bctx, slot_id, 1, args);
+#else
+    return bist_std_call_string(bctx, slot_id, 1, args);
+#endif
+}
+
+char* stata_bist_call_s2i(bist_ctx_t* bctx, int slot_id,
+                          int64_t arg1, int64_t arg2) {
+    int64_t args[2] = { arg1, arg2 };
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_and_call_string(bctx, slot_id, 2, args);
+#else
+    return bist_std_call_string(bctx, slot_id, 2, args);
+#endif
+}
+
+char* stata_bist_call_s1s(bist_ctx_t* bctx, int slot_id,
+                          const char* str_arg) {
+#if defined(__arm64__) || defined(__aarch64__)
+    return bist_push_str_and_call_string(bctx, slot_id, str_arg);
+#else
+    if (!str_arg) return NULL;
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return NULL;
+    const char* s = ((const char*(*)(const char*))fn)(str_arg);
+    return s ? strdup(s) : NULL;
+#endif
+}
+
+int stata_bist_store_double(bist_ctx_t* bctx, int slot_id,
+                            int64_t obs, int64_t var, double val) {
+    if (!bctx || slot_id < 0 || slot_id >= BIST_MAX_SLOTS) return -1;
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return -1;
+#if defined(__arm64__) || defined(__aarch64__)
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    void (*pushint)(int64_t) = (void(*)(int64_t))bctx->fns[BIST_PUSHINT];
+    void (*pushdbl)(const void*) = (void(*)(const void*))bctx->fns[BIST_PUSHDBL];
+
+    pushint(obs);
+    pushint(var);
+    pushdbl(&val);
+
+    ((void(*)(int))fn)(3);
+
+    int rc = *(int32_t*)(bctx->base_addr + bctx->err_addr_off);
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+    return rc;
+#else
+    return ((int(*)(int64_t,int64_t,double))fn)(obs, var, val);
+#endif
+}
+
+int stata_bist_store_string(bist_ctx_t* bctx, int slot_id,
+                            int64_t obs, int64_t var, const char* val) {
+    if (!bctx || slot_id < 0 || slot_id >= BIST_MAX_SLOTS) return -1;
+    void* fn = bctx->fns[slot_id];
+    if (!fn) return -1;
+#if defined(__arm64__) || defined(__aarch64__)
+    uint64_t sp_saved = *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off);
+
+    void (*pushint)(int64_t) = (void(*)(int64_t))bctx->fns[BIST_PUSHINT];
+    void (*pushstr)(const char*, size_t) = (void(*)(const char*, size_t))bctx->fns[BIST_PUSHSTR];
+
+    pushint(obs);
+    pushint(var);
+    size_t slen = strlen(val);
+    pushstr(val, slen);
+
+    ((void(*)(int))fn)(3);
+
+    int rc = *(int32_t*)(bctx->base_addr + bctx->err_addr_off);
+    *(uint64_t*)(bctx->base_addr + bctx->stack_ptr_off) = sp_saved;
+    return rc;
+#else
+    return ((int(*)(int64_t,int64_t,const char*))fn)(obs, var, val);
+#endif
+}
+
+/*
+ * Convenience wrappers — map directly to SFI methods.
+ */
+
+double stata_bist_get_nobs(bist_ctx_t* bctx) {
+    return stata_bist_call_d0(bctx, BIST_NOBS);
+}
+
+double stata_bist_get_nvar(bist_ctx_t* bctx) {
+    return stata_bist_call_d0(bctx, BIST_NVAR);
+}
+
+double stata_bist_get_double(bist_ctx_t* bctx, int obs, int var) {
+    return stata_bist_call_d2i(bctx, BIST_DATA, (int64_t)obs, (int64_t)var);
+}
+
+char* stata_bist_get_string(bist_ctx_t* bctx, int obs, int var) {
+    return stata_bist_call_s2i(bctx, BIST_SDATA, (int64_t)obs, (int64_t)var);
+}
+
+char* stata_bist_get_varname(bist_ctx_t* bctx, int varno) {
+    return stata_bist_call_s1i(bctx, BIST_VARNAME, (int64_t)varno);
+}
+
+char* stata_bist_get_varlabel(bist_ctx_t* bctx, int varno) {
+    return stata_bist_call_s1i(bctx, BIST_VARLABEL, (int64_t)varno);
+}
+
+char* stata_bist_get_vartype(bist_ctx_t* bctx, int varno) {
+    return stata_bist_call_s1i(bctx, BIST_VARTYPE, (int64_t)varno);
+}
+
+char* stata_bist_get_varfmt(bist_ctx_t* bctx, int varno) {
+    return stata_bist_call_s1i(bctx, BIST_VARFMT, (int64_t)varno);
+}
+
+char* stata_bist_get_macro(bist_ctx_t* bctx, const char* name) {
+    return stata_bist_call_s1s(bctx, BIST_GLOBAL, name);
+}
+
+double stata_bist_get_scalar(bist_ctx_t* bctx, const char* name) {
+    return stata_bist_call_d1s(bctx, BIST_NUMSCALAR, name);
+}
+
+char* stata_bist_get_scalar_str(bist_ctx_t* bctx, const char* name) {
+    return stata_bist_call_s1s(bctx, BIST_STRSCALAR, name);
+}
+int stata_bist_store(bist_ctx_t* bctx, int obs, int var, double val) {
+    return stata_bist_store_double(bctx, BIST_STORE, (int64_t)obs, (int64_t)var, val);
+}
+
+int stata_bist_sstore(bist_ctx_t* bctx, int obs, int var, const char* val) {
+    return stata_bist_store_string(bctx, BIST_SSTORE, (int64_t)obs, (int64_t)var, val);
 }
 
 /* ------------------------------------------------------------------ */

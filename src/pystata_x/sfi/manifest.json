@@ -4,7 +4,7 @@
   "format": "macho",
   "platform": "darwin",
   "n_total_symbols": 79005,
-  "n_bist_symbols": 473,
+  "n_bist_symbols": 476,
   "symbols": {
     "_bi_st_ms_unab": 729236,
     "_bist_select": 1867912,
@@ -154,7 +154,9 @@
     "_pushdbl": 5684040,
     "_pushint": 5684152,
     "_pushstr": 5684376,
+    "_put_xgso_scalar": 7115584,
     "_stpy_getline": 7633624,
+    "_stscalsave": 7981088,
     "_stpy_getmissingvalue": 8041532,
     "_stpy_isvaluemissing": 8041808,
     "_stpy_getmissingoffset": 8042072,
@@ -325,6 +327,7 @@
     "_stpy_df_isstrlbinary": 8134016,
     "_stpy_dir_retval": 8134496,
     "_stpy_getoutput": 8134776,
+    "_xgso_newcp_fast_code": 9084548,
     "_bi_st_ms_unabid": 49255955,
     "_bist_selectid": 49276605,
     "_bist_addobsid": 49276666,
@@ -479,5 +482,9 @@
     "_StataSO_SetOutputBufferSz_K": 19308,
     "_StataSO_SetOutputBufferSz_M": 19312,
     "_StataSO_Shutdown": 19252
+  },
+  "data_offsets": {
+    "stack_ptr_delta": 60518664,
+    "err_addr_delta": 60518684
   }
 }

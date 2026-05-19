@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "timestamp": "20260519_192814",
+    "commit": "229706e",
+    "dataset": "/Users/tom/projects/pystata-x/benchmarks/data/benchmark_50000obs_25vars.dta",
+    "n_warmup": 3,
+    "n_measured": 10
+  },
+  "methods": {}
+}

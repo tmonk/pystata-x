@@ -21,7 +21,8 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    # No hard deps — sfi is only available inside Stata's Python process
+    # capstone for ARM64 instruction decoding (archived manifest + auto-detect)
+    "capstone>=5.0.0",
 ]
 
 [project.urls]
