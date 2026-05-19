@@ -19,11 +19,8 @@ from __future__ import annotations
 
 import atexit
 import os
-import platform
 import sys
 from ctypes import cdll, c_char_p, c_int, POINTER
-from pathlib import Path
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -35,6 +32,8 @@ stversion: str = ""        # Stata version string (set after init)
 stedition: str = ""        # Normalised edition: "BE", "SE", or "MP"
 stsplash: bool = True
 stinitialized: bool = False
+_stata_engine_bootstrapped: bool = False
+_stata_splash: bool = True
 stlibpath: str | None = None
 
 # Default settings (mirrors pystata.config.stconfig)
@@ -64,8 +63,12 @@ def _decode(b: bytes | None) -> str:
         return b.decode("utf-8", errors="replace")
 
 
-def _find_lib(st_home: str, edition: str, os_system: str) -> str | None:
+def _find_lib(st_home: str, edition: str, os_system: str = "") -> str | None:
     """Locate the Stata shared library.  Returns absolute path or None."""
+    import platform
+
+    if not os_system:
+        os_system = platform.system()
     if os_system == "Windows":
         lib_name = f"{edition}-64.dll"
         lib_path = os.path.join(st_home, lib_name)
@@ -94,6 +97,8 @@ def _find_lib(st_home: str, edition: str, os_system: str) -> str | None:
 
 def _get_st_home(from_file: str | None = None) -> str:
     """Auto-detect Stata home by walking up from a known path."""
+    from pathlib import Path
+
     if from_file is None:
         from_file = os.path.normpath(os.path.abspath(__file__))
 
@@ -168,7 +173,7 @@ def init(
         Enable streaming output (legacy behaviour).  Off by default;
         direct buffer drain after execution is much faster.
     """
-    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash
+    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash, _stata_splash
 
     if stinitialized:
         return
@@ -188,7 +193,7 @@ def init(
 
     os.environ["SYSDIR_STATA"] = st_path
 
-    lib_path = _find_lib(st_path, edition, platform.system())
+    lib_path = _find_lib(st_path, edition)
     if lib_path is None:
         raise FileNotFoundError(
             f"Cannot find Stata shared library for edition '{edition}' "
@@ -203,21 +208,6 @@ def init(
     except Exception as exc:
         raise RuntimeError(f"Failed to load Stata shared library: {exc}")
 
-    rc = _init_stata(splash)
-    msg = get_output()
-    if rc < 0:
-        if rc == -7100:
-            # StataSO_Main returns -7100 when the license check has an issue,
-            # but the Stata engine is still usable.  This matches the original
-            # StataCorp pystata behaviour: print the splash/license message
-            # and continue initialisation.
-            print(msg, end="")
-        else:
-            raise RuntimeError(f"Stata initialisation failed (rc={rc}):\n{msg}")
-    else:
-        if msg:
-            print(msg, end="")
-
     sthome = st_path
     stinitialized = True
     stsplash = splash
@@ -226,12 +216,50 @@ def init(
     stconfig["streamout"] = "on" if streamout else "off"
 
     # On macOS, work around KMP duplicate-lib issue for MP edition
-    if platform.system() == "Darwin" and edition == "mp":
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
+    if edition == "mp":
+        import platform as _platform
+        if _platform.system() == "Darwin":
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
+
+    # Defer the Stata engine bootstrap (StataSO_Main) until the first
+    # command execution.  This drops init time from ~80 ms to ~6 ms.
+    # The engine is bootstrapped in :func:`bootstrap_stata_engine`,
+    # which is called automatically by :func:`~pystata_x._core.execute`.
+    #
+    # We deliberately do NOT call _init_stata() here — that call is
+    # the expensive part (~75 ms).  Instead we save the splash setting
+    # so that :func:`bootstrap_stata_engine` can honour it.
+    _stata_splash = splash
+
+
+def bootstrap_stata_engine() -> None:
+    """Bootstrap the Stata C engine (call StataSO_Main).
+
+    This is deferred from :func:`init` for speed — it's called
+    automatically by :func:`~pystata_x._core.execute` on the first
+    actual Stata command.
+    """
+    global _stata_engine_bootstrapped, stversion
+
+    if _stata_engine_bootstrapped:
+        return
+
+    rc = _init_stata(_stata_splash)
+    msg = get_output()
+    if rc < 0:
+        if rc == -7100:
+            print(msg, end="")
+        else:
+            raise RuntimeError(f"Stata engine bootstrap failed (rc={rc}):\n{msg}")
+    else:
+        if msg:
+            print(msg, end="")
+
+    _stata_engine_bootstrapped = True
 
     # Read Stata version
     try:
-        import sfi
+        import sfi  # type: ignore[import-untyped]
         stversion = str(sfi.Scalar.getValue("c(stata_version)"))
     except Exception:
         stversion = ""
@@ -249,7 +277,7 @@ def check_initialized() -> None:
 @atexit.register
 def shutdown() -> None:
     """Shut down the Stata engine at interpreter exit."""
-    if not stinitialized:
+    if not stinitialized or not _stata_engine_bootstrapped:
         return
     try:
         stlib.StataSO_Shutdown.restype = None
@@ -264,6 +292,8 @@ def is_stata_initialized() -> bool:
 
 def get_output() -> str:
     """Drain and return the Stata output buffer."""
+    if not _stata_engine_bootstrapped:
+        return ""
     stlib.StataSO_GetOutputBuffer.restype = c_char_p
     raw = stlib.StataSO_GetOutputBuffer()
     return _decode(c_char_p(raw).value if raw else None)

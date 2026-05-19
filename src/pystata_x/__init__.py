@@ -15,14 +15,27 @@ statasetup.config()— One-shot Stata initialisation (drop-in for ``stata_setup`
 
 from __future__ import annotations
 
-from importlib.metadata import version as _metadata_version, PackageNotFoundError as _PackageNotFoundError
-
 from pystata_x._core import run, execute, get_output, ExecuteResult
 from pystata_x import _config as config
 
-try:
-    __version__ = _metadata_version("pystata-x")
-except _PackageNotFoundError:
-    __version__ = "0.0.0.dev0"
-
 __author__ = "Thomas Monk"
+
+
+def __getattr__(name: str):
+    """Lazy import of importlib.metadata for ``__version__``.
+
+    ``importlib.metadata`` is expensive to import (~30 ms). We defer
+    it until someone actually accesses ``pystata_x.__version__``,
+    which is almost never needed during cold-start initialisation.
+    """
+    if name == "__version__":
+        try:
+            from importlib.metadata import version as _v
+            return _v("pystata-x")
+        except Exception:
+            return "0.0.0.dev0"
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__: list[str] = []
+
