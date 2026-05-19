@@ -161,6 +161,23 @@ output, rc = sf.execute("display 3+4", echo=True)
 
 ## Build
 
+### CMake (recommended, cross-platform)
+
+```bash
+# Configure (adjust STATA_PATH for your installation)
+cmake -S src/stata-fast -B src/stata-fast/build \
+    -DSTATA_PATH="/Applications/StataNow" \
+    -DSTATA_EDITION=se
+
+# Build
+cmake --build src/stata-fast/build
+
+# Test
+cd src/stata-fast/build && ctest -V
+```
+
+### Makefile (macOS/Linux quick builds)
+
 ```bash
 cd src/stata-fast
 make          # → libstata_fast.dylib (macOS) / libstata_fast.so (Linux)
@@ -168,7 +185,13 @@ make test     # build + run C test
 make clean
 ```
 
-Requires: C99 compiler (`cc`), `libstata-{be,se,mp}.{dylib,so}` installed.
+### Convenience script (installs into Python package)
+
+```bash
+python3 build_c.py --release
+```
+
+Requires: CMake >= 3.20, C99 compiler, `libstata-{be,se,mp}.{dylib,so,dll}` installed.
 
 ## Platform Support
 
@@ -177,7 +200,9 @@ Requires: C99 compiler (`cc`), `libstata-{be,se,mp}.{dylib,so}` installed.
 | macOS (ARM64) | ✅ Tested (M3 Max) |
 | macOS (x86_64) | ✅ Compiles, untested |
 | Linux (x86_64) | 🟡 Code ready, untested |
-| Windows | ❌ Not planned |
+| Linux (ARM64) | 🟡 Code ready, untested |
+| Windows (x86_64) | 🟡 Code ready, untested |
+| Windows (ARM64) | 🟡 Code ready, cross-compiled via cibuildwheel |
 
 ## File Structure
 

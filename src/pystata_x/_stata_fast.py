@@ -32,17 +32,25 @@ _loaded: bool = False              # True after stata_load completes
 # ---------------------------------------------------------------------------
 
 def _find_lib() -> str:
-    """Locate libstata_fast.{dylib,so} relative to this source file."""
+    """Locate libstata_fast.{dylib,so,dll} relative to this source file."""
     src_dir = Path(__file__).resolve().parent.parent.parent  # repo root
     stata_fast_dir = src_dir / "src" / "stata-fast"
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Darwin":
         lib_name = "libstata_fast.dylib"
+        build_dir = stata_fast_dir / "build"
+    elif system == "Windows":
+        lib_name = "stata_fast.dll"  # CMake produces no lib prefix on Windows
+        build_dir = stata_fast_dir / "build"
     else:
         lib_name = "libstata_fast.so"
-    candidate = stata_fast_dir / lib_name
-    if candidate.is_file():
-        return str(candidate.resolve())
-    # Fall back to LD_LIBRARY_PATH / DYLD_LIBRARY_PATH
+        build_dir = stata_fast_dir / "build"
+    # Check direct source dir first, then CMake build dir, then build/Release (Windows)
+    for d in [stata_fast_dir, build_dir, build_dir / "Release"]:
+        candidate = d / lib_name
+        if candidate.is_file():
+            return str(candidate.resolve())
+    # Fall back to PATH / LD_LIBRARY_PATH / DYLD_LIBRARY_PATH
     return lib_name
 
 
@@ -142,9 +150,16 @@ def init(st_path: str, edition: str = "se", splash: bool = False) -> None:
     lib = _load_lib()
     os.environ.setdefault("SYSDIR_STATA", st_path)
 
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Darwin":
         if not os.path.isdir(st_path):
             raise OSError(f"Stata root not found: {st_path}")
+    elif system == "Windows":
+        # Accept both forward and backslash paths
+        norm_path = os.path.normpath(st_path)
+        if not os.path.isdir(norm_path):
+            raise OSError(f"Stata root not found: {norm_path}")
+    # Linux: don't check here (path may be a library-symlink dir, not a dir)
 
     if _loaded:
         # Library already loaded — only init engine

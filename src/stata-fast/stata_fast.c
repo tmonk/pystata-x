@@ -2,17 +2,81 @@
 /*
  * stata_fast.c — Minimal C wrapper around StataSO_* libstata calls.
  *
- * Loads libstata-{edition}.{dylib,so} at init and wraps the raw
+ * Loads libstata-{edition}.{dylib,so,dll} at init and wraps the raw
  * StataSO C functions into a lean API that does ClearBuffer +
  * Execute + GetOutputBuffer in a single call.
+ *
+ * Platform support:
+ *   macOS   — .dylib, dlopen/dlsym from libSystem
+ *   Linux   — .so,   dlopen/dlsym from libdl
+ *   Windows — .dll,  LoadLibrary/GetProcAddress from kernel32
  */
 
 #include "stata_fast.h"
 
-#include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* ------------------------------------------------------------------ */
+/*  Platform abstraction — dynamic library loading                    */
+/* ------------------------------------------------------------------ */
+
+#if defined(_WIN32)
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+/* Windows: LoadLibrary / GetProcAddress / FreeLibrary */
+#define DL_OPEN(name)     ((void*)LoadLibraryA(name))
+#define DL_SYM(handle, n) ((void*)GetProcAddress((HMODULE)(handle), n))
+#define DL_CLOSE(handle)  (FreeLibrary((HMODULE)(handle)))
+#define DL_ERROR()        win32_dlerror()
+
+/* setenv equivalent */
+#define SETENV(n, v, o)   do { (void)(o); _putenv_s((n), (v)); } while(0)
+
+#if defined(_MSC_VER) && _MSC_VER < 1900
+#define snprintf _snprintf
+#endif
+
+static const char* win32_dlerror(void) {
+    static char buf[256];
+    DWORD err = GetLastError();
+    if (err == 0) return "";
+    LPWSTR msg = NULL;
+    DWORD len = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+        NULL, err, LANG_NEUTRAL, (LPWSTR)&msg, 0, NULL);
+    if (msg) {
+        int n = WideCharToMultiByte(CP_UTF8, 0, msg, (int)len,
+                                     buf, (int)sizeof(buf) - 1,
+                                     NULL, NULL);
+        if (n > 0) buf[n] = '\0';
+        LocalFree(msg);
+    } else {
+        (void)snprintf(buf, sizeof(buf), "Windows error %lu",
+                       (unsigned long)err);
+    }
+    return buf;
+}
+
+#else
+/* --- POSIX (macOS / Linux): dlopen / dlsym / dlclose --- */
+#include <dlfcn.h>
+
+#define DL_OPEN(name)     dlopen(name, RTLD_NOW | RTLD_GLOBAL)
+#define DL_SYM(handle, n) dlsym(handle, n)
+#define DL_CLOSE(handle)  dlclose(handle)
+#define DL_ERROR()        dlerror()
+
+#ifdef __APPLE__
+#define SETENV(n, v, o)   setenv((n), (v), (o))
+#else
+#define SETENV(n, v, o)   setenv((n), (v), (o))
+#endif
+
+#endif /* _WIN32 */
 
 /* ------------------------------------------------------------------ */
 /*  libstata function-pointer types                                   */
@@ -28,7 +92,7 @@ typedef void (*so_shutdown_t)(void);
 /*  Runtime context                                                    */
 /* ------------------------------------------------------------------ */
 struct stata_ctx {
-    void*         lib_handle;      /* dlopen handle                    */
+    void*         lib_handle;      /* DL_OPEN handle                  */
     so_main_t     StataSO_Main;
     so_exec_t     StataSO_Execute;
     so_clear_t    StataSO_ClearOutputBuffer;
@@ -62,8 +126,6 @@ static void clear_error(stata_ctx* ctx) {
 
 /*
  * Check if a file exists.  Returns 1 if found, 0 otherwise.
- * Forward-declared to avoid -Wimplicit-function-declaration on Linux
- * where it is called from build_lib_path().
  */
 static int file_exists(const char* path) {
     if (!path) return 0;
@@ -93,17 +155,75 @@ static char* build_lib_path(const char* st_path, const char* edition) {
     else if (strcmp(edition, "mp") == 0) app_name = "MP";
     else return NULL;
 
-#ifdef __APPLE__
+#if defined(__APPLE__)
     /* --- macOS path ---
      * /Applications/StataNow/StataSE.app/Contents/MacOS/libstata-se.dylib
      */
-    size_t needed = strlen(st_path) + 1 + 32 + 1 + strlen(app_name) + 6 + 1 + 8 + 1 + 8 + 1 + strlen(edition) + 6 + 1;
+    size_t needed = strlen(st_path) + 1 + 32 + 1 + strlen(app_name) + 6
+                    + 1 + 8 + 1 + 8 + 1 + strlen(edition) + 6 + 1;
     char* path = malloc(needed);
     if (!path) return NULL;
     (void)snprintf(path, needed,
         "%s/Stata%s.app/Contents/MacOS/libstata-%s.dylib",
         st_path, app_name, edition);
     return path;
+#elif defined(_WIN32)
+    /* --- Windows paths (try multiple candidates) ---
+     *
+     * Common layouts:
+     *   C:\Program Files\StataNow\libstata-se.dll        (StataNow)
+     *   C:\Program Files\Stata18\libstata-se-x64.dll     (Stata 18, 64-bit)
+     *   C:\Program Files\StataSE18\libstata-se-x64.dll   (Stata 18 SE)
+     *   C:\Program Files\Stata\libstata-se.dll           (older installs)
+     *
+     * Override with STATA_LIB_NAME env var.
+     */
+    const char* lib_names[] = {
+        "libstata-%s.dll",       /* StataNow / Stata 16 */
+        "libstata-%s-x64.dll",   /* Stata 17 / 18       */
+        NULL
+    };
+    const char* override = getenv("STATA_LIB_NAME");
+    if (override && override[0]) {
+        lib_names[0] = override;
+        lib_names[1] = NULL;
+    }
+    char path_buffer[1024];
+    for (int ni = 0; lib_names[ni] != NULL; ni++) {
+        const char* fmt = lib_names[ni];
+        for (int di = 0; di < 2; di++) {
+            if (di == 0) {
+                (void)snprintf(path_buffer, sizeof(path_buffer),
+                    "%s\\", st_path);
+            } else {
+                (void)snprintf(path_buffer, sizeof(path_buffer),
+                    "%s\\..\\distn\\win64\\", st_path);
+            }
+            size_t prefix_len = strlen(path_buffer);
+            if (strcmp(edition, "be") == 0) {
+                (void)snprintf(path_buffer + prefix_len,
+                    sizeof(path_buffer) - prefix_len,
+                    "libstata.dll");
+            } else {
+                char lib_name[128];
+                (void)snprintf(lib_name, sizeof(lib_name), fmt, edition);
+                (void)snprintf(path_buffer + prefix_len,
+                    sizeof(path_buffer) - prefix_len,
+                    "%s", lib_name);
+            }
+            if (file_exists(path_buffer)) {
+                char* result = malloc(strlen(path_buffer) + 1);
+                if (result) strcpy(result, path_buffer);
+                return result;
+            }
+        }
+    }
+    /* None found — return first candidate for error message */
+    (void)snprintf(path_buffer, sizeof(path_buffer),
+        "%s\\libstata-%s.dll", st_path, edition);
+    char* result = malloc(strlen(path_buffer) + 1);
+    if (result) strcpy(result, path_buffer);
+    return result;
 #else
     /* --- Linux paths (try multiple candidates) ---
      *
@@ -123,7 +243,7 @@ static char* build_lib_path(const char* st_path, const char* edition) {
     };
     char path_buffer[1024];
     for (int i = 0; subdirs[i] != NULL; i++) {
-        if (subdirs[i][0] == '\\0') {
+        if (subdirs[i][0] == '\0') {
             if (strcmp(edition, "be") == 0)
                 (void)snprintf(path_buffer, sizeof(path_buffer),
                     "%s/libstata.so", st_path);
@@ -144,7 +264,7 @@ static char* build_lib_path(const char* st_path, const char* edition) {
             return result;
         }
     }
-    /* None found — return the first candidate for a better error message */
+    /* None found — return first candidate for error message */
     if (strcmp(edition, "be") == 0)
         (void)snprintf(path_buffer, sizeof(path_buffer),
             "%s/libstata.so", st_path);
@@ -157,11 +277,8 @@ static char* build_lib_path(const char* st_path, const char* edition) {
 #endif
 }
 
-/*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/*  Loading: dlopen + dlsym (no engine initialisation)                 */
+/*  Loading: DL_OPEN + DL_SYM (no engine initialisation)              */
 /* ------------------------------------------------------------------ */
 
 stata_ctx* stata_load(const char* st_path, const char* edition) {
@@ -186,27 +303,27 @@ stata_ctx* stata_load(const char* st_path, const char* edition) {
         return NULL;
     }
 
-    /* 2. dlopen */
-    ctx->lib_handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+    /* 2. DL_OPEN */
+    ctx->lib_handle = DL_OPEN(lib_path);
     if (!ctx->lib_handle) {
-        set_error(ctx, dlerror());
+        set_error(ctx, DL_ERROR());
         free(lib_path);
         free(ctx);
         return NULL;
     }
     free(lib_path);
 
-    /* 3. dlsym all functions */
-    ctx->StataSO_Main            = (so_main_t)dlsym(ctx->lib_handle, "StataSO_Main");
-    ctx->StataSO_Execute         = (so_exec_t)dlsym(ctx->lib_handle, "StataSO_Execute");
-    ctx->StataSO_ClearOutputBuffer = (so_clear_t)dlsym(ctx->lib_handle, "StataSO_ClearOutputBuffer");
-    ctx->StataSO_GetOutputBuffer = (so_getout_t)dlsym(ctx->lib_handle, "StataSO_GetOutputBuffer");
-    ctx->StataSO_SetBreak        = (so_setbreak_t)dlsym(ctx->lib_handle, "StataSO_SetBreak");
-    ctx->StataSO_Shutdown        = (so_shutdown_t)dlsym(ctx->lib_handle, "StataSO_Shutdown");
+    /* 3. DL_SYM all functions */
+    ctx->StataSO_Main            = (so_main_t)DL_SYM(ctx->lib_handle, "StataSO_Main");
+    ctx->StataSO_Execute         = (so_exec_t)DL_SYM(ctx->lib_handle, "StataSO_Execute");
+    ctx->StataSO_ClearOutputBuffer = (so_clear_t)DL_SYM(ctx->lib_handle, "StataSO_ClearOutputBuffer");
+    ctx->StataSO_GetOutputBuffer = (so_getout_t)DL_SYM(ctx->lib_handle, "StataSO_GetOutputBuffer");
+    ctx->StataSO_SetBreak        = (so_setbreak_t)DL_SYM(ctx->lib_handle, "StataSO_SetBreak");
+    ctx->StataSO_Shutdown        = (so_shutdown_t)DL_SYM(ctx->lib_handle, "StataSO_Shutdown");
 
     if (!ctx->StataSO_Main || !ctx->StataSO_Execute) {
         set_error(ctx, "Required StataSO symbols not found in libstata");
-        dlclose(ctx->lib_handle);
+        DL_CLOSE(ctx->lib_handle);
         free(ctx);
         return NULL;
     }
@@ -228,7 +345,7 @@ int stata_init_engine(stata_ctx* ctx, int splash) {
     /* Set SYSDIR_STATA if caller hasn't (stata_load sets it, but be safe) */
     const char* sd = getenv("SYSDIR_STATA");
     if (!sd || !sd[0]) {
-        setenv("SYSDIR_STATA", "/Applications/StataNow", 1);
+        SETENV("SYSDIR_STATA", "/Applications/StataNow", 1);
     }
 
 #define STATA_ARGV_MAX 8
@@ -285,11 +402,11 @@ stata_ctx* stata_init(const char* st_path, const char* edition, int splash) {
     if (!ctx) return NULL;
 
     /* Set SYSDIR_STATA — required by Stata to find its system files */
-    setenv("SYSDIR_STATA", st_path, 1);
+    SETENV("SYSDIR_STATA", st_path, 1);
 
     int rc = stata_init_engine(ctx, splash);
     if (rc != 0) {
-        dlclose(ctx->lib_handle);
+        DL_CLOSE(ctx->lib_handle);
         free(ctx);
         return NULL;
     }
@@ -307,7 +424,7 @@ void stata_shutdown(stata_ctx* ctx) {
         ctx->StataSO_Shutdown();
     }
     if (ctx->lib_handle) {
-        dlclose(ctx->lib_handle);
+        DL_CLOSE(ctx->lib_handle);
     }
     free(ctx);
 }

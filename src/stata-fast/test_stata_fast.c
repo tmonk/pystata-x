@@ -11,6 +11,14 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Fallback defaults when not building via CMake */
+#ifndef TEST_STATA_PATH
+#define TEST_STATA_PATH "/Applications/StataNow"
+#endif
+#ifndef TEST_STATA_EDITION
+#define TEST_STATA_EDITION "se"
+#endif
+
 static int tests = 0;
 static int passed = 0;
 
@@ -27,9 +35,9 @@ static int passed = 0;
 
 int main(void) {
     const char* st_path = getenv("STATA_PATH");
-    if (!st_path) st_path = "/Applications/StataNow";
+    if (!st_path) st_path = TEST_STATA_PATH;
     const char* edition = getenv("STATA_EDITION");
-    if (!edition) edition = "se";
+    if (!edition) edition = TEST_STATA_EDITION;
 
     printf("=== libstata_fast test ===\n");
     printf("  st_path=%s  edition=%s\n\n", st_path, edition);
