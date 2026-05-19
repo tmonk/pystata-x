@@ -1,0 +1,26 @@
+{
+  "benchmark": "cold_init_engine_only",
+  "description": "Time for StataSO_Main with -q, no -pyexec (engine init only, excludes dlopen)",
+  "timestamp": "20260519_055944",
+  "git_commit": "unknown",
+  "n_iterations": 10,
+  "engine_init_ms": [
+    10.188,
+    41.04,
+    11.158,
+    7.859,
+    7.56,
+    8.022,
+    7.395,
+    10.115,
+    7.429,
+    7.398
+  ],
+  "median_ms": 7.9405,
+  "mean_ms": 11.8164,
+  "min_ms": 7.395,
+  "max_ms": 41.04,
+  "p90_ms": 41.04,
+  "p10_ms": 7.398,
+  "summary": "Engine init (StataSO_Main, -q, no -pyexec): median=7.941 ms (N=10) target \u226412.5 ms: ACHIEVED"
+}

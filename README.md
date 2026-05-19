@@ -97,17 +97,64 @@ init skips:
 | `stata_setup` wrapper overhead | ~50 ms (filesystem checks, extra imports) | **Inlined** |
 | **Total** | **~1.50 s** | **~0.13 s** |
 
+## libstata_fast — C-level performance optimisation
+
+`src/stata-fast/libstata_fast.{dylib,so}` is a minimal C shared library
+that wraps the raw StataSO_* API (`ClearOutputBuffer` + `Execute` +
+`GetOutputBuffer`) into a **single C function call**, eliminating all
+Python overhead from the hot path.
+
+**Why not a subprocess/pipe approach?** Pipes add syscall + context-switch
+overhead that is *slower* than a direct in-process call.  The bottleneck
+was Python overhead (~29 µs per call), not the Stata engine (~1 µs).
+
+The direct C wrapper achieves this per-command timeline:
+
+| Phase | Time |
+|-------|------|
+| ctypes call + C function dispatch | ~0.2 µs |
+| `StataSO_ClearOutputBuffer` | ~0.0 µs |
+| `StataSO_Execute` | ~0.8 µs |
+| `StataSO_GetOutputBuffer` | ~0.3 µs |
+| Memory copy + decode | ~1.0 µs |
+| **Total** | **~2.3 µs** |
+
+| Metric | Baseline (Python) | `libstata_fast` | Speedup |
+|--------|------------------|-----------------|---------|
+| Single command (`display 1+1`) | 36.8 µs | **2.3 µs** | **16×** |
+| Cold init (standard) | 125 ms | **125 ms** | same |
+| **Fork-based cold init** | — | **1.2 ms** | **104×** |
+| Throughput | ~25k ops/s | **~435k ops/s** | **17×** |
+
+**Fork pattern**: call `stata_init()` once in a master process, then
+`os.fork()` workers — forked children inherit the fully initialised
+Stata engine in ~1 ms instead of 125 ms.
+
+See `src/stata-fast/README.md` for the full API, build instructions, and
+architecture decisions.
+
 ## Project Structure
 
 ```
-src/pystata_x/
-├── __init__.py              # Package entry point
-├── _config.py               # Fast Stata initialisation (no IPython/py2 compat)
-├── _core.py                 # Fast command execution (direct StataSO_Execute)
-└── stata_setup.py           # Drop-in replacement for PyPI `stata-setup`
+src/
+├── pystata_x/
+│   ├── __init__.py              # Package entry point
+│   ├── _config.py               # Fast Stata initialisation (no IPython/py2 compat)
+│   ├── _core.py                 # Fast command execution (direct StataSO_Execute)
+│   ├── _stata_fast.py           # Python ctypes bridge to libstata_fast
+│   └── stata_setup.py           # Drop-in replacement for PyPI `stata-setup`
+├── stata-fast/
+│   ├── README.md                # Full documentation
+│   ├── Makefile                 # Build system
+│   ├── stata_fast.h             # C API header
+│   ├── stata_fast.c             # Implementation (~300 lines)
+│   └── test_stata_fast.c        # C tests (15 tests)
 benchmarks/
-├── run_benchmarks.py        # Comprehensive benchmark runner
-└── history/                 # Benchmark result history
+├── bench_baseline.py            # Baseline benchmark
+├── bench_stata_fast.py          # libstata_fast latency benchmark
+├── bench_stata_fast_full.py     # Full benchmark suite
+├── bench_stata_fast_fork.py     # Fork-based cold init benchmark
+└── history/                     # Benchmark result history (JSON)
 ```
 
 ## Cross-platform
