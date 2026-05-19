@@ -50,3 +50,8 @@ def config(path: str, edition: str, splash: bool = True) -> None:
     from pystata_x import _config as fast_config
 
     fast_config.init(edition, st_path=path, splash=splash)
+
+    # Inject our zero-overhead sfi module so 'from sfi import Macro, Data'
+    # works without Stata's proprietary utilities/sfi module.
+    from pystata_x import sfi as _px_sfi
+    sys.modules['sfi'] = _px_sfi

@@ -13,6 +13,7 @@
 #define STATA_FAST_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -126,6 +127,31 @@ void stata_clear_output(stata_ctx* ctx);
  * Returns STATA_OK on success, negative on error.
  */
 int stata_set_break(stata_ctx* ctx);
+
+/* ------------------------------------------------------------------ */
+/*  Pointer authentication (PAC) for arm64e                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sign an unauthenticated function pointer for arm64e PAC.
+ *
+ * On arm64e: uses ptrauth_sign_unauthenticated with the function-pointer
+ * key (ptrauth_key_function_pointer / ASIA) and discriminator 0.
+ *
+ * On arm64 (non-arm64e), x86_64, and Windows: returns ptr unchanged.
+ *
+ * Usage:
+ *   void* raw = (void*)(base + vmaddr);
+ *   void* signed_fn = stata_sign_ptr(raw);
+ *   // now safe to call through signed_fn via a properly typed fn ptr
+ */
+void* stata_sign_ptr(void* ptr);
+
+/*
+ * Convenience: compute base + vmaddr and sign the result.
+ * Returns NULL if vmaddr is 0.
+ */
+void* stata_sign_bist(void* base, uint64_t vmaddr);
 
 /* ------------------------------------------------------------------ */
 /*  Diagnostics                                                       */

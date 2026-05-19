@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ------------------------------------------------------------------ */
 /*  Platform abstraction — dynamic library loading                    */
@@ -503,6 +504,43 @@ int stata_set_break(stata_ctx* ctx) {
     if (!ctx || !ctx->StataSO_SetBreak) return STATA_ERR;
     ctx->StataSO_SetBreak();
     return STATA_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Pointer authentication (PAC) for arm64e                            */
+/* ------------------------------------------------------------------ */
+
+void* stata_sign_ptr(void* ptr) {
+    if (!ptr) return NULL;
+#if defined(__ARM_FEATURE_PAC_DEFAULT) && __ARM_FEATURE_PAC_DEFAULT
+    /*
+     * arm64e (ARMv8.3+ with PAC extension): sign the function pointer
+     * with the function-pointer key (ASIA) and discriminator 0.
+     * ptrauth.h is provided by the Clang compiler when targeting arm64e.
+     */
+#ifdef __has_include
+#if __has_include(<ptrauth.h>)
+#include <ptrauth.h>
+    return ptrauth_sign_unauthenticated(ptr, ptrauth_key_function_pointer, 0);
+#else
+    /* Fallback: assume the pointer is already valid (e.g. pointer-authenticated
+       code section running on arm64e without explicit ptrauth.h) */
+    return ptr;
+#endif
+#else
+    return ptr;
+#endif
+#else
+    /* arm64 (non-PAC), x86_64, Windows: signing is a no-op */
+    (void)ptr;
+    return ptr;
+#endif
+}
+
+void* stata_sign_bist(void* base, uint64_t vmaddr) {
+    if (vmaddr == 0) return NULL;
+    uint8_t* raw = (uint8_t*)base + vmaddr;
+    return stata_sign_ptr((void*)raw);
 }
 
 /* ------------------------------------------------------------------ */

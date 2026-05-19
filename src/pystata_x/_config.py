@@ -120,19 +120,18 @@ def _get_executable_path() -> str:
 def _init_stata(splash: bool) -> int:
     """Call StataSO_Main to bootstrap the Stata engine.
 
-    This is a direct ctypes binding to Stata's C API.  The argument layout
-    mirrors what the native Stata binary expects on its command line:
-    argv[0] is the program name (empty string = null placeholder), followed
-    by flags ``-q`` (quiet startup) and ``-pyexec <path>`` (Python executable
-    for Stata's embedded Python).
+    Uses NO ``-pyexec`` flag — we access Stata data through direct
+    ``_bist_*`` C function calls, not through Stata's embedded Python.
+    This avoids Python-version compatibility issues (ast.FrameError
+    was removed in Python 3.14) and startup overhead.
     """
     stlib.StataSO_Main.restype = c_int
     stlib.StataSO_Main.argtypes = (c_int, POINTER(c_char_p))
 
-    pyexec = _get_executable_path()
-    args = ["", "-q", "-pyexec", pyexec]
     if splash:
-        args = ["-pyexec", pyexec]
+        args = [""]
+    else:
+        args = ["", "-q"]
 
     c_argv = (c_char_p * len(args))()
     for i, a in enumerate(args):
