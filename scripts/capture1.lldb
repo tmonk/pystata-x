@@ -1,0 +1,36 @@
+# lldb state capture command file
+# Usage: lldb -b -s scripts/capture1.lldb /path/to/python3 -- script.py
+
+# Import the capture helpers
+script import sys, json, os, struct
+script sys.path.insert(0, os.path.abspath('scripts'))
+script import lldb_report
+
+# Set breakpoint on _bi_st_strlpart by slide address
+breakpoint set -a 0x1d8a64 -s libstata-se.dylib
+
+# Add command: on hit, run the capture function and continue
+breakpoint command add 1.1
+    script lldb_report.report_hit(debugger, None, lldb.SBCommandReturnObject(), {})
+    continue
+DONE
+
+# List breakpoints
+breakpoint list
+
+# Launch process
+process launch
+
+# Show results
+script lldb_report.show_hits(debugger, None, lldb.SBCommandReturnObject(), {})
+
+# Continue past the function if it returns
+continue
+
+# Show results after function return
+script lldb_report.show_hits(debugger, None, lldb.SBCommandReturnObject(), {})
+
+# Write report
+script lldb_report.write_report(debugger, None, lldb.SBCommandReturnObject(), {})
+
+quit

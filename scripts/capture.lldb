@@ -1,0 +1,24 @@
+# lldb command file for state capture
+# Usage: lldb -b -s scripts/capture.lldb /path/to/python3 -- script.py
+
+# Set breakpoint by slide address in libstata-se.dylib
+# _bi_st_strlpart is at slide 0x1d8a64
+breakpoint set -a 0x1d8a64 -s libstata-se.dylib
+breakpoint name add -C "script report_hit()" 1
+
+# Show what we have
+breakpoint list
+
+# Run
+process launch
+
+# After first hit, show what we captured
+script show_hits()
+
+# Continue and capture more
+continue
+
+script show_hits()
+
+# Done — write report
+script write_report()
