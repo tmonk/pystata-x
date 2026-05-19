@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/tom/projects/pystata-x/src/stata-fast/build2/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

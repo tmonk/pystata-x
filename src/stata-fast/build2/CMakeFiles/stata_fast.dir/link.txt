@@ -1,1 +1,0 @@
-/usr/bin/cc  -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -o libstata_fast.dylib -install_name @rpath/libstata_fast.dylib CMakeFiles/stata_fast.dir/stata_fast.c.o

@@ -1,3 +1,0 @@
-compile_check 1 0.00395775
-test_stata_fast 1 0.0394083
----
