@@ -195,14 +195,33 @@ Requires: CMake >= 3.20, C99 compiler, `libstata-{be,se,mp}.{dylib,so,dll}` inst
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| macOS (ARM64) | ✅ Tested (M3 Max), CI builds + full Stata tests |
-| macOS (x86_64) | ✅ CI-compiled, needs Stata testing |
-| Linux (x86_64) | ✅ CI-compiled (GCC), compile-check passes |
-| Linux (ARM64) | 🟡 CI-ready, untested |
-| Windows (x86_64) | ✅ CI-compiled (MSVC), compile-check passes |
-| Windows (ARM64) | 🟡 CI-ready (cross-compiled via cibuildwheel) |
+| Platform | Status | Toolchain |
+|----------|--------|-----------|
+| macOS (ARM64) | ✅ Tested (M3 Max), full Stata tests | clang (Xcode CLT), CMake, make |
+| macOS (x86_64) | ✅ CI-compiled, needs Stata testing | clang (Xcode CLT), CMake, make |
+| Linux (x86_64) | ✅ CI-compiled (GCC), compile-check passes | gcc/clang, CMake, make |
+| Linux (ARM64) | 🟡 CI-ready, untested | gcc/clang, CMake, make |
+| Windows (x86_64) | ✅ CI-compiled (MSVC), compile-check passes | MSVC or MinGW, CMake |
+| Windows (ARM64) | 🟡 Compiled (LLVM MinGW cross), unit tests pass | **LLVM MinGW** (x86_64 cross), CMake w/ MinGW Makefiles |
+
+### Windows ARM64 Notes
+
+On ARM64 Windows, Stata runs as an x86_64 binary under emulation.  The C
+extension must be compiled for **x86_64** to match:
+
+```bash
+# Install the cross-compiler
+winget install MartinStorsjo.LLVM-MinGW.UCRT
+
+# Build with CMake
+cmake -G "MinGW Makefiles" -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc ^
+    -DCMAKE_MAKE_PROGRAM=mingw32-make ^
+    -DSTATA_PATH="C:\Program Files\StataNow19" -DSTATA_EDITION=se ..
+cmake --build .
+```
+
+Python capstone requires **≥ 6.0.0a5** on win_arm64 (5.x has no binary wheel
+and needs MSVC nmake to build from source, which is not available on ARM64).
 
 ## File Structure
 

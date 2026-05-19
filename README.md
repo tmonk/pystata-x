@@ -157,6 +157,67 @@ benchmarks/
 └── history/                     # Benchmark result history (JSON)
 ```
 
+## Toolchain Requirements
+
+### macOS (ARM64 / x86_64)
+
+| Tool | Version | Install |
+|------|---------|---------|
+| C compiler | clang (Xcode CLT) | `xcode-select --install` |
+| Build system | CMake ≥ 3.20 | `brew install cmake` or `pip install cmake` |
+| Python | ≥ 3.10 | `brew install python` or `uv python install` |
+| capstone | ≥ 5.0.0 | `pip install capstone` |
+| Stata | StataNow / Stata 18+ | — |
+
+### Linux (x86_64 / ARM64)
+
+| Tool | Version | Install |
+|------|---------|---------|
+| C compiler | gcc or clang | `apt install gcc cmake` / `yum install gcc cmake` |
+| Build system | CMake ≥ 3.20 | `apt install cmake` / `pip install cmake` |
+| Python | ≥ 3.10 | `apt install python3` or `uv python install` |
+| capstone | ≥ 5.0.0 | `pip install capstone` |
+| Stata | StataNow / Stata 18+ | — |
+
+### Windows (x86_64 native)
+
+| Tool | Version | Install |
+|------|---------|---------|
+| C compiler | MSVC (VS BuildTools) or MinGW-w64 | `winget install Microsoft.VisualStudio.2022.BuildTools` or `scoop install mingw` |
+| Build system | CMake ≥ 3.20 | `winget install Kitware.CMake` |
+| Python | ≥ 3.10 (64-bit) | `python.org` or `scoop install python` |
+| capstone | ≥ 5.0.0 | `pip install capstone` (win_amd64 wheel available) |
+| Stata | StataNow / Stata 18+ | — |
+
+### Windows (ARM64 → x86_64 target) ⚠️
+
+On ARM64 Windows, Stata is an x86_64 binary running under emulation.  The C
+extension must be compiled for **x86_64** to match Stata's architecture.
+
+| Tool | Version | Install |
+|------|---------|---------|
+| C compiler | LLVM MinGW (x86_64 cross) | `winget install MartinStorsjo.LLVM-MinGW.UCRT` |
+| Build system | CMake ≥ 3.20 | `winget install Kitware.CMake` |
+| C build | MinGW Makefiles | `cmake -G "MinGW Makefiles" -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc` |
+| Python (ARM64) | ≥ 3.10 | `python.org` — works for **unit tests only** |
+| Python (x86_64 for Stata) | ≥ 3.10 | Needed for Stata integration tests (ARM64 Python cannot load x86_64 DLLs) |
+| capstone | **≥ 6.0.0a5** required | `pip install capstone` — 5.x has no win_arm64 wheel and fails to build from source (needs MSVC nmake) |
+| Stata | StataNow / Stata 18+ (x86_64) | `C:\Program Files\StataNow19\` |
+
+**⚠️ Architecture mismatch on ARM64 Windows**: Python on ARM64 Windows loads
+DLLs with `ctypes.CDLL`.  ARM64 Python can only load ARM64 DLLs.  Stata's
+`se-64.dll` is x86_64, so it can only be loaded from an **x86_64 Python process**
+(running under emulation).  Options:
+
+1. **Use Stata's embedded Python** — run tests inside Stata via `python:` blocks
+   (Stata launches its own x86_64 Python interpreter).
+2. **Install a separate x86_64 Python** — e.g. via `scoop install python` after
+   forcing x86_64 architecture, or download `python-3.14.5-amd64.exe` from
+   python.org.  The x86_64 interpreter runs under emulation and can load
+   Stata's DLLs.
+3. **Unit tests only** — the 126 unit tests in `tests/unit/` mock `ctypes.cast`
+   and require no Stata DLL, so they pass with ARM64 Python.
+
 ## Cross-platform
 
 Shared-library discovery in `_config.py` supports macOS, Linux, and Windows:
