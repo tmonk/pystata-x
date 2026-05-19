@@ -1,148 +1,65 @@
-# Contributing to pystata-x
+# Contributing
 
-Thank you for your interest in contributing to pystata-x! This guide will help you set up your development environment, run tests, and understand the project structure.
+## Getting Started
 
-## Table of Contents
-
-- [Development Setup](#development-setup)
-- [Building the Project](#building-the-project)
-- [Testing](#testing)
-- [Submitting Changes](#submitting-changes)
+1. Read [`BUILDING.md`](BUILDING.md) for platform-specific toolchain setup.
+2. Read [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) for the cold-start
+   versus per-call trade-off analysis and C fast-path architecture.
+3. Read [`src/stata-fast/README.md`](src/stata-fast/README.md) for the C
+   extension API and build instructions.
+4. Read [`docs/CRACKED_CONVENTIONS.md`](docs/CRACKED_CONVENTIONS.md) for the
+   ARM64 `_bist_*` calling convention notes.
 
 ## Development Setup
 
-### Prerequisites
-
-- **Stata 17+** (Required for integration tests)
-- **Python 3.11+**
-- **uv** (Recommended) or pip
-
-### Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/tmonk/pystata-x.git
-   cd pystata-x
-   ```
-
-2. Install dependencies with uv:
-   ```bash
-   uv sync --dev
-   ```
-
-   Or with pip:
-   ```bash
-   pip install -e .[dev]
-   ```
-
-## Building the Project
-
-The project uses **hatchling** as the Python build backend. To build wheels:
-
 ```bash
-uv build
+# Clone and install
+git clone https://github.com/tmonk/pystata-x.git
+cd pystata-x
+pip install -e ".[dev]"
+
+# Build the C extension
+cd src/stata-fast
+make   # macOS / Linux
+# or
+cmake -S . -B build && cmake --build build
 ```
 
-Or using the build module directly:
+## Codebase Overview
 
-```bash
-python -m build
+```
+src/
+├── pystata_x/                  # Python package
+│   ├── _config.py              # Stata engine init (dlopen/ctypes)
+│   ├── _core.py                # Command execution, SFI wrappers
+│   ├── _stata_fast.py          # Python bridge to libstata_fast C extension
+│   ├── _sfi_bridge.py          # Manifest-based symbol resolution
+│   └── stata_setup.py          # Drop-in for PyPI `stata-setup`
+├── stata-fast/                 # C extension
+│   ├── stata_fast.c/h          # Core implementation
+│   ├── CMakeLists.txt          # Cross-platform build
+│   └── Makefile                # macOS/Linux convenience build
 ```
 
 ## Testing
 
-The test suite is organised with pytest markers.
-
-### All Tests (Requires Stata)
-
 ```bash
-uv run pytest
+# Unit tests (no Stata needed)
+pytest tests/unit/ -v
+
+# End-to-end tests (Stata must be installed)
+pytest tests/e2e/ -v
 ```
 
-### Tests Without Stata (Fast/CI)
+## Code Style
 
-```bash
-uv run pytest -v -m "not requires_stata"
-```
+- Python: ruff (`pip install ruff`)
+- C: clang-format or manual conformance to existing style
 
-### Test Coverage
+## Pull Request Checklist
 
-Generate a coverage report:
-
-```bash
-uv run pytest --cov=pystata_x --cov-report=term-missing
-```
-
-Or generate an HTML report:
-
-```bash
-uv run pytest --cov=pystata_x --cov-report=html
-open htmlcov/index.html  # View the report
-```
-
-### Writing Tests
-
-When adding new tests:
-
-1. **Mark Stata-dependent tests**:
-   ```python
-   import pytest
-
-   # At module level for all tests
-   pytestmark = pytest.mark.requires_stata
-
-   # Or for individual tests
-   @pytest.mark.requires_stata
-   def test_my_stata_feature():
-       pass
-   ```
-
-2. **Mark slow tests**:
-   ```python
-   @pytest.mark.slow
-   def test_expensive_operation():
-       pass
-   ```
-
-## Submitting Changes
-
-### Pull Request Process
-
-1. **Create a feature branch**:
-   ```bash
-   git checkout -b feature/my-feature
-   ```
-
-2. **Develop and Test**:
-   - Add tests in `tests/`.
-   - Ensure `pytest -v -m "not requires_stata"` passes.
-
-3. **Commit with clear messages**:
-   Follow conventional commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `perf:`, `test:`).
-
-4. **Push and create a pull request**:
-   ```bash
-   git push origin feature/my-feature
-   ```
-
-### CI/CD
-
-GitHub Actions automatically runs on all PRs:
-- Runs all non-Stata tests (`pytest -v -m "not requires_stata"`)
-- Tests on Ubuntu with Python 3.11–3.14
-- Builds the package and tests entry points
-
-## Project Structure
-
-- `src/pystata_x/`: Python source code.
-- `tests/`: Test suite.
-- `scripts/`: Utilities for benchmarks and version syncing.
-
-## Getting Help
-
-- **Issues**: [GitHub Issues](https://github.com/tmonk/pystata-x/issues)
-- **Author**: [Thomas Monk](https://tdmonk.com)
-
-## License
-
-By contributing to pystata-x, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0.
+- [ ] `pytest tests/unit/` passes
+- [ ] `pytest tests/e2e/` passes (if Stata available)
+- [ ] C extension compiles without warnings
+- [ ] `BUILDING.md` updated if toolchain changes
+- [ ] Benchmarks updated if performance changes
