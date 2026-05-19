@@ -32,8 +32,6 @@ stversion: str = ""        # Stata version string (set after init)
 stedition: str = ""        # Normalised edition: "BE", "SE", or "MP"
 stsplash: bool = True
 stinitialized: bool = False
-_stata_engine_bootstrapped: bool = False
-_stata_splash: bool = True
 stlibpath: str | None = None
 
 # Default settings (mirrors pystata.config.stconfig)
@@ -173,7 +171,7 @@ def init(
         Enable streaming output (legacy behaviour).  Off by default;
         direct buffer drain after execution is much faster.
     """
-    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash, _stata_splash
+    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash
 
     if stinitialized:
         return
@@ -221,41 +219,21 @@ def init(
         if _platform.system() == "Darwin":
             os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
 
-    # Defer the Stata engine bootstrap (StataSO_Main) until the first
-    # command execution.  This drops init time from ~80 ms to ~6 ms.
-    # The engine is bootstrapped in :func:`bootstrap_stata_engine`,
-    # which is called automatically by :func:`~pystata_x._core.execute`.
-    #
-    # We deliberately do NOT call _init_stata() here — that call is
-    # the expensive part (~75 ms).  Instead we save the splash setting
-    # so that :func:`bootstrap_stata_engine` can honour it.
-    _stata_splash = splash
-
-
-def bootstrap_stata_engine() -> None:
-    """Bootstrap the Stata C engine (call StataSO_Main).
-
-    This is deferred from :func:`init` for speed — it's called
-    automatically by :func:`~pystata_x._core.execute` on the first
-    actual Stata command.
-    """
-    global _stata_engine_bootstrapped, stversion
-
-    if _stata_engine_bootstrapped:
-        return
-
-    rc = _init_stata(_stata_splash)
+    # Bootstrap the Stata engine immediately (StataSO_Main).
+    # This is the single most expensive init step (~75-85 ms) but
+    # ensures the first execute() / run() call is equally fast.
+    rc = _init_stata(splash)
     msg = get_output()
     if rc < 0:
         if rc == -7100:
             print(msg, end="")
         else:
-            raise RuntimeError(f"Stata engine bootstrap failed (rc={rc}):\n{msg}")
+            raise RuntimeError(
+                f"Stata engine bootstrap failed (rc={rc}):\n{msg}"
+            )
     else:
         if msg:
             print(msg, end="")
-
-    _stata_engine_bootstrapped = True
 
     # Read Stata version
     try:
@@ -263,6 +241,16 @@ def bootstrap_stata_engine() -> None:
         stversion = str(sfi.Scalar.getValue("c(stata_version)"))
     except Exception:
         stversion = ""
+
+
+def bootstrap_stata_engine() -> None:
+    """Ensure the Stata C engine has been bootstrapped.
+
+    This is a no-op after :func:`init` — the engine bootstrap is
+    performed during ``init()`` so that the first ``execute()`` /
+    ``run()`` call has no additional startup latency.
+    """
+    pass
 
 
 def check_initialized() -> None:
@@ -277,7 +265,7 @@ def check_initialized() -> None:
 @atexit.register
 def shutdown() -> None:
     """Shut down the Stata engine at interpreter exit."""
-    if not stinitialized or not _stata_engine_bootstrapped:
+    if not stinitialized:
         return
     try:
         stlib.StataSO_Shutdown.restype = None
@@ -292,8 +280,6 @@ def is_stata_initialized() -> bool:
 
 def get_output() -> str:
     """Drain and return the Stata output buffer."""
-    if not _stata_engine_bootstrapped:
-        return ""
     stlib.StataSO_GetOutputBuffer.restype = c_char_p
     raw = stlib.StataSO_GetOutputBuffer()
     return _decode(c_char_p(raw).value if raw else None)

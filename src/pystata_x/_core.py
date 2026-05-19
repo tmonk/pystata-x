@@ -109,12 +109,8 @@ def _write_temp_do(code: str, suffix: bytes = b"") -> None:
 # ---------------------------------------------------------------------------
 
 def _resolve_runtime():
-    """Return (stlib, encode_func, get_output_func) from our runtime.
-
-    Also triggers the deferred Stata engine bootstrap on first call.
-    """
+    """Return (stlib, encode_func, get_output_func) from our runtime."""
     if config.stinitialized:
-        config.bootstrap_stata_engine()
         return config.stlib, config._encode, config.get_output
 
     config.check_initialized()  # will raise
