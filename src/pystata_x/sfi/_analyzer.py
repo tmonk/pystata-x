@@ -1918,6 +1918,11 @@ Examples:
             return
         print("Running test suite...")
         results = run_test_suite(history=history)
+        # Also run e2e suite to include those results
+        try:
+            e2e_report = run_e2e_suite(history=history)
+        except Exception:
+            pass
         print()
         print(history.summary())
         return

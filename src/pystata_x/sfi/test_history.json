@@ -6,11 +6,25 @@
       "value": null,
       "notes": "tag=0x2b at 0x117c474",
       "xfail": false
+    },
+    {
+      "timestamp": 1779293476.7655718,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0x1176e64",
+      "xfail": false
     }
   ],
   "nobs": [
     {
       "timestamp": 1779293430.1177628,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779293476.780768,
       "passed": true,
       "value": 74,
       "notes": "",
@@ -24,11 +38,25 @@
       "value": 12,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779293476.7810848,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
     }
   ],
   "data": [
     {
       "timestamp": 1779293430.1185565,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779293476.7816591,
       "passed": true,
       "value": 4099.0,
       "notes": "",
@@ -42,6 +70,38 @@
       "value": null,
       "notes": "",
       "xfail": true
+    },
+    {
+      "timestamp": 1779293476.781866,
+      "passed": false,
+      "value": null,
+      "notes": "",
+      "xfail": true
+    }
+  ],
+  "e2e_suite": [
+    {
+      "timestamp": 1779293903.9205616,
+      "passed": true,
+      "value": {
+        "total": 26,
+        "passed": 17,
+        "failed": 0,
+        "skipped": 6,
+        "xfail": 3,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
     }
   ]
 }
