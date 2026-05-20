@@ -1142,6 +1142,102 @@ class StataBinary:
 
     # ── Protocol analysis (automated catalog) ──────────────────────
 
+    def extract_arg_buffer_addr(self, name: str) -> dict:
+        """Extract the .data arg buffer address from an SP-resetting dispatch function.
+
+        SP-resetting functions do:
+          lea rax, [rip + A]    # rax = &SP_GLOBAL
+          lea rX, [rip + B]     # rX = .data arg buffer address
+          mov qword ptr [rax], rX  # SP_GLOBAL = arg buffer address
+
+        Returns the arg buffer address and the SP global address.
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = self.symbols.get(name)
+        if not vaddr:
+            return {"name": name, "error": "symbol not found"}
+        if not HAS_CAPSTONE or not self._elf:
+            return {"name": name, "error": "capstone not available"}
+
+        elf = self._elf
+        text_raw = elf.text_raw
+        text_vaddr = elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return {"name": name, "error": "address out of range"}
+
+        raw = text_raw[off:min(off + 50, len(text_raw))]
+        try:
+            insns = list(md.disasm(raw, vaddr))
+        except Exception:
+            return {"name": name, "error": "disassembly failed"}
+
+        arg_buffer = None
+        sp_global = None
+        seen_lea_rax = False
+
+        for insn in insns[:20]:
+            op = f"{insn.mnemonic} {insn.op_str}"
+
+            if insn.mnemonic == "lea" and "rax" in insn.op_str and "rip" in insn.op_str:
+                # lea rax, [rip + X] — load address of something
+                try:
+                    parts = insn.op_str.replace(",", " ").split()
+                    for p in parts:
+                        if p.startswith("0x"):
+                            target = int(p, 16)
+                            if not seen_lea_rax:
+                                seen_lea_rax = True
+                            break
+                except (ValueError, IndexError):
+                    pass
+
+            if insn.mnemonic == "lea" and seen_lea_rax and "rip" in insn.op_str:
+                # Second lea: this is the arg buffer address
+                # It uses a register like rsi, rdx, rcx, rdi, r8, r9
+                try:
+                    parts = insn.op_str.replace(",", " ").split()
+                    for p in parts:
+                        if p.startswith("0x"):
+                            arg_buffer = int(p, 16)
+                            break
+                except (ValueError, IndexError):
+                    pass
+
+            if insn.mnemonic == "mov" and "qword ptr [rax]" in op and seen_lea_rax:
+                # mov qword ptr [rax], rX — this is the SP-reset
+                pass  # We already have the addresses
+
+            if arg_buffer is not None:
+                break
+
+        # Compute SP global address from the first lea
+        if seen_lea_rax:
+            # Find the first lea instruction again to compute target
+            for insn in insns[:20]:
+                if insn.mnemonic == "lea" and "rax" in insn.op_str and "rip" in insn.op_str:
+                    # Compute: target = next_insn_addr + displacement
+                    # The displacement is the offset in the instruction encoding
+                    for opnd in insn.operands:
+                        if hasattr(opnd, 'mem') and hasattr(opnd.mem, 'disp'):
+                            sp_global = insn.address + insn.size + opnd.mem.disp
+                            break
+                    break
+
+        result = {"name": name, "vaddr": vaddr}
+        if arg_buffer:
+            result["arg_buffer_addr"] = arg_buffer
+        if sp_global:
+            result["sp_global_addr"] = sp_global
+        if not arg_buffer and not sp_global:
+            result["protocol"] = "standard_push_stack"  # no SP reset
+        else:
+            result["protocol"] = "sp_reset"
+        return result
+
     def analyze_protocol(self, name: str) -> dict:
         """Deep protocol analysis of a dispatch entry.
 
