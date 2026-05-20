@@ -1,0 +1,27 @@
+{
+  "benchmark": "cold_start",
+  "platform": "linux_x86_64_docker",
+  "n_runs": 3,
+  "import_ms": {
+    "median": 47.0,
+    "min": 46.5,
+    "max": 49.2
+  },
+  "results": [
+    {
+      "import_ms": 47.0,
+      "init_ms": 1228.4,
+      "total_ms": 1275.4
+    },
+    {
+      "import_ms": 46.5,
+      "init_ms": 1230.7,
+      "total_ms": 1277.2
+    },
+    {
+      "import_ms": 49.2,
+      "init_ms": 1226.1,
+      "total_ms": 1275.3
+    }
+  ]
+}
