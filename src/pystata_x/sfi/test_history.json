@@ -13,6 +13,27 @@
       "value": null,
       "notes": "tag=0x2b at 0x1176e64",
       "xfail": false
+    },
+    {
+      "timestamp": 1779293982.1999297,
+      "passed": false,
+      "value": null,
+      "notes": "tag=0x0 at ?",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294006.840241,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xd628f4",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294016.9482145,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xd628f4",
+      "xfail": false
     }
   ],
   "nobs": [
@@ -25,6 +46,20 @@
     },
     {
       "timestamp": 1779293476.780768,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294006.8548377,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294016.9629965,
       "passed": true,
       "value": 74,
       "notes": "",
@@ -45,6 +80,20 @@
       "value": 12,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779294006.8552325,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294016.9633873,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
     }
   ],
   "data": [
@@ -57,6 +106,20 @@
     },
     {
       "timestamp": 1779293476.7816591,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294006.8559182,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294016.964059,
       "passed": true,
       "value": 4099.0,
       "notes": "",
@@ -77,11 +140,94 @@
       "value": null,
       "notes": "",
       "xfail": true
+    },
+    {
+      "timestamp": 1779294006.8562472,
+      "passed": false,
+      "value": null,
+      "notes": "",
+      "xfail": true
+    },
+    {
+      "timestamp": 1779294016.9643326,
+      "passed": false,
+      "value": null,
+      "notes": "",
+      "xfail": true
     }
   ],
   "e2e_suite": [
     {
       "timestamp": 1779293903.9205616,
+      "passed": true,
+      "value": {
+        "total": 26,
+        "passed": 17,
+        "failed": 0,
+        "skipped": 6,
+        "xfail": 3,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779293996.9446323,
+      "passed": true,
+      "value": {
+        "total": 26,
+        "passed": 17,
+        "failed": 0,
+        "skipped": 6,
+        "xfail": 3,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294009.759763,
+      "passed": true,
+      "value": {
+        "total": 26,
+        "passed": 17,
+        "failed": 0,
+        "skipped": 6,
+        "xfail": 3,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779294019.7915263,
       "passed": true,
       "value": {
         "total": 26,
