@@ -237,6 +237,17 @@ class Data:
 
         Raises ValueError if the variable name is not found.
         """
+        if _IS_X86_64:
+            # Scan variable name table directly
+            from pystata_x.sfi._engine import _read_var_name_x86
+            for i in range(5000):
+                try:
+                    varname = _read_var_name_x86(i)
+                    if varname and varname.lower() == name.lower():
+                        return i
+                except Exception:
+                    break
+            raise ValueError(f"variable {name!r} not found")
         idx = call_int("_bist_varindex", name.encode())
         if idx is None or idx == 0:
             raise ValueError(f"variable {name!r} not found")
@@ -434,6 +445,15 @@ class Data:
     @staticmethod
     def getMaxVars() -> int:
         """Get the maximum variables (Stata SE/MP default)."""
+        if _IS_X86_64:
+            # Query via display c(maxvar)
+            from pystata_x.sfi._x86_display import _exec
+            out = _exec(b"display c(maxvar)")
+            if out is not None:
+                try:
+                    return int(out)
+                except (ValueError, TypeError):
+                    pass
         return 32767
 
     @staticmethod
@@ -515,7 +535,26 @@ class Data:
 
     @staticmethod
     def getFormattedValue(varno: int, obs: int, bValueLabel: bool = False) -> str:
-        """Get a cell's formatted display value (pure Python)."""
+        """Get a cell's formatted display value (pure Python, or display fallback on x86_64)."""
+        if _IS_X86_64:
+            # Use Stata's display command with the var format for correct formatting
+            from pystata_x.sfi._engine import _read_var_name_x86
+            try:
+                name = _read_var_name_x86(varno)
+                fmt = Data.getVarFormat(varno)
+                if name and fmt:
+                    from pystata_x.sfi._x86_display import _exec
+                    # Use explicit format to match Stata's formatting
+                    out = _exec(f"display {fmt} {name}[{obs + 1}]".encode())
+                    if out is not None:
+                        return out
+                elif name:
+                    from pystata_x.sfi._x86_display import _exec
+                    out = _exec(f"display {name}[{obs + 1}]".encode())
+                    if out is not None:
+                        return out
+            except Exception:
+                pass
         fmt = Data.getVarFormat(varno)
         t = Data.getVarType(varno)
         if t and t.startswith('str'):

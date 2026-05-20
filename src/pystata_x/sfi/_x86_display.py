@@ -229,14 +229,22 @@ _MACRO_CACHE: dict[str, str] = {}
 def get_macro(name: str) -> str:
     """Get a global macro via ``display "$<name>"``.
 
-    Returns ``""`` (empty string) when the macro does not exist,
+    ``c(...)`` names are system values, not macros, so we fall back
+    to ``display c(...)`` for those.
+
+    Returns ``""`` (empty string) when the value does not exist,
     matching the official SFI API contract.
     """
     cached = _MACRO_CACHE.get(name)
     if cached is not None:
         return cached
 
-    cmd = f'display "${name}"'
+    # c() values are system constants, not global macros
+    if name.startswith("c(") or name.startswith("c_"):
+        inner = name[2:-1] if name.startswith("c(") else name[2:]
+        cmd = f"display c({inner})"
+    else:
+        cmd = f'display "${name}"'
     out = _exec(cmd)
     if out is None:
         _MACRO_CACHE[name] = ""
