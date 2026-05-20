@@ -1,0 +1,243 @@
+{
+  "_meta": {
+    "generator": "scripts/gen_oracle.py",
+    "stata_version": "StataNow 19.5 SE",
+    "dataset": "auto.dta",
+    "sha256": "0ce5974e292a337b"
+  },
+  "data": {
+    "obs_total": 74,
+    "var_count": 12,
+    "var_names": [
+      "make",
+      "price",
+      "mpg",
+      "rep78",
+      "headroom",
+      "trunk",
+      "weight",
+      "length",
+      "turn",
+      "displacement",
+      "gear_ratio",
+      "foreign"
+    ],
+    "var_labels": [
+      "Make and model",
+      "Price",
+      "Mileage (mpg)",
+      "Repair record 1978",
+      "Headroom (in.)",
+      "Trunk space (cu. ft.)",
+      "Weight (lbs.)",
+      "Length (in.)",
+      "Turn circle (ft.)",
+      "Displacement (cu. in.)",
+      "Gear ratio",
+      "Car origin"
+    ],
+    "var_types": [
+      "str18",
+      "int",
+      "int",
+      "int",
+      "float",
+      "int",
+      "int",
+      "int",
+      "int",
+      "int",
+      "float",
+      "byte"
+    ],
+    "var_formats": [
+      "%-18s",
+      "%8.0gc",
+      "%8.0g",
+      "%8.0g",
+      "%6.1f",
+      "%8.0g",
+      "%8.0gc",
+      "%8.0g",
+      "%8.0g",
+      "%8.0g",
+      "%6.2f",
+      "%8.0g"
+    ],
+    "price_obs0": [
+      [
+        4099
+      ]
+    ],
+    "price_obs73": [
+      [
+        11995
+      ]
+    ],
+    "mpg_obs0": [
+      [
+        22
+      ]
+    ],
+    "make_obs0": [
+      [
+        "AMC Concord"
+      ]
+    ],
+    "make_obs1": [
+      [
+        "AMC Pacer"
+      ]
+    ],
+    "var_index_price": 1,
+    "is_alias_0": false,
+    "is_var_type_str_list": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "is_var_type_strL_list": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "is_var_type_string_list": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "str_var_width": 18,
+    "max_str_length": 2045,
+    "max_vars": 5000,
+    "formatted_price_obs0": "   4,099",
+    "formatted_foreign_obs0": "      No",
+    "get_make_obs0": [
+      [
+        "AMC Concord"
+      ]
+    ]
+  },
+  "macro": {
+    "global_level": "95",
+    "global_test": "42",
+    "global_nonexistent": ""
+  },
+  "scalar": {
+    "myscalar": 3.14,
+    "mystr": "hello"
+  },
+  "valuelabel": {
+    "names": [
+      "yesno",
+      "origin"
+    ],
+    "foreign_label_0": "No",
+    "foreign_label_1": "Yes",
+    "foreign_var_vl": "yesno",
+    "yesno_labels": [
+      "No",
+      "Yes"
+    ],
+    "yesno_values": [
+      0,
+      1
+    ]
+  },
+  "missing": {
+    "is_missing_dot": true,
+    "is_missing_0": false,
+    "is_missing_42": false,
+    "parse_is_missing_dot": true,
+    "parse_is_missing_dot_a": true,
+    "parse_is_missing_0": false,
+    "missing_value": 8.98846567431158e+307,
+    "missing_a": ".a",
+    "missing_z": ".z"
+  },
+  "characteristic": {
+    "dta_char_mychar": "hello",
+    "dta_char_nonexistent": ""
+  },
+  "datetime": {
+    "format_0_date": "01jan1960 00:00:00",
+    "format_0_clock": "01jan1960 00:00:00"
+  },
+  "frame": {
+    "cwf": "default",
+    "frame_count": 2,
+    "all_frames": [
+      "default",
+      "testframe"
+    ],
+    "testframe_name": "testframe",
+    "default_frame_name": "default"
+  },
+  "matrix": {
+    "mymat_rows": 2,
+    "mymat_cols": 2,
+    "mymat_row_names": [
+      "row1",
+      "row2"
+    ],
+    "mymat_col_names": [
+      "col1",
+      "col2"
+    ],
+    "mymat_get": [
+      [
+        1.0,
+        2.0
+      ],
+      [
+        3.0,
+        4.0
+      ]
+    ],
+    "mymat_at_0_0": 1.0,
+    "mymat_at_0_1": 2.0
+  },
+  "platform": {
+    "is_windows": false,
+    "is_mac": true,
+    "is_unix": false,
+    "is_linux": false,
+    "is_solaris": false
+  },
+  "sfitoolkit": {
+    "is_valid_name": true,
+    "is_valid_name_bad": false,
+    "abbrev_price": "price",
+    "format_value": "     3.14",
+    "get_real_of_string_42": 42.0,
+    "get_real_of_string_foo": 8.98846567431158e+307,
+    "make_var_name": "myvarname",
+    "str_to_name": "hello_world"
+  }
+}

@@ -263,7 +263,8 @@ class TestMissing:
         from pystata_x.sfi._core import Missing
         import math
 
-        assert math.isnan(Missing.getMissing("."))
+        # getMissing returns the symbol string for a float value
+        assert Missing.getMissing(Missing.getValue()) == "."
 
     def test_is_value_missing_nan(self):
         from pystata_x.sfi._core import Missing
@@ -477,6 +478,7 @@ class TestErrorPropagation:
         assert Macro.getGlobal("x") is None
         assert Data.getVarName(0) is None
         assert Data.getDouble(0, 0) is None
-        assert Data.getString(0, 0) is None
+        # getString converts None → "" to guarantee str return
+        assert Data.getString(0, 0) == ""
         assert Scalar.getValue("x") is None
         assert Scalar.getString("x") is None
