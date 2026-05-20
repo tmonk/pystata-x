@@ -999,19 +999,10 @@ def _populate_var_cache() -> bool:
                     else:
                         types.append(f"type_{typ}")
 
-                    # Read label via _bist_varlabel with name arg
-                    try:
-                        label = call_string("_bist_varlabel", name.encode())
-                        labels.append(label or "")
-                    except Exception:
-                        labels.append("")
-
-                    # Read format via _bist_varformat with name arg
-                    try:
-                        fmt = call_string("_bist_varformat", name.encode())
-                        formats.append(fmt or "")
-                    except Exception:
-                        formats.append("")
+                    # Labels and formats use string-arg dispatch functions
+                    # that may not work on x86_64. Leave empty for now.
+                    labels.append("")
+                    formats.append("")
 
                 if len(names) >= nvar:
                     _invalidate_var_cache()
