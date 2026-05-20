@@ -180,7 +180,7 @@ class TestGraphTracking:
         result = execute("display 1+1", track_graphs=True)
         # On x86_64/Docker with Stata available, graph tracking returns [].
         # On macOS with mocked sfi, graph tracking returns None.
-        assert result.graph_names is None or result.graph_names == [],
+        assert result.graph_names is None or result.graph_names == []
             f"Unexpected graph_names: {result.graph_names!r}"
 
 
