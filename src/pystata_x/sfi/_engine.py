@@ -944,14 +944,14 @@ def _read_var_type_x86(varno: int) -> str:
             typ = ctypes.c_uint16.from_address(type_base + varno * 2).value
             if typ == 0xFFF5:
                 return "strL"
-            elif typ == 0xFFF9 or typ == 0:
-                return "float"
-            elif typ == 0xFFFA:
-                return "byte"
             elif typ == 0xFFF7:
-                return "int"
+                return "float"  # 0xFFF7 = -9 = float
             elif typ == 0xFFF8:
-                return "long"
+                return "long"   # 0xFFF8 = -8 = long
+            elif typ == 0xFFF9 or typ == 0:
+                return "int"    # 0xFFF9 = -7 = int
+            elif typ == 0xFFFA:
+                return "byte"   # 0xFFFA = -6 = byte
             elif 0 < typ < 256:
                 return f"str{typ}"
             else:
