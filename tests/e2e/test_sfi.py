@@ -247,7 +247,6 @@ class TestOracleCompliance:
         assert self._D.getString(0, 1) == self._o("data", "make_obs1"), "make[1]"
 
 
-    @pytest.mark.xfail(reason="getVarIndex dispatch needs fix")
     def test_var_index(self):
         assert self._D.getVarIndex("price") == self._o("data", "var_index_price")
         assert self._D.getVarIndex("foreign") == self._o("data", "var_index_foreign")
@@ -262,14 +261,10 @@ class TestOracleCompliance:
     def test_max_str_length(self):
         assert self._D.getMaxStrLength() == self._o("data", "max_str_length")
 
-    @pytest.mark.xfail(reason="getMaxVars hardcoded 32767")
     def test_max_vars(self):
         assert self._D.getMaxVars() == self._o("data", "max_vars")
 
-    @pytest.mark.xfail(reason="getFormattedValue dispatch needs fix")
     def test_formatted_values(self):
-        pytest.skip("getFormattedValue dispatch needs fix")
-        
         assert self._D.getFormattedValue(1, 0, False) == self._o("data", "formatted_price_obs0")
 
     # ── Macro ─────────────────────────────────────────────────────
@@ -277,7 +272,6 @@ class TestOracleCompliance:
     def test_macro_global_set(self):
         assert self._M.getGlobal("testglobal") == self._o("macro", "global_test")
 
-    @pytest.mark.xfail(reason="Macro.getGlobal via push+stack returns None")
     def test_macro_global_level(self):
         assert self._M.getGlobal("c(level)") == self._o("macro", "global_level")
 
@@ -289,7 +283,6 @@ class TestOracleCompliance:
     def test_scalar_value(self):
         assert self._S.getValue("myscalar") == pytest.approx(self._o("scalar", "myscalar"))
 
-    @pytest.mark.xfail(reason="_bist_strscalar dispatch needs fix")
     def test_scalar_string(self):
         assert self._S.getString("mystr") == self._o("scalar", "mystr")
 
