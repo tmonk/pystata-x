@@ -1,0 +1,5 @@
+[committer]
+enabled = true
+trigger_mode = "on_goal"
+defer_to_goal_audit = false
+staged_commits = true
