@@ -56,7 +56,6 @@ import warnings
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Any
 from pystata_x.sfi._engine import (
-    _LIB,
     call_int,
     call_double,
     call_string,
@@ -77,18 +76,26 @@ _IS_X86_64 = sys.platform in ("linux", "linux2") and platform.machine() in ("x86
 
 # ─── x86_64 data cache via display output ─────────────────────────────────
 
+import pystata_x.sfi._engine as _px_eng
+
 _x86_data_cache: dict[tuple[int, int], float] = {}
 _x86_output_buf_initialized = False
+
+
+def _get_engine_lib():
+    """Return the current ``_engine._LIB`` (updated after initialize())."""
+    return _px_eng._LIB
 
 
 def _init_x86_output_buf():
     """Initialize Stata output buffer for display-based data reading on x86_64."""
     global _x86_output_buf_initialized
-    if not _x86_output_buf_initialized and _LIB is not None:
-        _LIB.StataSO_SetOutputBufferSz.restype = None
-        _LIB.StataSO_SetOutputBufferSz.argtypes = [ctypes.c_size_t]
-        _LIB.StataSO_SetOutputBufferSz(65536)
-        _LIB.StataSO_ClearOutputBuffer.restype = None
+    eng = _get_engine_lib()
+    if eng is not None:
+        eng.StataSO_SetOutputBufferSz.restype = None
+        eng.StataSO_SetOutputBufferSz.argtypes = [ctypes.c_size_t]
+        eng.StataSO_SetOutputBufferSz(65536)
+        eng.StataSO_ClearOutputBuffer.restype = None
         _x86_output_buf_initialized = True
 
 
@@ -103,7 +110,8 @@ def _read_x86_double(varno: int, obs: int) -> float:
     if key in _x86_data_cache:
         return _x86_data_cache[key]
 
-    if _LIB is None:
+    eng = _get_engine_lib()
+    if eng is None:
         val = call_double("_bist_data", obs + 1, varno + 1) or 0.0
         _x86_data_cache[key] = val
         return val
@@ -124,13 +132,13 @@ def _read_x86_double(varno: int, obs: int) -> float:
 
     cmd = f'display {name}[{obs + 1}]'.encode()
     try:
-        _LIB.StataSO_ClearOutputBuffer()
-        rc = _LIB.StataSO_Execute(cmd)
+        eng.StataSO_ClearOutputBuffer()
+        rc = eng.StataSO_Execute(cmd)
         if rc != 0:
             _x86_data_cache[key] = 0.0
             return 0.0
 
-        buf = _LIB.StataSO_GetOutputBuffer
+        buf = eng.StataSO_GetOutputBuffer
         buf.restype = ctypes.c_char_p
         out = buf()
         if out is None:
