@@ -330,7 +330,6 @@ class TestOracleCompliance:
 class TestCellReads:
     """getDouble / getString — 1-based indexing verified."""
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getDouble returns sentinel 0.0 on x86_64")
     def test_read_numeric(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
@@ -353,7 +352,6 @@ class TestCellReads:
         # The binary representation of a Stata string isn't a valid double
         assert val is not None
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getDouble returns sentinel 0.0 on x86_64")
     def test_read_all_prices(self, stata):
         """Read all 74 prices to verify bulk access works."""
         execute, run = stata
@@ -426,8 +424,6 @@ class TestVariableMetadata:
     def test_var_format(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
-        if sys.platform in ("linux", "linux2") and platform.machine() != "aarch64":
-            pytest.skip("VarFormat not supported under x86_64 QEMU")
         assert Data.getVarFormat(0) == "%-18s"
         assert Data.getVarFormat(2) == "%8.0g"
 
@@ -495,7 +491,6 @@ class TestMacros:
 class TestNumericScalars:
     """getValue via _bist_numscalar (system scalars)."""
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="Scalar.getValue returns sentinel 0.0 on x86_64")
     def test_system_scalar(self, stata):
         execute, run = stata
         from pystata_x.sfi._core import Scalar
@@ -521,7 +516,6 @@ class TestNumericScalars:
 class TestStringScalars:
     """getString via _bist_strscalar (system string scalars)."""
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="String scalar dispatch not supported under x86_64")
     def test_system_string_scalar(self, stata):
         execute, run = stata
         from pystata_x.sfi._core import Scalar
