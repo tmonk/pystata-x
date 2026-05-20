@@ -1140,6 +1140,147 @@ class StataBinary:
 
     # ── Manifest diff (like-for-like comparison) ───────────────────────
 
+    # ── Protocol analysis (automated catalog) ──────────────────────
+
+    def analyze_protocol(self, name: str) -> dict:
+        """Deep protocol analysis of a dispatch entry.
+
+        Follows thunk jumps (via _follow_thunk) to find the real
+        implementation and identifies pool-header checks, type/flag
+        field expectations, string vs numeric code paths, and
+        whether _pushstr is called.
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = self.symbols.get(name)
+        if not vaddr:
+            return {"name": name, "error": "symbol not found"}
+        if not HAS_CAPSTONE or not self._elf:
+            return {"name": name, "error": "capstone not available"}
+
+        # Use _follow_thunk to get the real code (follows thunk jumps)
+        full_insns = self._follow_thunk(vaddr, max_depth=4)
+
+        proto = {
+            "name": name, "vaddr": vaddr, "dispatch_idx": None,
+            "size": len(full_insns),
+            "pool_header_check": None,
+            "type_field": None,
+            "flag_field": None,
+            "has_string_path": False,
+            "has_numeric_path": False,
+            "string_path_vaddr": None,
+            "numeric_path_vaddr": None,
+            "calls_pushstr": False,
+            "pushstr_call_sites": [],
+            "error_codes": [],
+            "reads_sp": False,
+            "checks_obs_dim": False,
+            "checks_var_dim": False,
+        }
+        for i, dv in enumerate(self.dispatch_entries):
+            if dv == vaddr:
+                proto["dispatch_idx"] = i
+                break
+
+        pushstr_vaddr = self.push_fns.get("_pushstr", 0)
+
+        for _level, _addr, mnemonic, op_str in full_insns:
+            op = f"{mnemonic} {op_str}"
+
+            # Pool-header check: cmp [reg +/- N], 0x2b
+            if "cmp" in mnemonic and "0x2b" in op_str:
+                if "0x94" in op_str:
+                    checks_tsmat = "rax - 0x94" in op_str
+                    proto["pool_header_check"] = {
+                        "offset": -0x94, "tag_value": 0x2b,
+                        "at_vaddr": _addr,
+                        "checks_tsmat": checks_tsmat,
+                    }
+
+            # Type field at [0x34]: cmp dx, -3 (0xFFFD) or test dx, dx (==0)
+            if "0x34" in op_str and "movzx" in mnemonic:
+                # movzx edx, word ptr [rax + 0x34] — type field loaded
+                if proto["type_field"] is None:
+                    proto["type_field"] = {"offset": 0x34}
+            if proto["type_field"] is not None:
+                if "cmp" in mnemonic and op_str.rstrip().endswith("-3"):
+                    proto["has_string_path"] = True
+                    proto["string_path_vaddr"] = _addr
+                    proto["type_field"]["string_value"] = 0xFFFD
+                if mnemonic == "test" and "dx, dx" in op_str:
+                    proto["has_numeric_path"] = True
+                    proto["numeric_path_vaddr"] = _addr
+                    proto["type_field"]["numeric_value"] = 0x0000
+                if "cmp" in mnemonic and op_str.rstrip().endswith(", 0") and "0x34" in op_str:
+                    # Some functions check [0x34] != 0 directly
+                    proto["has_numeric_path"] = True
+                    proto["numeric_path_vaddr"] = _addr
+                    proto["type_field"]["numeric_value"] = 0x0000
+
+            # Flag field at [0x36]: cmp byte ptr [rax + 0x36], N
+            if "0x36" in op_str and "cmp" in mnemonic:
+                val = None
+                if ", 0" in op_str:
+                    val = 0
+                elif ", 2" in op_str:
+                    val = 2
+                if proto["flag_field"] is None:
+                    proto["flag_field"] = {"offset": 0x36}
+                if val is not None:
+                    proto["flag_field"]["check_value"] = val
+
+            # Dimension checks at [0x20] and [0x28]
+            if "0x20" in op_str and "cmp" in mnemonic:
+                proto["checks_obs_dim"] = True
+            if "0x28" in op_str and "cmp" in mnemonic:
+                proto["checks_var_dim"] = True
+
+            # _pushstr detection in CALL instructions
+            if mnemonic == "call" and "0x" in op_str:
+                try:
+                    parts = [p for p in op_str.replace(",", " ").split() if p.startswith("0x")]
+                    if parts:
+                        tgt = int(parts[0], 16)
+                        if pushstr_vaddr and abs(tgt - pushstr_vaddr) <= 5:
+                            proto["calls_pushstr"] = True
+                            proto["pushstr_call_sites"].append(_addr)
+                except (ValueError, IndexError):
+                    pass
+
+            # Error code writes
+            if "mov dword ptr" in op and "0x" in op_str:
+                parts = op_str.split(",")
+                if len(parts) > 1:
+                    try:
+                        ec = int(parts[-1].strip(), 16)
+                        if 0x100 < ec < 0x10000:
+                            proto["error_codes"].append((_addr, ec))
+                    except ValueError:
+                        pass
+
+        if proto["calls_pushstr"]:
+            proto["protocol_type"] = "string_return"
+        elif proto["has_string_path"]:
+            proto["protocol_type"] = "string_aware"
+        elif proto["has_numeric_path"]:
+            proto["protocol_type"] = "numeric_return"
+        else:
+            proto["protocol_type"] = "unknown"
+        return proto
+
+    def catalog_all_protocols(self) -> list[dict]:
+        """Run protocol analysis on all dispatch entries with _bist_* names."""
+        addr_to_names = {}
+        for name, vaddr in self.symbols.items():
+            if name.startswith("_bist_"):
+                addr_to_names.setdefault(vaddr, []).append(name)
+        results = []
+        for vaddr in sorted(addr_to_names):
+            proto = self.analyze_protocol(addr_to_names[vaddr][0])
+            results.append(proto)
+        return results
+
     @staticmethod
     def diff_manifests(a: dict, b: dict) -> dict:
         """Compare two manifests and report differences.
@@ -1839,6 +1980,8 @@ Examples:
                         help="Check pool header tag on live engine")
     parser.add_argument("--find-strings", action="store_true",
                         help="Scan dispatch table for string-returning functions via call-chain tracing")
+    parser.add_argument("--protocol", type=str, metavar="FUNCTION",
+                        help="Deep protocol analysis of a dispatch function (e.g. _bist_varindex)")
     parser.add_argument("--xfsearch", type=str, metavar="ADDR",
                         help="Find all code locations in .text that call a given address (hex)")
     parser.add_argument("--history", action="store_true",
