@@ -349,6 +349,16 @@ class Data:
     @staticmethod
     def getVarValueLabel(varno: int) -> str:
         """Get the value label name attached to a variable."""
+        if _IS_X86_64:
+            # On x86_64, use var name + _bist_varlabel avoids crash
+            try:
+                name = Data.getVarName(varno)
+                if name:
+                    r = call_string("_bist_varvaluelabel", name.encode())
+                    return r or ""
+            except Exception:
+                pass
+            return ""
         return call_string("_bist_varvaluelabel", varno + 1)
 
     @staticmethod
