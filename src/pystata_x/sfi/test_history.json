@@ -48,6 +48,13 @@
       "value": null,
       "notes": "tag=0x2b at 0xd628f4",
       "xfail": false
+    },
+    {
+      "timestamp": 1779298628.7916193,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0x134a394",
+      "xfail": false
     }
   ],
   "nobs": [
@@ -88,6 +95,13 @@
     },
     {
       "timestamp": 1779294731.1053185,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779298628.8056273,
       "passed": true,
       "value": 74,
       "notes": "",
@@ -136,6 +150,13 @@
       "value": 12,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779298628.8062959,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
     }
   ],
   "data": [
@@ -180,6 +201,13 @@
       "value": 4099.0,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779298628.807334,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
     }
   ],
   "numscalar": [
@@ -220,6 +248,13 @@
     },
     {
       "timestamp": 1779294731.1069858,
+      "passed": false,
+      "value": null,
+      "notes": "",
+      "xfail": true
+    },
+    {
+      "timestamp": 1779298628.8081415,
       "passed": false,
       "value": null,
       "notes": "",
@@ -443,6 +478,29 @@
         "failed": 0,
         "skipped": 7,
         "xfail": 3,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779298630.7149827,
+      "passed": true,
+      "value": {
+        "total": 21,
+        "passed": 12,
+        "failed": 0,
+        "skipped": 7,
+        "xfail": 2,
         "categories": {
           "sentinel": 0,
           "sigsegv": 0,
