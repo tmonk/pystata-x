@@ -407,7 +407,6 @@ class TestCellWrites:
 # ═══════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.skipif(_IS_X86_64_QEMU, reason="Variable metadata crashes under x86_64 QEMU")
 class TestVariableMetadata:
     """getVarName, getVarLabel, getVarFormat, getVarIndex."""
 
@@ -531,7 +530,6 @@ class TestStringScalars:
         assert isinstance(val, str)
         assert len(val) > 0
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="String scalar dispatch not supported under x86_64")
     def test_set_and_readback(self, stata):
         execute, run = stata
         from pystata_x.sfi._core import Scalar
