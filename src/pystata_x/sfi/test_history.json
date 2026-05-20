@@ -83,6 +83,27 @@
       "value": null,
       "notes": "tag=0x2b at 0x11600c4",
       "xfail": false
+    },
+    {
+      "timestamp": 1779307944.8786776,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0x115ec14",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307962.600631,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0x101e304",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308003.8184488,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0x101e304",
+      "xfail": false
     }
   ],
   "nobs": [
@@ -158,6 +179,27 @@
     },
     {
       "timestamp": 1779307872.351775,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307944.8934505,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307962.6150973,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308003.8338153,
       "passed": true,
       "value": 74,
       "notes": "",
@@ -241,6 +283,27 @@
       "value": 12,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779307944.8944602,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307962.6161873,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308003.834976,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
     }
   ],
   "data": [
@@ -316,6 +379,27 @@
     },
     {
       "timestamp": 1779307872.3543746,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307944.8959634,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307962.6177428,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308003.8365235,
       "passed": true,
       "value": 4099.0,
       "notes": "",
@@ -397,6 +481,27 @@
       "timestamp": 1779307872.3560655,
       "passed": false,
       "value": 0.0,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307944.898182,
+      "passed": true,
+      "value": 3.1415927,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307962.6203203,
+      "passed": true,
+      "value": 3.1415927,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308003.8391764,
+      "passed": true,
+      "value": 3.1415927,
       "notes": "",
       "xfail": false
     }
@@ -726,6 +831,75 @@
     },
     {
       "timestamp": 1779307874.1843414,
+      "passed": true,
+      "value": {
+        "total": 71,
+        "passed": 71,
+        "failed": 0,
+        "skipped": 0,
+        "xfail": 0,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307946.7432106,
+      "passed": true,
+      "value": {
+        "total": 71,
+        "passed": 71,
+        "failed": 0,
+        "skipped": 0,
+        "xfail": 0,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779307964.3641152,
+      "passed": true,
+      "value": {
+        "total": 71,
+        "passed": 71,
+        "failed": 0,
+        "skipped": 0,
+        "xfail": 0,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779308005.5707266,
       "passed": true,
       "value": {
         "total": 71,

@@ -996,9 +996,9 @@ class StataBinary:
                 elif isinstance(a, str):
                     engine._push_str(a.encode("utf-8"))
                     trace["steps"].append({"step": "push_str", "value": a})
-            # Sentinel
-            engine._push_double(0.0)
-            trace["steps"].append({"step": "push_sentinel"})
+            # Sentinel is carried by the tsmat itself (tsmat[0x34]=0xFFFD for
+            # string functions, tsmat[0x34]=0x0000 for numeric).
+            # No separate sentinel push needed.
         else:
             trace["steps"].append({"step": "push_args", "note": "0 args, no push"})
 
@@ -1006,6 +1006,36 @@ class StataBinary:
         trace["sp_after_push"] = sp_after_push
         trace["steps"].append({"step": "after_push", "sp": sp_after_push,
                                "diff": sp_after_push - sp_before})
+
+        # Set tsmat[0x34]=0xFFFD on last tsmat for string-return functions.
+        # This matches call_string() in _engine.py — the last pushed tsmat
+        # carries the type/sentinel field; no separate sentinel push is needed.
+        # Determine if this is a string-returning function.
+        _is_string_call = False
+        # Check via framework's known string dispatch list
+        try:
+            _string_syms = self._string_fn_cache
+        except AttributeError:
+            _string_syms = self.find_string_functions()
+            self._string_fn_cache = _string_syms
+        if sym_name in _string_syms:
+            _is_string_call = True
+        # Fallback heuristic
+        if not _is_string_call:
+            _string_heuristic = any(kw in sym_name.lower() for kw in
+                ["varlabel", "global", "macro", "strscalar", "sdata",
+                 "sview", "dir", "varformat", "varvaluelabel", "vlexists",
+                 "vlmap", "vlload", "vlmodify", "vldrop", "strlwidth",
+                 "store_string"])
+            _is_string_call = _string_heuristic
+        if _is_string_call:
+            sp = engine._save_sp()
+            tsmat_ptr = ctypes.c_uint64.from_address(sp).value
+            if tsmat_ptr and tsmat_ptr > 0x100000:
+                ctypes.c_uint16.from_address(tsmat_ptr + 0x34).value = 0xFFFD
+                trace["steps"].append({"step": "set_tsmat_type",
+                                       "tsmat": hex(tsmat_ptr),
+                                       "field_0x34": 0xFFFD})
 
         # Call dispatch function
         rt = engine._BASE + vaddr
