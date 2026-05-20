@@ -74,94 +74,9 @@ from pystata_x.sfi._engine import (
 _IS_X86_64 = sys.platform in ("linux", "linux2") and platform.machine() in ("x86_64", "amd64")
 
 
-# ─── x86_64 data cache via display output ─────────────────────────────────
+# ─── x86_64 display-based data reader ──────────────────────────────────────
 
-import pystata_x.sfi._engine as _px_eng
-
-_x86_data_cache: dict[tuple[int, int], float] = {}
-_x86_output_buf_initialized = False
-
-
-def _get_engine_lib():
-    """Return the current ``_engine._LIB`` (updated after initialize())."""
-    return _px_eng._LIB
-
-
-def _init_x86_output_buf():
-    """Initialize Stata output buffer for display-based data reading on x86_64."""
-    global _x86_output_buf_initialized
-    eng = _get_engine_lib()
-    if eng is not None:
-        eng.StataSO_SetOutputBufferSz.restype = None
-        eng.StataSO_SetOutputBufferSz.argtypes = [ctypes.c_size_t]
-        eng.StataSO_SetOutputBufferSz(65536)
-        eng.StataSO_ClearOutputBuffer.restype = None
-        _x86_output_buf_initialized = True
-
-
-def _read_x86_double(varno: int, obs: int) -> float:
-    """Read a numeric cell value on x86_64 via Stata 'display' output.
-
-    Results are cached in ``_x86_data_cache`` to avoid repeated Stata calls.
-    Falls back to ``call_double("_bist_data", ...)`` (returns sentinel)
-    when the output buffer or variable name lookup is unavailable.
-    """
-    key = (varno, obs)
-    if key in _x86_data_cache:
-        return _x86_data_cache[key]
-
-    eng = _get_engine_lib()
-    if eng is None:
-        val = call_double("_bist_data", obs + 1, varno + 1) or 0.0
-        _x86_data_cache[key] = val
-        return val
-
-    _init_x86_output_buf()
-
-    # Look up variable name (use engine helper to avoid circular import)
-    try:
-        from pystata_x.sfi._engine import _read_var_name_x86
-        name = _read_var_name_x86(varno)
-    except Exception:
-        name = None
-
-    if not name:
-        val = call_double("_bist_data", obs + 1, varno + 1) or 0.0
-        _x86_data_cache[key] = val
-        return val
-
-    cmd = f'display {name}[{obs + 1}]'.encode()
-    try:
-        eng.StataSO_ClearOutputBuffer()
-        rc = eng.StataSO_Execute(cmd)
-        if rc != 0:
-            _x86_data_cache[key] = 0.0
-            return 0.0
-
-        buf = eng.StataSO_GetOutputBuffer
-        buf.restype = ctypes.c_char_p
-        out = buf()
-        if out is None:
-            _x86_data_cache[key] = 0.0
-            return 0.0
-
-        # Parse last non-empty, non-command-echo line
-        text = out.decode(errors='replace')
-        for line in reversed(text.split('\n')):
-            line = line.strip()
-            if line and not line.startswith('.') and not line.startswith('.'):
-                try:
-                    val = float(line)
-                    _x86_data_cache[key] = val
-                    return val
-                except ValueError:
-                    continue
-
-        _x86_data_cache[key] = 0.0
-        return 0.0
-    except Exception:
-        _x86_data_cache[key] = 0.0
-        return 0.0
+import pystata_x.sfi._x86_display as _x86_disp
 
 # Fast C extension path — lazy import, checked at call time
 _fast_path = None  # Will be set to module on first use
@@ -207,21 +122,31 @@ class Macro:
         """Get the value of a Stata global macro."""
         if _check_fast_path():
             return _fast_path.get_macro(name)
+        if _IS_X86_64:
+            return _x86_disp.get_macro(name) or ""
         return call_string("_bist_global", name.encode())
 
     @staticmethod
     def setGlobal(name: str, value: str) -> None:
         """Set a Stata global macro."""
-        call_int("_bist_putglobal", name.encode(), value.encode())
+        if _IS_X86_64:
+            _x86_disp.set_macro(name, value)
+        else:
+            call_int("_bist_putglobal", name.encode(), value.encode())
 
     @staticmethod
     def delGlobal(name: str) -> None:
         """Delete a Stata global macro by setting it to empty."""
-        call_int("_bist_putglobal", name.encode(), b" ")
+        if _IS_X86_64:
+            _x86_disp.del_macro(name)
+        else:
+            call_int("_bist_putglobal", name.encode(), b" ")
 
     @staticmethod
     def getLocal(name: str) -> str:
         """Get the value of a Stata local macro."""
+        if _IS_X86_64:
+            return _x86_disp.get_macro(name) or ""
         return call_string("_bist_local", name.encode())
 
     @staticmethod
@@ -229,9 +154,12 @@ class Macro:
         """Set a Stata local macro.
 
         Note: _bist_putglobal with additional "local" mode or _bist_local
-        write.  We use call_int directly.
+        write.  We use call_int or display exec directly.
         """
-        call_int("_bist_putglobal", name.encode(), value.encode())
+        if _IS_X86_64:
+            _x86_disp.set_macro(name, value)
+        else:
+            call_int("_bist_putglobal", name.encode(), value.encode())
 
 
 # ═══════════════════════════════════════════
@@ -339,7 +267,7 @@ class Data:
         if _check_fast_path():
             return _fast_path.get_double(obs + 1, varno + 1)
         if _IS_X86_64:
-            return _read_x86_double(varno, obs)
+            return _x86_disp.read_double(varno, obs)
         return call_double("_bist_data", obs + 1, varno + 1)
 
     @staticmethod
@@ -348,20 +276,17 @@ class Data:
 
         Uses ``_fast_path.get_string()`` when the C extension is
         available.  Falls back to the Python push+stack path.
-        On x86_64, the dispatch function for ``_bist_sdata`` may
-        crash — return empty string in that case.
+        On x86_64, ``_bist_sdata`` crashes in the dispatch path
+        so we use ``display <varname>[<obs + 1>]`` instead.
         """
         if _IS_X86_64:
-            # _bist_sdata crashes on x86_64 with the current push protocol
-            return ""
+            return _x86_disp.read_string(varno, obs) or ""
         if _check_fast_path():
             try:
                 result = _fast_path.get_string(obs + 1, varno + 1)
                 if result:
                     return result
             except Exception:
-                pass
-            except BaseException:
                 pass
         try:
             return call_string("_bist_sdata", obs + 1, varno + 1) or ""
@@ -883,6 +808,8 @@ class Scalar:
         """Get the value of a numeric scalar."""
         if _check_fast_path():
             return _fast_path.get_scalar(name)
+        if _IS_X86_64:
+            return _x86_disp.read_scalar(name)
         return call_double("_bist_numscalar", name.encode())
 
     @staticmethod
@@ -895,6 +822,8 @@ class Scalar:
         """Get the value of a string scalar."""
         if _check_fast_path():
             return _fast_path.get_scalar_str(name)
+        if _IS_X86_64:
+            return _x86_disp.read_string_scalar(name) or ""
         return call_string("_bist_strscalar", name.encode())
 
     @staticmethod
@@ -944,6 +873,11 @@ class Missing:
         if not Missing.isMissing(value):
             return None
         return Missing._VALUE_TO_NAME.get(value)
+
+    @staticmethod
+    def isValueMissing(value: float) -> bool:
+        """Return True if *value* is a Stata missing value (including extended)."""
+        return Missing.isMissing(value)
 
     @staticmethod
     def parseIsMissing(s: str) -> bool:
