@@ -944,9 +944,14 @@ class ValueLabel:
     def getLabel(name: str, value: float) -> str:
         """Get the value label for a value-label pair (original API)."""
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import read_value_label
+            from pystata_x.sfi._x86_display import read_value_label, read_value_label_values
             labels = read_value_label(name)
-            return labels.get(int(value), "") or ""
+            vals = read_value_label_values(name)
+            v = int(value)
+            for i, val in enumerate(vals):
+                if val == v and i < len(labels):
+                    return labels[i]
+            return ""
         return call_string("_bist_vlmap", name.encode(), value)
 
     @staticmethod
