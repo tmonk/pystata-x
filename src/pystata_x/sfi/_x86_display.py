@@ -460,7 +460,10 @@ def store_string(varno: int, obs: int, value: str) -> bool:
         return False
 
 
-# ─── Older cache control (keep for backwards compat) ────────────────────def clear_cache() -> None:
+# ─── Older cache control (keep for backwards compat) ────────────────────
+
+
+def clear_cache() -> None:
     """Clear all cached values (call after dataset changes)."""
     _NUMERIC_DATA_CACHE.clear()
     _STRING_DATA_CACHE.clear()
