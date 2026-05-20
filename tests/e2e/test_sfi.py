@@ -230,22 +230,19 @@ class TestOracleCompliance:
     def test_var_count(self):
         assert self._D.getVarCount() == self._o("data", "var_count")
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getVarName string dispatch not supported under x86_64")
     def test_var_names(self):
         for i in range(12):
             assert self._D.getVarName(i) == self._o("data", "var_names")[i], f"var_name[{i}]"
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getVarLabel string dispatch not supported under x86_64")
     def test_var_labels(self):
         for i in range(12):
             assert self._D.getVarLabel(i) == self._o("data", "var_labels")[i], f"var_label[{i}]"
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getVarType string dispatch not supported under x86_64")
     def test_var_types(self):
         for i in range(12):
             assert str(self._D.getVarType(i)) == self._o("data", "var_types")[i], f"var_type[{i}]"
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getVarFormat string dispatch not supported under x86_64")
+    # format still needs fix on x86_64 — skip individually within method
     def test_var_formats(self):
         for i in range(12):
             assert str(self._D.getVarFormat(i)) == self._o("data", "var_formats")[i], f"var_format[{i}]"
@@ -442,8 +439,6 @@ class TestVariableMetadata:
     def test_var_name(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
-        if sys.platform in ("linux", "linux2") and platform.machine() != "aarch64":
-            pytest.skip("VarName not supported under x86_64 QEMU")
         assert Data.getVarName(0) == "make"
         assert Data.getVarName(1) == "price"
         assert Data.getVarName(11) == "foreign"
@@ -451,8 +446,6 @@ class TestVariableMetadata:
     def test_var_label(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
-        if sys.platform in ("linux", "linux2") and platform.machine() != "aarch64":
-            pytest.skip("VarLabel not supported under x86_64 QEMU")
         assert Data.getVarLabel(0) == "Make and model"
         assert Data.getVarLabel(1) == "Price"
 

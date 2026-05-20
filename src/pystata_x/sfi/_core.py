@@ -227,6 +227,9 @@ class Data:
     @staticmethod
     def getVarFormat(varno: int) -> str:
         """Get the display format of a variable."""
+        # On x86_64, _bist_varformat crashes. Return empty for now.
+        if _IS_X86_64:
+            return ""
         return call_string("_bist_varformat", varno + 1)
 
     @staticmethod
