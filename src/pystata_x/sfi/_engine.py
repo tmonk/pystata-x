@@ -958,6 +958,73 @@ def _populate_var_cache() -> bool:
     if not nvar:
         return False
 
+    # x86_64: read variable metadata directly from Stata's memory
+    # This avoids the dispatch-table complexity on x86_64
+    if _PLATFORM in ("x86_64", "linux"):
+        try:
+            # Variable name table: stride 129 bytes per entry
+            name_global_addr = _BASE + 0x832997 + 0x4469071
+            name_base = ctypes.c_uint64.from_address(name_global_addr).value
+            # Variable type table
+            type_global_addr = _BASE + 0x823d5b + 0x4477ca5
+            type_base = ctypes.c_uint64.from_address(type_global_addr).value
+
+            names = []
+            types = []
+            labels = []
+            formats = []
+
+            if name_base and type_base:
+                for i in range(nvar):
+                    # Read name at stride 129
+                    raw = ctypes.string_at(name_base + i * 129, 32)
+                    null_idx = raw.find(b'\x00')
+                    name = raw[:null_idx].decode('latin-1', errors='replace') if null_idx > 0 else raw.decode('latin-1', errors='replace')
+                    names.append(name)
+
+                    # Read type code at stride 2
+                    typ = ctypes.c_uint16.from_address(type_base + i * 2).value
+                    if typ == 0xFFF5:
+                        types.append("strL")
+                    elif typ == 0xFFF9 or typ == 0:
+                        types.append("float")
+                    elif typ == 0xFFFA:
+                        types.append("byte")
+                    elif typ == 0xFFF7:
+                        types.append("int")
+                    elif typ == 0xFFF8:
+                        types.append("long")
+                    elif 0 < typ < 256:
+                        types.append(f"str{typ}")
+                    else:
+                        types.append(f"type_{typ}")
+
+                    # Read label via _bist_varlabel with name arg
+                    try:
+                        label = call_string("_bist_varlabel", name.encode())
+                        labels.append(label or "")
+                    except Exception:
+                        labels.append("")
+
+                    # Read format via _bist_varformat with name arg
+                    try:
+                        fmt = call_string("_bist_varformat", name.encode())
+                        formats.append(fmt or "")
+                    except Exception:
+                        formats.append("")
+
+                if len(names) >= nvar:
+                    _invalidate_var_cache()
+                    for i in range(nvar):
+                        _VAR_NAMES_CACHE[i] = names[i] if i < len(names) else "?"
+                        _VAR_LABELS_CACHE[i] = labels[i] if i < len(labels) else ""
+                        _VAR_TYPES_CACHE[i] = types[i] if i < len(types) else ""
+                        _VAR_FORMATS_CACHE[i] = formats[i] if i < len(formats) else ""
+                    _VAR_CACHE_NVAR = nvar
+                    return True
+        except Exception:
+            pass
+
     try:
         # Use 'describe' for names, types, formats, labels
         # (ds output uses multi-column display that doesn't parse well)
