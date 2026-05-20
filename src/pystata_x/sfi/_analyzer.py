@@ -1840,7 +1840,7 @@ def run_test_suite(engine=None, history: Optional[TestHistory] = None,
     # numscalar: use Scalar.getValue on x86_64 (display path), raw dispatch elsewhere
     if _is_x86_64_linux:
         from pystata_x.sfi._core import Scalar as _Scalar
-        test_cases.append(("numscalar", lambda *a: _Scalar.getValue("pi"), [],
+        test_cases.append(("numscalar", lambda *a: _Scalar.getValue("c(pi)"), [],
                            lambda r: r is not None and r > 0, False))
     else:
         test_cases.append(("numscalar", engine.call_double, ["pi"],
