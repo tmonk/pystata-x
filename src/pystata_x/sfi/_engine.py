@@ -941,37 +941,17 @@ def _populate_var_cache() -> bool:
         return False
 
     try:
-        # Use 'ds' for variable names (compact, reliable)
-        _LIB.StataSO_ClearOutputBuffer()
-        _LIB.StataSO_Execute(b"ds")
-        buf = ctypes.c_char_p(_LIB.StataSO_GetOutputBuffer()).value
-        if not buf:
-            return False
-        ds_text = buf.decode("latin-1")
-
-        names = []
-        for line in ds_text.split("\n"):
-            line = line.strip()
-            if not line or line.startswith(".") or line.startswith("r("):
-                continue
-            for part in line.split():
-                part = part.strip()
-                if part and part[0].isalpha() and len(part) <= 32:
-                    names.append(part)
-
-        if len(names) < nvar:
-            return False
-        names = names[:nvar]
-
-        # Use 'describe' for types, formats, labels
+        # Use 'describe' for names, types, formats, labels
+        # (ds output uses multi-column display that doesn't parse well)
         _LIB.StataSO_ClearOutputBuffer()
         _LIB.StataSO_Execute(b"describe")
         buf = ctypes.c_char_p(_LIB.StataSO_GetOutputBuffer()).value
         desc = buf.decode("latin-1") if buf else ""
 
-        labels = []
+        names = []
         types = []
         formats = []
+        labels = []
         in_table = False
         header_seen = False
         for line in desc.split("\n"):
@@ -980,7 +960,6 @@ def _populate_var_cache() -> bool:
                 header_seen = True
                 continue
             if in_table and header_seen:
-                # Skip the second header line (starts with spaces, contains "name")
                 header_seen = False
                 continue
             if in_table and line.strip().startswith("---"):
@@ -991,30 +970,28 @@ def _populate_var_cache() -> bool:
                     break
                 parts = stripped.split()
                 if len(parts) >= 4 and parts[0][0].isalpha() and len(parts[0]) <= 32:
+                    vname = parts[0]
                     vtype = parts[1]
                     vfmt = parts[2]
-                    # Label starts after the format column; skip value-label column
-                    # if present (5th column = value label name, 6th onward = label)
-                    label = " ".join(parts[4:]) if len(parts) > 4 else \
-                            " ".join(parts[3:])
-                    # If label text looks like a value-label name (single word,
-                    # all lowercase), it's probably the value-label column; skip it
-                    if len(parts) > 5:
-                        label = " ".join(parts[5:])
+                    if len(parts) >= 5 and parts[3][0].islower() and parts[3].isalpha() and len(parts[3]) <= 32:
+                        label = " ".join(parts[4:])
+                    else:
+                        label = " ".join(parts[3:])
+                    names.append(vname)
                     types.append(vtype)
                     formats.append(vfmt)
                     labels.append(label)
 
+        if len(names) < nvar or len(names) != len(types):
+            return False
+
         # Populate caches
         _invalidate_var_cache()
-        for i, name in enumerate(names):
-            _VAR_NAMES_CACHE[i] = name
-            if i < len(labels):
-                _VAR_LABELS_CACHE[i] = labels[i]
-            if i < len(types):
-                _VAR_TYPES_CACHE[i] = types[i]
-            if i < len(formats):
-                _VAR_FORMATS_CACHE[i] = formats[i]
+        for i in range(min(nvar, len(names))):
+            _VAR_NAMES_CACHE[i] = names[i]
+            _VAR_LABELS_CACHE[i] = labels[i] if i < len(labels) else ""
+            _VAR_TYPES_CACHE[i] = types[i] if i < len(types) else ""
+            _VAR_FORMATS_CACHE[i] = formats[i] if i < len(formats) else ""
         _VAR_CACHE_NVAR = nvar
         return True
 
