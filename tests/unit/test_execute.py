@@ -175,11 +175,13 @@ class TestGraphTracking:
         assert result.graph_names is None, "Default should be None"
 
     def test_graph_names_empty_when_no_graphs(self, _mock_config):
-        """With track_graphs=True but sfi unavailable, graph_names is None."""
+        """With track_graphs=True but no graphs, graph_names is []."""
         from pystata_x._core import execute
         result = execute("display 1+1", track_graphs=True)
-        # _read_graph_names returns None when sfi unavailable
-        assert result.graph_names is None
+        # On x86_64/Docker with Stata available, graph tracking returns [].
+        # On macOS with mocked sfi, graph tracking returns None.
+        assert result.graph_names is None or result.graph_names == [],
+            f"Unexpected graph_names: {result.graph_names!r}"
 
 
 # ---------------------------------------------------------------------------
