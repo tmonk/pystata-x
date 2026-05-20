@@ -29,6 +29,12 @@
       "passed": true,
       "value": null,
       "notes": "tag=0x2b at 0xdb3124"
+    },
+    {
+      "timestamp": 1779292026.8301458,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xd62b94"
     }
   ],
   "nobs": [
@@ -58,6 +64,12 @@
     },
     {
       "timestamp": 1779291950.6974545,
+      "passed": true,
+      "value": 74,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779292026.8455875,
       "passed": true,
       "value": 74,
       "notes": ""
@@ -93,6 +105,12 @@
       "passed": true,
       "value": 12,
       "notes": ""
+    },
+    {
+      "timestamp": 1779292026.8462188,
+      "passed": true,
+      "value": 12,
+      "notes": ""
     }
   ],
   "data": [
@@ -125,6 +143,12 @@
       "passed": true,
       "value": 4099.0,
       "notes": ""
+    },
+    {
+      "timestamp": 1779292026.8470745,
+      "passed": true,
+      "value": 4099.0,
+      "notes": ""
     }
   ],
   "numscalar": [
@@ -154,6 +178,12 @@
     },
     {
       "timestamp": 1779291950.6997366,
+      "passed": false,
+      "value": null,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779292026.8475192,
       "passed": false,
       "value": null,
       "notes": ""
