@@ -193,8 +193,8 @@ class TestOracleCompliance:
         execute("sysuse auto, clear")
         execute("global testglobal = 42")
         execute("scalar myscalar = 3.14")
-        execute("scalar mystr = hello")
-        execute("label define yesno 0 No 1 Yes")
+        execute('scalar mystr = "hello"')
+        execute('label define yesno 0 No 1 Yes')
         execute("label values foreign yesno")
 
         from pystata_x import _stata_fast
