@@ -429,7 +429,7 @@ def store_double(varno: int, obs: int, value: float) -> bool:
         eng.StataSO_Execute(f"global {tmp} {value}".encode())
         eng.StataSO_ClearOutputBuffer()
         rc = eng.StataSO_Execute(
-            f"replace {tbl_name}[{obs + 1}] = ${tmp}".encode()
+            f"replace {tbl_name} = ${tmp} in {obs + 1}".encode()
         )
         eng.StataSO_Execute(f"macro drop {tmp}".encode())
         return rc == 0
@@ -449,7 +449,7 @@ def store_string(varno: int, obs: int, value: str) -> bool:
     try:
         eng.StataSO_ClearOutputBuffer()
         rc = eng.StataSO_Execute(
-            f'replace {tbl_name}[{obs + 1}] = "{value}"'.encode("utf-8", errors="replace")
+            f'replace {tbl_name} = "{value}" in {obs + 1}'.encode("utf-8", errors="replace")
         )
         return rc == 0
     except Exception:

@@ -307,12 +307,20 @@ class Data:
     @staticmethod
     def storeDouble(varno: int, obs: int, val: float) -> None:
         """Write a numeric value to a cell."""
-        call_store_double("_bist_store", obs + 1, varno + 1, val)
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import store_double
+            store_double(varno, obs, val)
+        else:
+            call_store_double("_bist_store", obs + 1, varno + 1, val)
 
     @staticmethod
     def storeString(varno: int, obs: int, val: str) -> None:
         """Write a string value to a cell."""
-        call_store_string("_bist_sstore", obs + 1, varno + 1, val.encode())
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import store_string
+            store_string(varno, obs, val)
+        else:
+            call_store_string("_bist_sstore", obs + 1, varno + 1, val.encode())
 
     @staticmethod
     def addObs(n: int = 1) -> None:
@@ -926,12 +934,19 @@ class ValueLabel:
     @staticmethod
     def exists(name: str) -> bool:
         """Check if a value label exists."""
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import read_value_label_exists
+            return read_value_label_exists(name)
         r = call_int("_bist_vlexists", name.encode())
         return bool(r) if r is not None else False
 
     @staticmethod
     def getLabel(name: str, value: float) -> str:
         """Get the value label for a value-label pair (original API)."""
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import read_value_label
+            labels = read_value_label(name)
+            return labels.get(int(value), "") or ""
         return call_string("_bist_vlmap", name.encode(), value)
 
     @staticmethod
@@ -953,18 +968,30 @@ class ValueLabel:
 
     @staticmethod
     def create(name: str) -> None:
-        """Create a new value-label definition via _bist_vlmodify."""
-        call_create_valuelabel(name)
+        """Create a new value-label definition."""
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import _exec
+            _exec(f"label define {name} 0 \" \", modify")
+        else:
+            call_create_valuelabel(name)
 
     @staticmethod
     def define(name: str, value: int, label: str) -> None:
         """Add or modify a single value-label mapping."""
-        call_vlmodify(name, value, label)
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import _exec
+            _exec(f"label define {name} {value} \"{label}\", modify")
+        else:
+            call_vlmodify(name, value, label)
 
     @staticmethod
     def drop(name: str) -> None:
         """Drop a value label."""
-        call_int("_bist_vldrop", name.encode())
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import _exec
+            _exec(f"label drop {name}")
+        else:
+            call_int("_bist_vldrop", name.encode())
 
     @staticmethod
     def getNames() -> list:
@@ -984,10 +1011,10 @@ class ValueLabel:
         """Get all value-label mappings for a label set.
 
         Returns a dict {value: label_text}.
-        Uses _bist_vlload then iterates via _bist_vlmap.
         """
-        # Try using _bist_vlload to load the label set, then iterate values
-        # This is a simplified version matching original sfi.py behavior
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import read_value_label
+            return read_value_label(name)
         r = call_int("_bist_vlload", name.encode())
         if r is None or r != 0:
             return {}

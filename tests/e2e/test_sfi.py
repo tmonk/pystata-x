@@ -287,24 +287,19 @@ class TestOracleCompliance:
 
     # ── ValueLabel ────────────────────────────────────────────────
 
-    @pytest.mark.skip(reason="ValueLabel.getNames crash — _bist_dir dispatch SIGSEGV")
     def test_valuelabel_names(self):
         assert sorted(self._VL.getNames()) == sorted(self._o("valuelabel", "names"))
 
-    @pytest.mark.skip(reason="ValueLabel dispatch crash")
     def test_valuelabel_foreign_labels(self):
         assert self._VL.getLabel("yesno", 0) == self._o("valuelabel", "foreign_label")
         assert self._VL.getLabel("yesno", 1) == self._o("valuelabel", "foreign_label_1")
 
-    @pytest.mark.skip(reason="ValueLabel dispatch crash")
     def test_valuelabel_var_vl(self):
         assert self._VL.getVarValueLabel(11) == self._o("valuelabel", "foreign_var_vl")
 
-    @pytest.mark.skip(reason="ValueLabel dispatch crash")
     def test_valuelabel_yesno_labels(self):
         assert self._VL.getLabels("yesno") == self._o("valuelabel", "yesno_labels")
 
-    @pytest.mark.skip(reason="ValueLabel dispatch crash")
     def test_valuelabel_yesno_values(self):
         assert self._VL.getValues("yesno") == self._o("valuelabel", "yesno_values")
 
@@ -369,7 +364,6 @@ class TestCellReads:
 class TestCellWrites:
     """storeDouble / storeString — writes via _bist_store / _bist_sstore."""
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="Store ops not supported under x86_64 QEMU")
     def test_write_and_readback_numeric(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
@@ -381,7 +375,6 @@ class TestCellWrites:
         # Restore
         Data.storeDouble(1, 0, original)
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="String ops crash under x86_64 QEMU")
     def test_write_and_readback_string(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
@@ -390,7 +383,6 @@ class TestCellWrites:
         assert Data.getString(0, 0) == "e2e_test"
         Data.storeString(0, 0, original)
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="Store+readback not supported under x86_64 (sentinel returns)")
     def test_idempotent_restore(self, stata):
         """After restore, original values are back."""
         execute, run = stata
@@ -564,7 +556,6 @@ class TestValueLabels:
         from pystata_x.sfi._core import ValueLabel
         return execute, ValueLabel
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="ValueLabel.exists crashes on x86_64 (_bist_dir dispatch SIGSEGV)")
     def test_existing_label(self, stata):
         execute, ValueLabel = self._reset(stata)
         assert ValueLabel.exists("origin") is True
@@ -573,8 +564,6 @@ class TestValueLabels:
         execute, ValueLabel = self._reset(stata)
         assert ValueLabel.exists("e2e_nonexistent_lbl") is False
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="ValueLabel.create/drop crashes on x86_64 (_bist_dir dispatch SIGSEGV)")
-    @pytest.mark.flaky(reruns=2, reason="Stata state may be corrupted by prior tests")
     def test_create_and_drop(self, stata):
         execute, ValueLabel = self._reset(stata)
         ValueLabel.create("e2e_test_lbl")
@@ -582,8 +571,6 @@ class TestValueLabels:
         ValueLabel.drop("e2e_test_lbl")
         assert ValueLabel.exists("e2e_test_lbl") is False
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="ValueLabel.define crashes on x86_64 (_bist_dir dispatch SIGSEGV)")
-    @pytest.mark.flaky(reruns=2, reason="Stata state may be corrupted by prior tests")
     def test_define_mapping(self, stata):
         execute, ValueLabel = self._reset(stata)
         ValueLabel.create("e2e_yesno_e2e")
@@ -592,7 +579,6 @@ class TestValueLabels:
         assert ValueLabel.exists("e2e_yesno_e2e") is True
         ValueLabel.drop("e2e_yesno_e2e")
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="ValueLabel.getValueLabel crashes on x86_64 (_bist_dir dispatch SIGSEGV)")
     def test_get_value_label(self, stata):
         execute, ValueLabel = self._reset(stata)
         # getValueLabel looks up var's attached label name, then gets text
@@ -600,7 +586,6 @@ class TestValueLabels:
         label = ValueLabel.getValueLabel(11, 0.0)
         assert label == "Domestic"
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="ValueLabel.getLabel crashes on x86_64 (_bist_dir dispatch SIGSEGV)")
     def test_get_label(self, stata):
         execute, ValueLabel = self._reset(stata)
         assert ValueLabel.getLabel("origin", 0.0) == "Domestic"
