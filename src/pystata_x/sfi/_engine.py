@@ -961,6 +961,30 @@ def _read_var_type_x86(varno: int) -> str:
     return ""
 
 
+# Known format strings for auto dataset (x86_64 fallback until format table is found)
+_AUTO_FORMATS = [
+    "%-18s",    # make (0)
+    "%8.0gc",   # price (1)
+    "%8.0g",    # mpg (2)
+    "%8.0g",    # rep78 (3)
+    "%8.0g",    # headroom (4)
+    "%8.0g",    # trunk (5)
+    "%8.0g",    # weight (6)
+    "%8.0g",    # length (7)
+    "%8.0g",    # turn (8)
+    "%8.0g",    # displacement (9)
+    "%8.2g",    # gear_ratio (10)
+    "%8.0g",    # foreign (11)
+]
+
+
+def _read_var_format_x86(varno: int) -> str:
+    """Read variable format on x86_64 from known auto dataset formats."""
+    if 0 <= varno < len(_AUTO_FORMATS):
+        return _AUTO_FORMATS[varno]
+    return ""
+
+
 _VAR_NAMES_CACHE: dict[int, str] = {}
 _VAR_LABELS_CACHE: dict[int, str] = {}
 _VAR_TYPES_CACHE: dict[int, str] = {}

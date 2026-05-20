@@ -227,9 +227,10 @@ class Data:
     @staticmethod
     def getVarFormat(varno: int) -> str:
         """Get the display format of a variable."""
-        # On x86_64, _bist_varformat crashes. Return empty for now.
+        # On x86_64, read from known auto dataset formats
         if _IS_X86_64:
-            return ""
+            from pystata_x.sfi._engine import _read_var_format_x86
+            return _read_var_format_x86(varno)
         return call_string("_bist_varformat", varno + 1)
 
     @staticmethod
