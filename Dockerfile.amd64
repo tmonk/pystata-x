@@ -42,7 +42,7 @@ COPY tests/ ./tests/
 COPY scripts/ ./scripts/
 
 # Install pystata-x in the venv
-RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0 pip install --no-cache-dir -e ".[dev,test]"
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0 pip install --no-cache-dir ".[dev,test]"
 
 # Stata will be mounted at /usr/local/stata19 at runtime
 ENV STATAPATH=/usr/local/stata19
