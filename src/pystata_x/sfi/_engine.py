@@ -332,6 +332,11 @@ def _push_str(s: bytes) -> None:
     """Push a string argument onto Stata's internal stack (all platforms).
 
     _pushstr takes (char* str, size_t len) in (x0/x1) or (rdi/rsi).
+
+    NOTE: On x86_64, _pushstr creates a tsmat via tsmat_alloc but the
+    data buffer is allocated via glibc malloc (not Stata's pool allocator).
+    This means data_buf[-0x94] does NOT have the 0x2b pool-header tag
+    that SP-resetting dispatch functions check.  See call_string docs.
     """
     _pushstr_fn(s, len(s))
 
@@ -577,7 +582,20 @@ def call_string(name: str, *args) -> Optional[str]:
     On x86_64, sets tsmat[0x34] = 0xFFFD (string return request) on the
     last pushed tsmat so dispatch entries take the string return path.
     Does NOT set tsmat[0x36] (argument flag) because dispatch entries
-    expect the argument to be typed as numeric (0x36 == 0).
+    like _bist_varindex expect tsmat[0x36] == 0 (numeric arg flag).
+
+    LIMITATION (x86_64): ~85% of dispatch functions (100/118) use an
+    SP-resetting protocol that reads args from a hidden .bss arg pointer
+    (0x500C6A0) rather than from the caller's pushed stack.  These
+    functions also check data_buf[-0x94] == 0x2b (pool-header tag) which
+    our glibc-malloc'd data buffers do not have.  Patching data_buf[-0x94]
+    corrupts glibc malloc metadata and causes SIGSEGV.  As a result,
+    string dispatch on x86_64 currently returns None for most functions.
+
+    FIX: Need to create tsmats with pool-allocated data buffers (via
+    Stata's tsmat_alloc) rather than glibc malloc, OR write the tsmat
+    pointer to the .bss arg pointer global (0x500C6A0) before calling
+    with the right structure layout.
     """
     if not _INITIALIZED:
         initialize()

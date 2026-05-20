@@ -1140,7 +1140,39 @@ class StataBinary:
 
     # ── Manifest diff (like-for-like comparison) ───────────────────────
 
-    # ── Protocol analysis (automated catalog) ──────────────────────
+    # ═══════════════════════════════════════════════════════════════
+    # Protocol analysis — x86_64 dispatch protocol classification
+    # ═══════════════════════════════════════════════════════════════
+    #
+    # CRITICAL ARCHITECTURE DISCOVERY (2026-05-20):
+    #
+    # On x86_64, ~85% of dispatch functions (100/118) use an
+    # "SP-resetting protocol" which is FUNDAMENTALLY different from
+    # the ARM64 push+stack protocol:
+    #
+    #   1. The function loads the SP global address via lea rax, [rip+X]
+    #   2. It loads a .data address via lea rX, [rip+Y] (arg buffer)
+    #   3. It sets SP_global = arg buffer (mov [rax], rX)
+    #   4. The function then reads args from the ARG POINTER at
+    #      0x500C6A0 (a .bss global, different from SP_global at
+    #      0x500C638)
+    #   5. The arg pointer holds a pointer to a structure where:
+    #      - [0x00]: data (GSO ptr for strings, double for numbers)
+    #      - [0x20]: obs dimension
+    #      - [0x28]: var dimension
+    #      - [0x34]: type field (0xFFFD=string, 0x0000=numeric)
+    #      - [0x36]: flags field
+    #   6. Functions check data_buf[-0x94] == 0x2b (pool-header tag),
+    #      but our _push_* functions create data buffers via glibc
+    #      malloc which don't have this tag. Patching data_buf[-0x94]
+    #      corrupts glibc malloc metadata (SIGSEGV).
+    #
+    # The remaining ~15% of functions (nobs, nvar, vartype, etc.)
+    # use the standard push+stack protocol compatible with ARM64.
+    #
+    # Methods in this section help classify and extract the
+    # addresses needed for the SP-resetting protocol.
+    # ───────────────────────────────────────────────────────────────
 
     def extract_arg_buffer_addr(self, name: str) -> dict:
         """Extract the .data arg buffer address from an SP-resetting dispatch function.
@@ -2046,6 +2078,8 @@ Examples:
   %(prog)s /path/to/libstata.so --trace data:1,2   Trace with arguments
   %(prog)s /path/to/libstata.so --test-suite       Run full test suite
   %(prog)s /path/to/libstata.so --check-pool       Check pool header tag
+  %(prog)s /path/to/libstata.so --protocol _bist_varindex  Deep protocol analysis
+  %(prog)s /path/to/libstata.so --catalog          Catalog all dispatch protocols
   %(prog)s --health                                Cache health check (no binary)
 """,
     )
@@ -2076,6 +2110,8 @@ Examples:
                         help="Scan dispatch table for string-returning functions via call-chain tracing")
     parser.add_argument("--protocol", type=str, metavar="FUNCTION",
                         help="Deep protocol analysis of a dispatch function (e.g. _bist_varindex)")
+    parser.add_argument("--catalog", action="store_true",
+                        help="Run protocol analysis on all dispatch entries and show summary table")
     parser.add_argument("--xfsearch", type=str, metavar="ADDR",
                         help="Find all code locations in .text that call a given address (hex)")
     parser.add_argument("--history", action="store_true",
