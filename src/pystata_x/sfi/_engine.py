@@ -973,21 +973,34 @@ def _populate_var_cache() -> bool:
         types = []
         formats = []
         in_table = False
+        header_seen = False
         for line in desc.split("\n"):
             if "Variable" in line and "Storage" in line:
                 in_table = True
+                header_seen = True
+                continue
+            if in_table and header_seen:
+                # Skip the second header line (starts with spaces, contains "name")
+                header_seen = False
                 continue
             if in_table and line.strip().startswith("---"):
                 continue
             if in_table:
-                if line.strip().startswith("Sorted by") or not line.strip():
+                stripped = line.strip()
+                if stripped.startswith("Sorted by") or not stripped:
                     break
-                parts = line.strip().split()
-                if len(parts) >= 4:
+                parts = stripped.split()
+                if len(parts) >= 4 and parts[0][0].isalpha() and len(parts[0]) <= 32:
                     vtype = parts[1]
                     vfmt = parts[2]
+                    # Label starts after the format column; skip value-label column
+                    # if present (5th column = value label name, 6th onward = label)
                     label = " ".join(parts[4:]) if len(parts) > 4 else \
                             " ".join(parts[3:])
+                    # If label text looks like a value-label name (single word,
+                    # all lowercase), it's probably the value-label column; skip it
+                    if len(parts) > 5:
+                        label = " ".join(parts[5:])
                     types.append(vtype)
                     formats.append(vfmt)
                     labels.append(label)
