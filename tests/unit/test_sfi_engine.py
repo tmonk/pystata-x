@@ -197,19 +197,11 @@ class TestCallDouble:
 
 
 class TestCallString:
-    @pytest.mark.skipif(
-        _sys.platform == "linux" and platform.machine() == "x86_64",
-        reason="String dispatch returns None on x86_64 Linux"
-    )
     def test_string_return(self, eng):
         eng._pop_and_read_string.return_value = "AMC Concord"
         result = eng.call_string("_bist_sdata", 1, 1)
         assert result == "AMC Concord"
 
-    @pytest.mark.skipif(
-        _sys.platform == "linux" and platform.machine() == "x86_64",
-        reason="String dispatch returns None on x86_64 Linux"
-    )
     def test_int_arg(self, eng):
         eng._pop_and_read_string.return_value = "make"
         result = eng.call_string("_bist_varname", 1)
