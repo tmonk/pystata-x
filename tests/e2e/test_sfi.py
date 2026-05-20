@@ -37,48 +37,36 @@ _IS_X86_64_QEMU = sys.platform in ("linux", "linux2") and platform.machine() != 
 @pytest.fixture(scope="module")
 def stata():
     """Initialise Stata once and return engine.execute function."""
-    from pystata_x.stata_setup import config as stata_config
     from pystata_x import _config as cfg
 
     if not cfg.stinitialized:
         # Auto-detect Stata installation (works on macOS, Linux, Windows)
         stata_root = None
         if sys.platform == "darwin":
+            from pystata_x.stata_setup import config as stata_config
             apps = Path("/Applications")
             if apps.is_dir():
                 for entry in sorted(apps.iterdir()):
                     if "stata" in entry.name.lower():
                         stata_root = entry
                         break
-        elif sys.platform in ("linux", "linux2"):
-            for parent in [Path("/usr/local"), Path("/opt")]:
-                if parent.is_dir():
-                    for entry in sorted(parent.iterdir()):
-                        if entry.name.lower().startswith("stata"):
-                            stata_root = entry
-                            break
-                if stata_root:
+            if stata_root is None:
+                pytest.skip("No Stata installation found on macOS")
+            # Detect edition by checking which .app bundle has the library
+            for ed in ("se", "mp", "be"):
+                lib = stata_root / f"Stata{ed.upper()}.app" / "Contents" / "MacOS" / f"libstata-{ed}.dylib"
+                if lib.exists():
+                    edition = ed
                     break
+            else:
+                edition = "se"  # fallback
+            stata_config(str(stata_root), edition, splash=False)
         else:
-            for parent in [Path("C:\\Program Files")]:
-                if parent.is_dir():
-                    for entry in sorted(parent.iterdir()):
-                        if entry.name.upper().startswith("STATA"):
-                            stata_root = entry
-                            break
-        if stata_root is None:
-            pytest.skip("No Stata installation found")
-
-        # Detect edition by checking which .app bundle has the library
-        for ed in ("se", "mp", "be"):
-            lib = stata_root / f"Stata{ed.upper()}.app" / "Contents" / "MacOS" / f"libstata-{ed}.dylib"
-            if lib.exists():
-                edition = ed
-                break
-        else:
-            edition = "se"  # fallback
-
-        stata_config(str(stata_root), edition, splash=False)
+            # Linux / Windows: use engine.initialize() which handles all platforms
+            from pystata_x.sfi._engine import initialize
+            initialize()
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(b"sysuse auto, clear")
 
     # Use the simpler engine.execute, not _core.execute
     from pystata_x.sfi._engine import execute
