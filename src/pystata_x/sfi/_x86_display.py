@@ -77,6 +77,36 @@ def _exec(cmd: str | bytes) -> Optional[str]:
         return None
 
 
+def _exec_all(cmd: str | bytes) -> list[str] | None:
+    """Execute a Stata command and return ALL non-prompt output lines."""
+    if isinstance(cmd, str):
+        cmd = cmd.encode("utf-8", errors="replace")
+    eng = _get_engine_lib()
+    if eng is None:
+        return None
+    _ensure_output_buf(eng)
+    try:
+        eng.StataSO_ClearOutputBuffer()
+        rc = eng.StataSO_Execute(cmd)
+        if rc != 0:
+            return None
+        buf = eng.StataSO_GetOutputBuffer
+        buf.restype = ctypes.c_char_p
+        out = buf()
+        if out is None:
+            return None
+        text = out.decode("utf-8", errors="replace")
+        lines: list[str] = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith(".") and not stripped.startswith(">"):
+                lines.append(line)
+        return lines if lines else None
+    except Exception:
+        log.exception("x86 display exec_all failed")
+        return None
+
+
 # ─── Numeric data cell ──────────────────────────────────────────────────
 
 
@@ -287,7 +317,150 @@ def del_macro(name: str) -> bool:
 # ─── Cache control ─────────────────────────────────────────────────────
 
 
-def clear_cache() -> None:
+_MACRO_TEMP_ID = 0
+
+
+def _next_tmp_macro() -> str:
+    """Return a unique temporary macro name."""
+    global _MACRO_TEMP_ID
+    _MACRO_TEMP_ID += 1
+    return f"__px_x86_tmp_{_MACRO_TEMP_ID}"
+
+
+def read_var_value_label(varno: int) -> str:
+    """Get the value-label name attached to a Stata variable.
+
+    Uses Stata's ``: value label <varname>`` extended macro function
+    via compound-quoted display.
+    """
+    import pystata_x.sfi._engine as eng_mod
+    tbl_name = eng_mod._read_var_name_x86(varno)
+    if not tbl_name:
+        return ""
+    eng = _get_engine_lib()
+    if eng is None:
+        return ""
+    try:
+        # Set local from extended function, then display with compound quoting
+        eng.StataSO_Execute(f"local __vvlbl : value label {tbl_name}".encode())
+        eng.StataSO_ClearOutputBuffer()
+        # di `\"`__vvlbl'\"'  -- compound backtick quoting
+        cmd = (
+            b"di `\"`__vvlbl'\"'"
+        )
+        rc = eng.StataSO_Execute(cmd)
+        if rc != 0:
+            return ""
+        buf = eng.StataSO_GetOutputBuffer
+        buf.restype = ctypes.c_char_p
+        out = buf().decode()
+        for line in out.split("\n"):
+            s = line.strip()
+            if s and not s.startswith(".") and not s.startswith("r("):
+                return s
+        return ""
+    except Exception:
+        return ""
+
+
+def read_value_label_names() -> list:
+    """List all value-label names via ``label dir``."""
+    out = _exec("label dir")
+    if not out:
+        return []
+    # ``label dir`` outputs lines like:
+    #   "origin"
+    #   "yesno"
+    names = []
+    for line in out.split("\n"):
+        s = line.strip().strip('"')
+        if s and not s.startswith(".") and not s.startswith("r("):
+            names.append(s)
+    return names
+
+
+def read_value_label(name: str) -> dict:
+    """Get (value, label) pairs for a value-label set via ``label list <name>``.
+
+    Returns dict {int_value: str_label}.
+    """
+    out = _exec(f"label list {name}")
+    if not out:
+        # Check if label doesn't exist
+        return {}
+    pairs: dict = {}
+    for line in out.split("\n"):
+        s = line.strip()
+        if s and not s.startswith(".") and not s.startswith("r(") and not s.startswith(f"{name}:"):
+            # Parse "N LabelText"
+            parts = s.split(None, 1)
+            if len(parts) == 2:
+                try:
+                    val = int(parts[0])
+                    pairs[val] = parts[1]
+                except ValueError:
+                    pass
+    return pairs
+
+
+def read_value_label_exists(name: str) -> bool:
+    """Check if a value label exists."""
+    out = _exec(f"label list {name}")
+    if out is None:
+        return False
+    for line in out.split("\n"):
+        s = line.strip()
+        if s.startswith(f"{name}:"):
+            return True
+    return False
+
+
+def store_double(varno: int, obs: int, value: float) -> bool:
+    """Write a numeric cell via ``replace <varname>[<obs>] = <value>``.
+
+    Uses an intermediate global macro to safely transport the float value
+    through StataSO_Execute.
+    """
+    import pystata_x.sfi._engine as eng_mod
+    tbl_name = eng_mod._read_var_name_x86(varno)
+    if not tbl_name:
+        return False
+    eng = _get_engine_lib()
+    if eng is None:
+        return False
+    tmp = _next_tmp_macro()
+    try:
+        eng.StataSO_Execute(f"global {tmp} {value}".encode())
+        eng.StataSO_ClearOutputBuffer()
+        rc = eng.StataSO_Execute(
+            f"replace {tbl_name}[{obs + 1}] = ${tmp}".encode()
+        )
+        eng.StataSO_Execute(f"macro drop {tmp}".encode())
+        return rc == 0
+    except Exception:
+        return False
+
+
+def store_string(varno: int, obs: int, value: str) -> bool:
+    """Write a string cell via ``replace <varname>[<obs>] = "<value>"``."""
+    import pystata_x.sfi._engine as eng_mod
+    tbl_name = eng_mod._read_var_name_x86(varno)
+    if not tbl_name:
+        return False
+    eng = _get_engine_lib()
+    if eng is None:
+        return False
+    try:
+        eng.StataSO_ClearOutputBuffer()
+        rc = eng.StataSO_Execute(
+            f'replace {tbl_name}[{obs + 1}] = "{value}"'.encode("utf-8", errors="replace")
+        )
+        return rc == 0
+    except Exception:
+        return False
+
+
+# ─── Older cache control (keep for backwards compat) ────────────────────def clear_cache() -> None:
     """Clear all cached values (call after dataset changes)."""
     _NUMERIC_DATA_CACHE.clear()
     _STRING_DATA_CACHE.clear()

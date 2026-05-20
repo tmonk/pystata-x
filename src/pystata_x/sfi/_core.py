@@ -378,15 +378,8 @@ class Data:
     def getVarValueLabel(varno: int) -> str:
         """Get the value label name attached to a variable."""
         if _IS_X86_64:
-            # On x86_64, use var name + _bist_varlabel avoids crash
-            try:
-                name = Data.getVarName(varno)
-                if name:
-                    r = call_string("_bist_varvaluelabel", name.encode())
-                    return r or ""
-            except Exception:
-                pass
-            return ""
+            from pystata_x.sfi._x86_display import read_var_value_label
+            return read_var_value_label(varno) or ""
         return call_string("_bist_varvaluelabel", varno + 1)
 
     @staticmethod

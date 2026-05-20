@@ -254,7 +254,6 @@ class TestOracleCompliance:
     def test_is_alias(self):
         assert self._D.isAlias(0) == self._o("data", "is_alias_0")
 
-    @pytest.mark.skipif(_IS_X86_64_QEMU, reason="getStrVarWidth dispatch not supported under x86_64")
     def test_str_width(self):
         assert self._D.getStrVarWidth(0) == self._o("data", "str_var_width")
 
@@ -447,8 +446,6 @@ class TestVariableMetadata:
     def test_var_value_label(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
-        if sys.platform in ("linux", "linux2") and platform.machine() != "aarch64":
-            pytest.skip("VarValueLabel not supported under x86_64 QEMU")
         assert Data.getVarValueLabel(11) == "origin"
 
 
