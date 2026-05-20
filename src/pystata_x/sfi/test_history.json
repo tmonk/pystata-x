@@ -55,6 +55,13 @@
       "value": null,
       "notes": "tag=0x2b at 0x134a394",
       "xfail": false
+    },
+    {
+      "timestamp": 1779300845.8926985,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xccab14",
+      "xfail": false
     }
   ],
   "nobs": [
@@ -102,6 +109,13 @@
     },
     {
       "timestamp": 1779298628.8056273,
+      "passed": true,
+      "value": 74,
+      "notes": "",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779300845.9092188,
       "passed": true,
       "value": 74,
       "notes": "",
@@ -157,6 +171,13 @@
       "value": 12,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779300845.9101377,
+      "passed": true,
+      "value": 12,
+      "notes": "",
+      "xfail": false
     }
   ],
   "data": [
@@ -208,6 +229,13 @@
       "value": 4099.0,
       "notes": "",
       "xfail": false
+    },
+    {
+      "timestamp": 1779300845.9112103,
+      "passed": true,
+      "value": 4099.0,
+      "notes": "",
+      "xfail": false
     }
   ],
   "numscalar": [
@@ -255,6 +283,13 @@
     },
     {
       "timestamp": 1779298628.8081415,
+      "passed": false,
+      "value": null,
+      "notes": "",
+      "xfail": true
+    },
+    {
+      "timestamp": 1779300845.9121287,
       "passed": false,
       "value": null,
       "notes": "",
@@ -494,6 +529,29 @@
     },
     {
       "timestamp": 1779298630.7149827,
+      "passed": true,
+      "value": {
+        "total": 21,
+        "passed": 12,
+        "failed": 0,
+        "skipped": 7,
+        "xfail": 2,
+        "categories": {
+          "sentinel": 0,
+          "sigsegv": 0,
+          "wrong_value": 0,
+          "null_return": 0,
+          "setup_error": 0,
+          "string_dispatch": 0,
+          "macro_requires_context": 0,
+          "other": 0
+        }
+      },
+      "notes": "0 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 0, 'macro_requires_context': 0, 'other': 0}",
+      "xfail": false
+    },
+    {
+      "timestamp": 1779300848.063401,
       "passed": true,
       "value": {
         "total": 21,
