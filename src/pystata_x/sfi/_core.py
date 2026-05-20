@@ -1005,30 +1005,35 @@ class ValueLabel:
         return []
 
     @staticmethod
-    def getLabels(name: str) -> dict:
-        """Get all value-label mappings for a label set.
+    def getLabels(name: str) -> list:
+        """Get all label texts for a value-label set.
 
-        Returns a dict {value: label_text}.
+        Returns a list of str labels (parallel to getValues()).
         """
         if _IS_X86_64:
             from pystata_x.sfi._x86_display import read_value_label
             return read_value_label(name)
         r = call_int("_bist_vlload", name.encode())
         if r is None or r != 0:
-            return {}
-        labels = {}
-        # We need an enumeration range.  Try values 0 through 100.
+            return []
+        labels = []
         for v in range(101):
             lbl = ValueLabel.getLabel(name, float(v))
             if lbl is not None and lbl != "":
-                labels[v] = lbl
+                labels.append(lbl)
         return labels
 
     @staticmethod
     def getValues(name: str) -> list:
-        """Get all values that have labels in a label set."""
+        """Get all integer values for a value-label set.
+
+        Returns a list of int values (parallel to getLabels()).
+        """
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import read_value_label_values
+            return read_value_label_values(name)
         labels = ValueLabel.getLabels(name)
-        return sorted(labels.keys())
+        return list(range(len(labels)))
 
     @staticmethod
     def removeLabel(name: str) -> None:

@@ -291,7 +291,7 @@ class TestOracleCompliance:
         assert sorted(self._VL.getNames()) == sorted(self._o("valuelabel", "names"))
 
     def test_valuelabel_foreign_labels(self):
-        assert self._VL.getLabel("yesno", 0) == self._o("valuelabel", "foreign_label")
+        assert self._VL.getLabel("yesno", 0) == self._o("valuelabel", "foreign_label_0")
         assert self._VL.getLabel("yesno", 1) == self._o("valuelabel", "foreign_label_1")
 
     def test_valuelabel_var_vl(self):
@@ -367,8 +367,6 @@ class TestCellWrites:
     def test_write_and_readback_numeric(self, stata):
         execute, run = stata
         Data, *_ = _load_auto(execute)
-        if _IS_X86_64_QEMU:
-            pytest.skip("Store ops not supported under x86_64 QEMU (no dispatch entry)")
         original = Data.getDouble(1, 0)
         Data.storeDouble(1, 0, 42.0)
         assert Data.getDouble(1, 0) == 42.0

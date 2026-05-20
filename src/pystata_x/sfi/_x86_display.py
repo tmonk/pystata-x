@@ -376,27 +376,43 @@ def read_value_label_names() -> list:
     return names
 
 
-def read_value_label(name: str) -> dict:
-    """Get (value, label) pairs for a value-label set via ``label list <name>``.
+def read_value_label(name: str) -> list:
+    """Get the label texts for a value-label set via ``label list <name>``.
 
-    Returns dict {int_value: str_label}.
+    Returns a list of label strings (parallel to values returned by read_value_label_values).
     """
     lines = _exec_all(f"label list {name}")
     if not lines:
-        return {}
-    pairs: dict = {}
+        return []
+    labels: list = []
     for line in lines:
         s = line.strip()
         if s and not s.startswith(f"{name}:"):
-            # Parse "N LabelText"
+            parts = s.split(None, 1)
+            if len(parts) == 2:
+                labels.append(parts[1])
+    return labels
+
+
+def read_value_label_values(name: str) -> list:
+    """Get the integer values for a value-label set.
+
+    Returns a list of int values (parallel to labels returned by read_value_label).
+    """
+    lines = _exec_all(f"label list {name}")
+    if not lines:
+        return []
+    vals: list = []
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith(f"{name}:"):
             parts = s.split(None, 1)
             if len(parts) == 2:
                 try:
-                    val = int(parts[0])
-                    pairs[val] = parts[1]
+                    vals.append(int(parts[0]))
                 except ValueError:
                     pass
-    return pairs
+    return vals
 
 
 def read_value_label_exists(name: str) -> bool:
