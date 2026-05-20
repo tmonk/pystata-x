@@ -76,8 +76,9 @@ def _find_lib() -> str:
     else:
         lib_name = "libstata_fast.so"
         build_dir = stata_fast_dir / "build"
-    # Check direct source dir first, then CMake build dir, then build/Release (Windows)
-    for d in [stata_fast_dir, build_dir, build_dir / "Release"]:
+    # Check direct source dir first, then CMake build dir, then package dir, then build/Release
+    pkg_dir = Path(__file__).resolve().parent  # same dir as _stata_fast.py
+    for d in [stata_fast_dir, build_dir, pkg_dir, build_dir / "Release"]:
         candidate = d / lib_name
         if candidate.is_file():
             return str(candidate.resolve())
