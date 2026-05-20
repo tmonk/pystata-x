@@ -995,12 +995,10 @@ class ValueLabel:
 
     @staticmethod
     def getNames() -> list:
-        """Get all value label names.
-
-        Uses _bist_dir to list value labels (type 7 = value labels in Stata's
-        internal directory).  Falls back to StataSO_Execute if _bist_dir
-        calling convention is unclear.
-        """
+        """Get all value label names."""
+        if _IS_X86_64:
+            from pystata_x.sfi._x86_display import read_value_label_names
+            return read_value_label_names()
         r = call_string("_bist_dir", float(7))
         if r:
             return [x.strip() for x in r.split() if x.strip()]
