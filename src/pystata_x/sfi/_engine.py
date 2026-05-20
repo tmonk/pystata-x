@@ -991,13 +991,13 @@ _AUTO_FORMATS = [
     "%8.0gc",   # price (1)
     "%8.0g",    # mpg (2)
     "%8.0g",    # rep78 (3)
-    "%8.0g",    # headroom (4)
+    "%6.1f",    # headroom (4)
     "%8.0g",    # trunk (5)
-    "%8.0g",    # weight (6)
+    "%8.0gc",   # weight (6)
     "%8.0g",    # length (7)
     "%8.0g",    # turn (8)
     "%8.0g",    # displacement (9)
-    "%8.2g",    # gear_ratio (10)
+    "%6.2f",    # gear_ratio (10)
     "%8.0g",    # foreign (11)
 ]
 
