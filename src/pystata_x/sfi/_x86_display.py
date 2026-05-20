@@ -226,21 +226,21 @@ def read_string_scalar(name: str) -> Optional[str]:
 _MACRO_CACHE: dict[str, str] = {}
 
 
-def get_macro(name: str) -> Optional[str]:
+def get_macro(name: str) -> str:
     """Get a global macro via ``display "$<name>"``.
 
-    Returns ``None`` when the macro does not exist (Stata errors),
-    matching the original SFI API contract.
+    Returns ``""`` (empty string) when the macro does not exist,
+    matching the official SFI API contract.
     """
     cached = _MACRO_CACHE.get(name)
     if cached is not None:
-        return None if cached == "" else cached
+        return cached
 
     cmd = f'display "${name}"'
     out = _exec(cmd)
     if out is None:
         _MACRO_CACHE[name] = ""
-        return None
+        return ""
     _MACRO_CACHE[name] = out
     return out
 

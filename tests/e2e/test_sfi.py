@@ -493,8 +493,8 @@ class TestMacros:
         execute, run = stata
         _, Macro, *_ = _load_auto(execute)
         result = Macro.getGlobal("e2e_nonexistent_global")
-        # Non-existent globals return None
-        assert result is None
+        # Non-existent globals return empty string
+        assert result == ""
 
 
 # ═══════════════════════════════════════════════════════════════════
