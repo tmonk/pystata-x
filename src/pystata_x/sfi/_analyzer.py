@@ -1436,6 +1436,54 @@ class StataBinary:
             results.append(proto)
         return results
 
+    def pool_catalog(self) -> list[dict]:
+        """Analyze pool-header check patterns across ALL dispatch entries.
+
+        For each dispatch entry, follows its thunk jumps and looks for
+        pool-header tag checks (0x2b at -0x94 offsets).  Categorizes
+        each function's check pattern.
+
+        Returns list of dicts with:
+          - name, dispatch_idx, vaddr
+          - pool_check_type: "tsmat[-0x10]->[-0x94]", "direct[-0x94]", "data_buf[-0x94]", "none"
+          - has_pool_check: bool
+          - error_code: int or None
+          - has_pushstr: bool
+        """
+        addr_to_names = {}
+        for name, vaddr in self.symbols.items():
+            if name.startswith("_bist_"):
+                addr_to_names.setdefault(vaddr, []).append(name)
+
+        results = []
+        for vaddr in sorted(addr_to_names):
+            name = addr_to_names[vaddr][0]
+            analysis = self.analyze_dispatch_fn(name)
+            pool_type = "none"
+            # Categorize pool-header check pattern from disassembly
+            full_insns = self._follow_thunk(vaddr, max_depth=3)
+            for _, _, mnemonic, op_str in full_insns:
+                if "- 0x94" in op_str or "-0x94" in op_str:
+                    if "rcx" in op_str or "rbx" in op_str or "rax" in op_str:
+                        if "qword" in op_str:
+                            pool_type = "tsmat[-0x10]->[-0x94]"
+                        else:
+                            pool_type = "direct[-0x94]"
+                        break
+                    elif "rdi" in op_str:
+                        pool_type = "data_buf[-0x94]"
+                        break
+            results.append({
+                "name": name,
+                "dispatch_idx": analysis.get("dispatch_idx"),
+                "vaddr": vaddr,
+                "has_pool_check": analysis.get("has_pool_header_check", False),
+                "pool_check_type": pool_type,
+                "error_code": analysis.get("error_code"),
+                "has_pushstr": analysis.get("calls_pushstr", False),
+            })
+        return results
+
     @staticmethod
     def diff_manifests(a: dict, b: dict) -> dict:
         """Compare two manifests and report differences.
@@ -2148,6 +2196,12 @@ Examples:
                         help="Deep protocol analysis of a dispatch function (e.g. _bist_varindex)")
     parser.add_argument("--catalog", action="store_true",
                         help="Run protocol analysis on all dispatch entries and show summary table")
+    parser.add_argument("--pool-catalog", action="store_true",
+                        help="Catalog pool-header check patterns across ALL dispatch entries")
+    parser.add_argument("--analyze-strings", type=str, nargs="?", const="all",
+                        help="Deep per-function analysis of string dispatch entries. "
+                             "Optionally filter by name substring (e.g. var, macro, label). "
+                             "Logs each function's thunk path, pool-header check, and protocol to TestHistory.")
     parser.add_argument("--xfsearch", type=str, metavar="ADDR",
                         help="Find all code locations in .text that call a given address (hex)")
     parser.add_argument("--history", action="store_true",
@@ -2286,6 +2340,100 @@ Examples:
             print(f"  {p['name']:30s} {pt:20s} {pc:12s} {ps:8s}")
         print(f"\nSummary: {str_count} string_return, {num_count} numeric_return, "
               f"{len(catalog)-str_count-num_count} other")
+        return
+
+    if args.pool_catalog:
+        if not args.path:
+            parser.print_help()
+            sys.exit(1)
+        path = args.path
+        if not os.path.exists(path):
+            print(f"Error: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        ana = StataBinary(path)
+        ana.analyze()
+        catalog = ana.pool_catalog()
+        print(f"Pool-Header Check Catalog: {len(catalog)} dispatch entries")
+        print(f"  {'Function':30s} {'PoolCheck':12s} {'Type':30s} {'PushStr':8s}")
+        print(f"  {'-'*85}")
+        types: dict = {}
+        for p in catalog:
+            pt = p["pool_check_type"]
+            types[pt] = types.get(pt, 0) + 1
+            pc = "Y" if p["has_pool_check"] else "N"
+            ps = "Y" if p["has_pushstr"] else "N"
+            print(f"  {p['name']:30s} {pc:12s} {pt:30s} {ps:8s}")
+        print(f"\nPool-check type distribution:")
+        for t, c in sorted(types.items(), key=lambda x: -x[1]):
+            bar = "#" * min(c, 40)
+            print(f"  {t:30s}: {c:3d}  {bar}")
+        return
+
+    if args.analyze_strings:
+        if not args.path:
+            parser.print_help()
+            sys.exit(1)
+        path = args.path
+        if not os.path.exists(path):
+            print(f"Error: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        ana = StataBinary(path)
+        ana.analyze()
+
+        string_fns = ana.find_string_functions()
+        string_entries = [s for s in string_fns if s["has_string_chain"]]
+
+        filter_str = args.analyze_strings
+        if filter_str and filter_str != "all":
+            string_entries = [s for s in string_entries
+                              if any(filter_str.lower() in n.lower() for n in s["names"])]
+
+        print(f"═" * 60)
+        print(f"Deep String-Dispatch Analysis ({len(string_entries)} functions)")
+        print(f"═" * 60)
+
+        history = TestHistory()
+        for s in string_entries:
+            name = s["names"][0] if s["names"] else f"dispatch[{s['dispatch_idx']}]"
+            print(f"\n── Analyzing {name} (dispatch[{s['dispatch_idx']}])")
+            analysis = ana.analyze_dispatch_fn(name)
+            proto = ana.analyze_protocol(name)
+
+            # Follow thunk path detals
+            insns = ana._follow_thunk(s["vaddr"], max_depth=3)
+            pool_check = analysis.get("has_pool_header_check", False)
+            error_code = analysis.get("error_code")
+
+            # Determine pool-header check pattern
+            pool_type = "none"
+            for _, _, mnemonic, op_str in insns:
+                if "- 0x94" in op_str or "-0x94" in op_str:
+                    pool_type = "data_buf[-0x94]" if "rdi" in op_str else "tsmat_ptr[-0x10]->[-0x94]"
+                    break
+
+            print(f"  vaddr:     {hex(s['vaddr'])}")
+            print(f"  chain:     {' -> '.join(hex(a) for a in s['call_chain'][:5])}")
+            print(f"  pool_check:{pool_type}  (detected={pool_check})")
+            print(f"  error_code:{error_code}")
+            print(f"  protocol:  {proto.get('protocol_type', '?')}")
+            if proto.get("arg_types"):
+                print(f"  args:      {proto['arg_types']}")
+
+            # Log to TestHistory
+            history.record(
+                f"string_fn_{name}",
+                passed=True,
+                value={
+                    "dispatch_idx": s["dispatch_idx"],
+                    "vaddr": hex(s["vaddr"]),
+                    "pool_check": pool_type,
+                    "error_code": error_code,
+                    "protocol_type": proto.get("protocol_type"),
+                    "chain_depth": len(s["call_chain"]),
+                }
+            )
+
+        print(f"\n" + history.summary())
         return
 
     if args.find_strings:
