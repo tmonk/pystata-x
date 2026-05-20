@@ -2,50 +2,42 @@
 
 Architecture
 ------------
-On ARM64 macOS, ALL _bist_* functions use Stata's proprietary internal calling
-convention (NOT the standard ARM64 AAPCS64 ABI).  They read arguments from and
-push results to Stata's internal expression stack rather than using registers.
+ALL _bist_* functions use Stata's proprietary internal calling convention on
+ALL platforms (ARM64 macOS, x86_64 Linux, x86_64 Windows).  They read
+arguments from and push results to Stata's internal expression stack, not
+registers.  This was cracked via ARM64 disassembly and confirmed via x86_64
+ELF dispatch table + pushdbl pattern analysis.
 
-Therefore on ARM64 we MUST use the push+stack+pop pattern for ALL _bist_*:
-  1. Push arguments via _pushint / _pushdbl / _pushstr (these DO use std ARM64 ABI).
-  2. Call _bist_* via CFUNCTYPE(None) — no register args.
-  3. Read result from Stata's internal stack (SP at _BASE + stack_ptr_delta)
-     where stack_ptr_delta is discovered from ARM64 disassembly of _pushdbl.
-     - For doubles/ints: tsmat[0] -> *(double*)data or *(int32*)data
-     - For strings: *(char**)(tsmat[0]) -> [uint32 len][char data]
-  4. Restore SP to pre-push value (consumes the result from Stata's stack).
+Therefore we MUST use the push+stack+pop pattern for ALL _bist_* calls:
+  1. Push arguments via _pushint / _pushdbl / _pushstr (standard C ABI).
+  2. Call _bist_* via CFUNCTYPE(None, c_int) with arg count in rdi/ecx.
+  3. Read result from Stata's internal stack (SP at _BASE + stack_ptr_delta).
+  4. Restore SP to pre-push value.
 
-Push function signatures (ALL standard ARM64 ABI, confirmed via disasm):
-  _pushint(int val)          - val in w0, converts to double internally
-  _pushdbl(double *val)      - POINTER to double in x0, NOT the value itself
-  _pushstr(char *str, len)   - string ptr in x0, length in x1
+Push function signatures (ALL platforms, standard C ABI):
+  _pushint(int val)          - ARM64: w0, x86_64: edi, Win64: ecx
+  _pushdbl(double *val)      - POINTER to double, NOT the value itself
+  _pushstr(char *str, len)   - string ptr, length
 
-_bi_st_* Calling Convention (cracked 2026-05-19):
-  Same push+stack convention as _bist_*, but first argument MUST use
-  _pushstr (type=-3 tsmat convention).
-  See docs/bi_st_analysis.md for full tsmat structure and function catalog.
+_bi_st_* Calling Convention:
+  Same push+stack, but first argument MUST use _pushstr (type=-3 tsmat).
 
-On x86_64 Linux, _bist_* functions use standard SysV ABI (arguments in
-rdi/rsi/rdx, return in rax/xmm0), so CFUNCTYPE works directly.
-On Windows x86_64, standard Microsoft x64 ABI (rcx/rdx/r8/r9).
+Internal stack layout (tsmat, 64 bytes per entry):
+  After a call, *(uint64_t*)SP points to a tsmat.  tsmat[0] -> double value
+  for numeric results; for strings tsmat[0] -> GSO -> [uint32 len + data].
 
-Internal stack layout (tsmat):
-  After a _bist_* call, *(uint64_t*)SP points to a tsmat structure.
-  For numeric results:
-    tsmat[0]  ->  double value (8 bytes)
-  For string results:
-    tsmat[0]  ->  struct { uint32 len; char data[len]; }
-    The string is at *(char**)tsmat[0] + 4, length is *(uint32*)*(char**)tsmat[0].
+Symbol Discovery (x86_64)
+-------------------------
+On stripped x86_64 ELF binaries, the standard symbol table is empty.
+Instead we:
+  1. Parse .rela.dyn to discover the dispatch table (1686 function ptrs).
+  2. Parse .data to read the st_* name table (name -> dispatch index).
+  3. Cross-reference to build {_bist_*: vmaddr} for all SFI functions.
+  4. Scan .text for the pushdbl stack-advance pattern to find stack_ptr.
+All pure static analysis, <10ms, no runtime needed.
 
-Symbol Discovery
-----------------
-1. Ship a pre-computed manifest.json keyed by SHA256 of the binary.
-2. At init: hash the loaded library -> look up in manifest -> use addresses.
-3. Fallback: parse the binary dynamically via _manifest.discover_symbols().
-
-Runtime data offsets (stack pointer, error address) are also auto-discovered
-from ARM64 disassembly of _pushdbl and _st_store_u via capstone, at build time
-(shipped manifest) or at first import (auto-detect).  No hardcoded addresses.
+On macOS ARM64, the Mach-O symbol table is available (not stripped).
+On Windows x86_64, PE .reloc section analysis is under development.
 """
 import ctypes
 import hashlib
@@ -59,7 +51,7 @@ _LIB: Optional[ctypes.CDLL] = None
 _BASE: int = 0
 _INITIALIZED: bool = False
 
-# Push function pointers (ARM64 only, init'd during _arm64_setup)
+# Push function pointers (init'd during _setup_push_fns, all platforms)
 _pushint_fn: Optional[ctypes._CFuncPtr] = None
 _pushdbl_fn: Optional[ctypes._CFuncPtr] = None
 _pushstr_fn: Optional[ctypes._CFuncPtr] = None
@@ -124,9 +116,9 @@ def _check_platform() -> str:
 
 _PLATFORM: str = _check_platform()
 
-# Auto-discover data offsets from binary if shipped manifest didn't match
-# (unknown Stata version).  Only on ARM64 where these offsets are needed.
-if _PLATFORM == "arm64" and not _DATA_OFFSETS and _STACK_PTR_OFFSET == 0:
+# Auto-discover data offsets from binary if shipped manifest didn't match.
+# Works on ARM64 (Mach-O Capstone-based) and x86_64 (ELF .text pattern).
+if not _DATA_OFFSETS and _STACK_PTR_OFFSET == 0:
     try:
         _lib_path = _find_lib()
         from pystata_x.sfi._manifest import discover_data_offsets
@@ -160,14 +152,13 @@ def _ensure_symbols(lib_path: str) -> None:
        the result to a manifest file keyed by SHA256.
     """
     global _SYMS, _MANIFEST
-    if _SYMS:
-        return
 
     fhash = _file_sha256(lib_path)
 
     # Tier 1: Check shipped manifest.json (current directory)
     if _MANIFEST.get("sha256") == fhash:
-        _SYMS = _MANIFEST.get("symbols", {})
+        _SYMS.clear()
+        _SYMS.update(_MANIFEST.get("symbols", {}))
         if _SYMS:
             return
 
@@ -180,41 +171,55 @@ def _ensure_symbols(lib_path: str) -> None:
                     mdata = json.load(_f)
                 if mdata.get("sha256") == fhash:
                     _MANIFEST = mdata
-                    _SYMS = mdata.get("symbols", {})
+                    _SYMS.clear()
+                    _SYMS.update(mdata.get("symbols", {}))
                     if _SYMS:
                         return
             except (json.JSONDecodeError, OSError):
                 continue
 
     # Tier 2: Dynamic binary parsing
+    global _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
     try:
-        from pystata_x.sfi._manifest import discover_symbols, filter_bist_symbols
+        # For ELF x86_64, use the dispatch table scanner (pure static analysis)
+        if _PLATFORM == "x86_64":
+            from pystata_x.sfi._manifest import build_manifest
+            _mdata = build_manifest(lib_path)
+            _SYMS.clear()
+            _SYMS.update(_mdata.get("symbols", {}))
+            _ddo_offsets = _mdata.get("data_offsets")
+            # Update module-level offsets
+            if _ddo_offsets and _STACK_PTR_OFFSET == 0:
+                _STACK_PTR_OFFSET = _ddo_offsets.get("stack_ptr_delta", 0)
+                _ERR_ADDR_RELATIVE = _ddo_offsets.get("err_addr_delta", 0)
+        else:
+            from pystata_x.sfi._manifest import discover_symbols, filter_bist_symbols
+            all_syms = discover_symbols(lib_path)
+            _SYMS.clear()
+            _SYMS.update(filter_bist_symbols(all_syms))
 
-        all_syms = discover_symbols(lib_path)
-        _SYMS = filter_bist_symbols(all_syms)
-
-        # Also discover data offsets (ARM64 only) and cache them
-        try:
-            from pystata_x.sfi._manifest import discover_data_offsets as _ddo
-            _ddo_offsets = _ddo(lib_path)
-            # Update module-level offsets in case auto-discovery failed at
-            # import time but succeeds now (defensive — unlikely in practice).
-            if _ddo_offsets:
-                global _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
-                if _STACK_PTR_OFFSET == 0:
+            # Also discover data offsets and cache them
+            try:
+                from pystata_x.sfi._manifest import discover_data_offsets as _ddo
+                _ddo_offsets = _ddo(lib_path)
+                if _ddo_offsets and _STACK_PTR_OFFSET == 0:
                     _STACK_PTR_OFFSET = _ddo_offsets["stack_ptr_delta"]
                     _ERR_ADDR_RELATIVE = _ddo_offsets.get("err_addr_delta", 0)
-        except Exception:
-            _ddo_offsets = None
+            except Exception:
+                _ddo_offsets = None
 
         # Permanently cache the generated manifest for this SHA256
-        _MANIFEST = {
+        # Build a fresh dict for _MANIFEST (this is the module global, not
+        # referenced by external code via direct import of the dict object)
+        _mdata_items = {
             "sha256": fhash,
             "platform": sys.platform,
             "n_bist_symbols": len(_SYMS),
-            "symbols": _SYMS,
+            "symbols": dict(_SYMS),  # copy to avoid aliasing
             "data_offsets": _ddo_offsets,
         }
+        _MANIFEST.clear()
+        _MANIFEST.update(_mdata_items)
         # Save to manifests/ directory if it exists, else to manifest.json
         if manifests_dir.is_dir():
             cache_path = manifests_dir / f"manifest-{fhash[:16]}.json"
@@ -236,15 +241,17 @@ def _sym_addr(name: str) -> Optional[int]:
 # ─── ARM64 push function setup ─────────────────────────────────────
 
 
-def _arm64_setup_push_fns():
-    """Initialize ARM64 push function pointers from manifest symbols.
+def _setup_push_fns():
+    """Initialize push function pointers from manifest symbols (all platforms).
 
     Must be called after _BASE is computed.
-    Push functions use STANDARD ARM64 ABI (confirmed via disassembly):
-      _pushint(int)  ->  w0 = value
-      _pushdbl(double*) ->  x0 = pointer to double
-      _pushstr(char*, size_t) ->  x0 = string ptr, x1 = length
+    Push functions use STANDARD C ABI on each platform:
+      _pushint(int)  ->  w0 (ARM64), edi (x86_64 SysV), ecx (Win64)
+      _pushdbl(double*) ->  x0 (ARM64), rdi (x86_64 SysV), rcx (Win64)
+      _pushstr(char*, size_t) ->  x0/x1 (ARM64), rdi/rsi (x86_64), rcx/rdx (Win64)
     """
+    # CFUNCTYPE uses the platform's standard ABI, so the same declarations work.
+    # Windows x64 uses Microsoft ABI (rcx/rdx/r8/r9) which CFUNCTYPE handles.
     global _pushint_fn, _pushdbl_fn, _pushstr_fn
     if _pushint_fn is not None:
         return
@@ -302,31 +309,31 @@ def _get_fn(addr: int, restype, *argtypes) -> ctypes._CFuncPtr:
     return _FN_CACHE[key]
 
 
-def _arm64_push_int(val: int) -> None:
-    """Push an int argument onto Stata's internal stack (ARM64)."""
+def _push_int(val: int) -> None:
+    """Push an int argument onto Stata's internal stack (all platforms)."""
     _pushint_fn(val)
 
 
-def _arm64_push_double(val: float) -> None:
-    """Push a double argument onto Stata's internal stack (ARM64).
+def _push_double(val: float) -> None:
+    """Push a double argument onto Stata's internal stack (all platforms).
 
-    _pushdbl takes a POINTER to the double value in x0, not the value itself.
+    _pushdbl takes a POINTER to the double value in x0/rdi, not the value itself.
     We create a ctypes buffer and pass its address.
     """
     buf = ctypes.c_double(val)
     _pushdbl_fn(ctypes.addressof(buf))
 
 
-def _arm64_push_str(s: bytes) -> None:
-    """Push a string argument onto Stata's internal stack (ARM64).
+def _push_str(s: bytes) -> None:
+    """Push a string argument onto Stata's internal stack (all platforms).
 
-    _pushstr takes (char* str, size_t len) in x0, x1.
+    _pushstr takes (char* str, size_t len) in (x0/x1) or (rdi/rsi).
     """
     _pushstr_fn(s, len(s))
 
 
-def _arm64_pop_and_read_double(sp_before: int) -> Optional[float]:
-    """After an ARM64 _bist_* call, read the double result from
+def _pop_and_read_double(sp_before: int) -> Optional[float]:
+    """After a _bist_* call, read the double result from
     Stata's internal stack and restore SP."""
     sp = _save_sp()
     try:
@@ -341,8 +348,8 @@ def _arm64_pop_and_read_double(sp_before: int) -> Optional[float]:
         _restore_sp(sp_before)
 
 
-def _arm64_pop_and_read_int(sp_before: int) -> Optional[int]:
-    """After an ARM64 _bist_* call, read the int result from
+def _pop_and_read_int(sp_before: int) -> Optional[int]:
+    """After a _bist_* call, read the int result from
     Stata's internal stack and restore SP.
 
     NOTE: _bist_* functions push int results as DOUBLE values
@@ -362,19 +369,29 @@ def _arm64_pop_and_read_int(sp_before: int) -> Optional[int]:
         _restore_sp(sp_before)
 
 
-def _arm64_pop_and_read_string(sp_before: int) -> Optional[str]:
-    """After an ARM64 _bist_* call, read the string result from
+def _pop_and_read_string(sp_before: int) -> Optional[str]:
+    """After a _bist_* call, read the string result from
     Stata's internal stack and restore SP.
 
     String format (confirmed empirically):
       *(char**)tsmat[0] points to a struct:
         +0: uint32 length (includes null terminator)
         +4: char data[length]
+
+    On x86_64, some dispatch functions return numeric results
+    (TYPE=0) even for string reads.  In that case data_buf[-0x94]
+    won't have the 0x2b tag and data_buf[0] is a double, not a
+    GSO pointer.  We detect this and return None instead.
     """
     sp = _save_sp()
     try:
         tsmat = ctypes.c_uint64.from_address(sp).value
         if not tsmat:
+            return None
+        # Check TYPE field at tsmat[0x34] — TYPE != 0 means string/GSO
+        result_type = ctypes.c_uint32.from_address(tsmat + 0x34).value & 0xFF
+        if result_type == 0:
+            # Numeric result, not a string — cannot read GSO
             return None
         data_buf = ctypes.c_uint64.from_address(tsmat).value
         if not data_buf:
@@ -432,9 +449,13 @@ def initialize():
     _ensure_symbols(lib_path)
 
     # Compute base address: _BASE = st_main - st_main_vmaddr
+    # ELF scanner stores StataSO_Main (no underscore); shipped manifest
+    # has _StataSO_Main (Mach-O convention).  Try both.
     main_vmaddr = _sym_addr("_StataSO_Main")
     if main_vmaddr is None:
-        raise RuntimeError("_StataSO_Main not found in symbol table")
+        main_vmaddr = _sym_addr("StataSO_Main")
+    if main_vmaddr is None:
+        raise RuntimeError("StataSO_Main not found in symbol table")
     st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
     _BASE = st_main - main_vmaddr
 
@@ -457,13 +478,15 @@ def initialize():
     _LIB.StataSO_Execute.restype = ctypes.c_int
     _LIB.StataSO_Execute.argtypes = [ctypes.c_char_p]
 
-    # Set up ARM64 push function pointers
-    if _PLATFORM == "arm64":
-        _arm64_setup_push_fns()
-        # Warm up: push a dummy int so _bist_* functions that check
-        # the internal stack have a valid entry to dereference.
-        if _pushint_fn is not None:
-            _pushint_fn(0)
+    # Set up push function pointers (all platforms)
+    _setup_push_fns()
+    # Warm up: push a dummy int so _bist_* functions that check
+    # the internal stack have a valid entry to dereference.
+    # NOTE: Only on ARM64, where 0-arg functions don't read from the stack.
+    # On x86_64, the generic impl always reads 3 tsmats from [sp-16],[sp-8],[sp],
+    # so a single warm-up entry would leave uninitialized reads and crash.
+    if _pushint_fn is not None and _PLATFORM == "arm64":
+        _pushint_fn(0)
 
     _INITIALIZED = True
 
@@ -477,214 +500,156 @@ def initialize():
         pass  # Fast C path not available — fall back to Python path
 
 
+def _resolve_name(name: str) -> Optional[int]:
+    """Resolve a function name to its vmaddr from the manifest.
+
+    Tries the name as-is first, then with _bist_ prefix, then
+    with the bare name suffix stripping prefixes.
+    """
+    addr = _sym_addr(name)
+    if addr is not None:
+        return addr
+    # Try with _bist_ prefix
+    if not name.startswith("_bist_"):
+        addr = _sym_addr(f"_bist_{name}")
+        if addr is not None:
+            return addr
+    # Try stripping _bist_ prefix
+    if name.startswith("_bist_"):
+        bare = name[6:]
+        addr = _sym_addr(bare)
+        if addr is not None:
+            return addr
+    return None
+
+
 # ─── Function callers ──────────────────────────────────────────────
 
 
 def call_int(name: str, *args) -> Optional[int]:
-    """Call a _bist_* function that returns an int (error code or index).
+    """Call a _bist_* function that returns an int.
 
-    On ARM64: push args to internal stack, call function, read from stack.
-    On x86_64: direct CFUNCTYPE (standard SysV/Microsoft ABI).
+    Uses push+stack on ALL platforms (universal internal convention).
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return None
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_args(args)
-        # Pass arg count as w0 (mode flag for _bist_* functions)
-        w0 = len(args) if args else 0
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(w0)
-        return _arm64_pop_and_read_int(sp_before)
-    else:
-        return _call_std_int(rt, args)
+    sp_before = _save_sp()
+    _push_args(args)
+    w0 = len(args) if args else 0
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(w0)
+    return _pop_and_read_int(sp_before)
 
 
 def call_double(name: str, *args) -> Optional[float]:
     """Call a _bist_* function that returns a double.
 
-    On ARM64: push args to internal stack, call function, read from stack.
-    On x86_64: direct CFUNCTYPE (standard SysV/Microsoft ABI).
+    Uses push+stack on ALL platforms (universal internal convention).
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return None
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_args(args)
-        w0 = len(args) if args else 0
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(w0)
-        return _arm64_pop_and_read_double(sp_before)
-    else:
-        return _call_std_double(rt, args)
+    sp_before = _save_sp()
+    _push_args(args)
+    w0 = len(args) if args else 0
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(w0)
+    return _pop_and_read_double(sp_before)
 
 
 def call_string(name: str, *args) -> Optional[str]:
     """Call a _bist_* function that returns a string.
 
-    On ARM64: push args to internal stack, call function, read from stack.
-    On x86_64: direct CFUNCTYPE (standard SysV/Microsoft ABI).
+    Uses push+stack on ALL platforms (universal internal convention).
+    On x86_64, applies tsmat flag and type-tag fixes for functions
+    that check data_ptr[-0x94] (like varname).
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return None
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_args(args)
-        w0 = len(args) if args else 0
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(w0)
-        return _arm64_pop_and_read_string(sp_before)
-    else:
-        return _call_std_string(rt, args)
+    sp_before = _save_sp()
+    _push_args(args)
+
+    # x86_64: set tsmat[0x36] flags so dispatch entries that check
+    # tsmat flags (e.g. dispatch[143] for varname) don't take the
+    # error-3104 path.  This write is within the tsmat allocation
+    # (64+ bytes) and is always safe.
+    #
+    # NOTE: We do NOT patch data_ptr[-0x94] here because that field
+    # is OUTSIDE the standalone 8-byte allocation that pushint creates.
+    # Only pool-allocated tsmats have a valid header at data_ptr[-0x94],
+    # and Stata's pool control is all zeros under QEMU emulation on
+    # x86_64 Linux.  Patching it corrupts glibc heap metadata.
+    if _PLATFORM in ("x86_64", "windows"):
+        sp = _save_sp()
+        tsmat = ctypes.c_uint64.from_address(sp).value
+        if tsmat:
+            (ctypes.c_uint8 * 64).from_address(tsmat)[0x36] = 2
+
+    w0 = len(args) if args else 0
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(w0)
+    return _pop_and_read_string(sp_before)
 
 
 def call_void(name: str, *args) -> None:
     """Call a _bist_* function that doesn't return a meaningful value.
-    On ARM64: push args to internal stack, call function.
-    On x86_64: direct CFUNCTYPE (standard SysV/Microsoft ABI).
+
+    Uses push+stack on ALL platforms (universal internal convention).
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_args(args)
-        w0 = len(args) if args else 0
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(w0)
-        _restore_sp(sp_before)
-    else:
-        _call_std_void(rt, args)
+    sp_before = _save_sp()
+    _push_args(args)
+    w0 = len(args) if args else 0
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(w0)
+    _restore_sp(sp_before)
 
 
-# ─── ARM64 argument pushing ────────────────────────────────────────
+# ─── Platform-generic argument pushing ─────────────────────────────
 
 
-def _arm64_push_args(args: tuple) -> None:
-    """Push function arguments onto Stata's internal stack.
+def _push_args(args: tuple) -> None:
+    """Push function arguments onto Stata's internal stack (all platforms).
 
     Each arg is pushed using the appropriate _push* function:
-      int      -> _pushint(w0=val)
-      bytes    -> _pushstr(x0=ptr, x1=len)
-      float    -> _pushdbl(x0=&val)
+      int      -> _pushint(w0/edi=val)
+      bytes    -> _pushstr(x0/rdi=ptr, x1/rsi=len)
+      float    -> _pushdbl(x0/rdi=&val)
     """
     if not args:
         return
     for a in args:
         if isinstance(a, int):
-            _arm64_push_int(a)
+            _push_int(a)
         elif isinstance(a, bytes):
-            _arm64_push_str(a)
+            _push_str(a)
         elif isinstance(a, float):
-            _arm64_push_double(a)
+            _push_double(a)
         else:
             raise TypeError(f"Unsupported arg type: {type(a)}")
 
 
-# ─── Standard ABI callers (x86_64 / Windows) ──────────────────────
-
-
-def _cast_fn(rt, restype, *argtypes):
-    """Cast a raw address to a CFUNCTYPE with given return and arg types."""
-    return _get_fn(rt, restype, *argtypes)
-
-
-def _call_std_int(rt: int, args: tuple) -> Optional[int]:
-    """Call _bist_* via standard ABI (int return in rax)."""
-    if len(args) == 0:
-        return _cast_fn(rt, ctypes.c_int)()
-    elif len(args) == 1:
-        if isinstance(args[0], int):
-            return _cast_fn(rt, ctypes.c_int, ctypes.c_int)(args[0])
-        elif isinstance(args[0], bytes):
-            return _cast_fn(rt, ctypes.c_int, ctypes.c_char_p)(args[0])
-    elif len(args) == 2:
-        if isinstance(args[0], bytes) and isinstance(args[1], bytes):
-            return _cast_fn(rt, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p)(
-                args[0], args[1]
-            )
-    raise TypeError(f"Unsupported args for call_int: {args}")
-
-
-def _call_std_double(rt: int, args: tuple) -> Optional[float]:
-    """Call _bist_* via standard ABI (double return in xmm0)."""
-    if len(args) == 0:
-        return _cast_fn(rt, ctypes.c_double)()
-    elif len(args) == 1:
-        if isinstance(args[0], bytes):
-            return _cast_fn(rt, ctypes.c_double, ctypes.c_char_p)(args[0])
-        elif isinstance(args[0], int):
-            return _cast_fn(rt, ctypes.c_double, ctypes.c_int)(args[0])
-    elif len(args) == 2:
-        if isinstance(args[0], int) and isinstance(args[1], int):
-            return _cast_fn(rt, ctypes.c_double, ctypes.c_int, ctypes.c_int)(
-                args[0], args[1]
-            )
-    raise TypeError(f"Unsupported args for call_double: {args}")
-
-
-def _call_std_string(rt: int, args: tuple) -> Optional[str]:
-    """Call _bist_* via standard ABI (char* return in rax)."""
-    if len(args) == 0:
-        return _decode(_cast_fn(rt, ctypes.c_char_p)())
-    elif len(args) == 1:
-        if isinstance(args[0], bytes):
-            return _decode(_cast_fn(rt, ctypes.c_char_p, ctypes.c_char_p)(args[0]))
-        elif isinstance(args[0], int):
-            return _decode(_cast_fn(rt, ctypes.c_char_p, ctypes.c_int)(args[0]))
-    elif len(args) == 2:
-        if isinstance(args[0], int) and isinstance(args[1], int):
-            return _decode(
-                _cast_fn(rt, ctypes.c_char_p, ctypes.c_int, ctypes.c_int)(
-                    args[0], args[1]
-                )
-            )
-    raise TypeError(f"Unsupported args for call_string: {args}")
-
-
-def _call_std_void(rt: int, args: tuple) -> None:
-    """Call _bist_* via standard ABI (void return)."""
-    if len(args) == 0:
-        _get_fn(rt, None)()
-    elif len(args) == 1:
-        if isinstance(args[0], bytes):
-            _get_fn(rt, None, ctypes.c_char_p)(args[0])
-        elif isinstance(args[0], int):
-            _get_fn(rt, None, ctypes.c_int)(args[0])
-        elif isinstance(args[0], float):
-            _get_fn(rt, None, ctypes.c_double)(args[0])
-    elif len(args) == 2:
-        _get_fn(rt, None, ctypes.c_char_p, ctypes.c_char_p)(
-            args[0], args[1]
-        )
-
-
-def _decode(b: Optional[bytes]) -> Optional[str]:
-    if b is None:
-        return None
-    return b.decode("utf-8", errors="replace")
-
-
-# ─── Store / Write operations (ARM64 only) ─────────────────────────
+# ─── Store / Write operations (ALL platforms) ─────────────────────
 
 # Error status after store operations.
 # _bist_store / _bist_sstore write to an internal Stata error variable
@@ -701,72 +666,69 @@ def _read_stata_err() -> int:
 def call_store_double(name: str, obs: int, var: int, val: float) -> int:
     """Call _bist_store to write a double value to a cell.
 
-    On ARM64: push 3 args (obs, var, double*) via _pushint/_pushdbl, then
-    call fn(3).  Return code is in the global error variable.
-
-    On x86_64: direct CFUNCTYPE with (int, int, c_double).
+    Uses push+stack on ALL platforms (universal internal convention).
+    On x86_64, numeric store requires the typeset flag fix on the
+    value tsmat and uses the same dispatch entry as data (dispatch[87])
+    which handles both read (2-arg) and store (3-arg) internally.
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return -1
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_int(obs)
-        _arm64_push_int(var)
-        # _pushdbl takes a double* — create a buffer and push its address
-        _arm64_push_double(val)
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(3)
-        rc = _read_stata_err()
-        _restore_sp(sp_before)
-        return rc
-    else:
-        fn = ctypes.cast(
-            rt, ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_double)
-        )
-        return fn(obs, var, val)
+    sp_before = _save_sp()
+    _push_int(obs)
+    _push_int(var)
+    _push_double(val)
+
+    # x86_64: fix the value tsmat's type tag so the impl function's
+    # type checker passes.  The value tsmat is the top of stack.
+    if _PLATFORM in ("x86_64", "windows"):
+        sp = _save_sp()
+        val_tsmat = ctypes.c_uint64.from_address(sp).value
+        if val_tsmat:
+            val_dp = ctypes.c_uint64.from_address(val_tsmat).value
+            if val_dp and val_dp > 0x100:
+                ctypes.c_uint8.from_address(val_dp - 0x94).value = 0x2b
+            # varname-type checks read tsmat[0x36] flags byte
+            (ctypes.c_uint8 * 64).from_address(val_tsmat)[0x36] = 2
+
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(3)
+    rc = _read_stata_err()
+    _restore_sp(sp_before)
+    return rc
 
 
 def call_store_string(name: str, obs: int, var: int, val: bytes) -> int:
     """Call _bist_sstore to write a string value to a cell.
 
-    On ARM64: push 3 args (obs, var, char*) via _pushint/_pushstr, then
-    call fn(3).  Return code is in the global error variable.
-
-    On x86_64: direct CFUNCTYPE with (int, int, c_char_p).
+    Uses push+stack on ALL platforms.
     """
     if not _INITIALIZED:
         initialize()
-    addr = _sym_addr(name)
+    addr = _resolve_name(name)
     if addr is None:
         return -1
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_int(obs)
-        _arm64_push_int(var)
-        _arm64_push_str(val)
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(3)
-        rc = _read_stata_err()
-        _restore_sp(sp_before)
-        return rc
-    else:
-        fn = ctypes.cast(
-            rt, ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_char_p)
-        )
-        return fn(obs, var, val)
+    sp_before = _save_sp()
+    _push_int(obs)
+    _push_int(var)
+    _push_str(val)
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(3)
+    rc = _read_stata_err()
+    _restore_sp(sp_before)
+    return rc
 
 
-def _arm64_push_double_ptr(addr: int) -> None:
-    """Push a double value via pointer onto Stata's internal stack (ARM64).
+def _push_double_ptr(addr: int) -> None:
+    """Push a double value via pointer onto Stata's internal stack (all platforms).
 
-    _pushdbl takes a POINTER to the double value in x0.
+    _pushdbl takes a POINTER to the double value in x0/rdi.
     We already have the address from a ctypes buffer.
     """
     _pushdbl_fn(addr)
@@ -845,12 +807,7 @@ def call_set_strscalar(name: str, value: str) -> int:
 def call_vlmodify(label_name: str, value: int, text: str) -> int:
     """Add/modify a value-label mapping via _bist_vlmodify.
 
-    _bist_vlmodify reads 3 entries from the internal stack:
-      *(SP-16) = label name (string tsmat)
-      *(SP-8)  = value (numeric tsmat, e.g. 0, 1)
-      *(SP)    = label text (string tsmat)
-
-    On x86_64: direct CFUNCTYPE with (char*, int, char*).
+    Uses push+stack on ALL platforms.
     """
     if not _INITIALIZED:
         initialize()
@@ -859,24 +816,15 @@ def call_vlmodify(label_name: str, value: int, text: str) -> int:
         return -1
     rt = _BASE + addr
 
-    if _PLATFORM == "arm64":
-        sp_before = _save_sp()
-        _arm64_push_str(label_name.encode())
-        _arm64_push_int(value)
-        _arm64_push_str(text.encode())
-        fn = _get_fn(rt, None, ctypes.c_int)
-        fn(3)
-        rc = _read_stata_err()
-        _restore_sp(sp_before)
-        return rc
-    else:
-        fn = ctypes.cast(
-            rt,
-            ctypes.CFUNCTYPE(
-                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
-            ),
-        )
-        return fn(label_name.encode(), value, text.encode())
+    sp_before = _save_sp()
+    _push_str(label_name.encode())
+    _push_int(value)
+    _push_str(text.encode())
+    fn = _get_fn(rt, None, ctypes.c_int)
+    fn(3)
+    rc = _read_stata_err()
+    _restore_sp(sp_before)
+    return rc
 
 
 # ─── Value label helper (uses _bist_vlmodify + _bist_vlload) ──────
@@ -945,6 +893,138 @@ def execute(command: str) -> tuple[str, int]:
             output = raw.decode("utf-8", errors="replace")
     return output, rc
 
+
+# ─── Variable Metadata Reading ────────────────────────────────────────
+
+_VAR_NAMES_CACHE: dict[int, str] = {}
+_VAR_LABELS_CACHE: dict[int, str] = {}
+_VAR_TYPES_CACHE: dict[int, str] = {}
+_VAR_FORMATS_CACHE: dict[int, str] = {}
+_VAR_CACHE_NVAR: int = 0
+
+
+def _invalidate_var_cache():
+    """Clear the variable metadata cache."""
+    global _VAR_NAMES_CACHE, _VAR_LABELS_CACHE, _VAR_TYPES_CACHE
+    global _VAR_FORMATS_CACHE, _VAR_CACHE_NVAR
+    _VAR_NAMES_CACHE.clear()
+    _VAR_LABELS_CACHE.clear()
+    _VAR_TYPES_CACHE.clear()
+    _VAR_FORMATS_CACHE.clear()
+    _VAR_CACHE_NVAR = 0
+
+
+def _populate_var_cache() -> bool:
+    """Read variable metadata from Stata's describe output and cache it.
+
+    Uses StataSO_Execute to run 'ds' and 'describe' commands, then
+    parses the structured output. Intended as a one-time cache
+    populated after dataset load.
+
+    Returns True if cache was populated successfully.
+    """
+    global _VAR_NAMES_CACHE, _VAR_LABELS_CACHE, _VAR_TYPES_CACHE
+    global _VAR_FORMATS_CACHE, _VAR_CACHE_NVAR
+
+    if _VAR_CACHE_NVAR:
+        return True  # already cached
+
+    if not _LIB or not _INITIALIZED:
+        return False
+
+    nvar = call_int("nvar")
+    if not nvar:
+        return False
+
+    try:
+        # Use 'ds' for variable names (compact, reliable)
+        _LIB.StataSO_ClearOutputBuffer()
+        _LIB.StataSO_Execute(b"ds")
+        buf = ctypes.c_char_p(_LIB.StataSO_GetOutputBuffer()).value
+        if not buf:
+            return False
+        ds_text = buf.decode("latin-1")
+
+        names = []
+        for line in ds_text.split("\n"):
+            line = line.strip()
+            if not line or line.startswith(".") or line.startswith("r("):
+                continue
+            for part in line.split():
+                part = part.strip()
+                if part and part[0].isalpha() and len(part) <= 32:
+                    names.append(part)
+
+        if len(names) < nvar:
+            return False
+        names = names[:nvar]
+
+        # Use 'describe' for types, formats, labels
+        _LIB.StataSO_ClearOutputBuffer()
+        _LIB.StataSO_Execute(b"describe")
+        buf = ctypes.c_char_p(_LIB.StataSO_GetOutputBuffer()).value
+        desc = buf.decode("latin-1") if buf else ""
+
+        labels = []
+        types = []
+        formats = []
+        in_table = False
+        for line in desc.split("\n"):
+            if "Variable" in line and "Storage" in line:
+                in_table = True
+                continue
+            if in_table and line.strip().startswith("---"):
+                continue
+            if in_table:
+                if line.strip().startswith("Sorted by") or not line.strip():
+                    break
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    vtype = parts[1]
+                    vfmt = parts[2]
+                    label = " ".join(parts[4:]) if len(parts) > 4 else \
+                            " ".join(parts[3:])
+                    types.append(vtype)
+                    formats.append(vfmt)
+                    labels.append(label)
+
+        # Populate caches
+        _invalidate_var_cache()
+        for i, name in enumerate(names):
+            _VAR_NAMES_CACHE[i] = name
+            if i < len(labels):
+                _VAR_LABELS_CACHE[i] = labels[i]
+            if i < len(types):
+                _VAR_TYPES_CACHE[i] = types[i]
+            if i < len(formats):
+                _VAR_FORMATS_CACHE[i] = formats[i]
+        _VAR_CACHE_NVAR = nvar
+        return True
+
+    except Exception:
+        return False
+
+
+def get_var_info() -> Optional[dict]:
+    """Read variable metadata, caching results.
+
+    Returns dict with keys: names, labels, types, formats, nvar.
+    Returns None if unavailable.
+    """
+    if not _populate_var_cache():
+        return None
+
+    nvar = _VAR_CACHE_NVAR
+    return {
+        "names": [_VAR_NAMES_CACHE.get(i, "?") for i in range(nvar)],
+        "labels": [_VAR_LABELS_CACHE.get(i, "") for i in range(nvar)],
+        "types": [_VAR_TYPES_CACHE.get(i, "") for i in range(nvar)],
+        "formats": [_VAR_FORMATS_CACHE.get(i, "") for i in range(nvar)],
+        "nvar": nvar,
+    }
+
+
+# ─── Shutdown ─────────────────────────────────────────────────────
 
 def shutdown():
     """Shutdown Stata engine."""

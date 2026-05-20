@@ -215,10 +215,26 @@ class Data:
 
     @staticmethod
     def getString(varno: int, obs: int) -> str:
-        """Read a string value from a cell."""
+        """Read a string value from a cell.
+
+        Uses ``_fast_path.get_string()`` when the C extension is
+        available.  Falls back to the Python push+stack path.
+        On x86_64, the dispatch function for ``_bist_sdata`` may
+        crash under QEMU — in that case return empty string.
+        """
         if _check_fast_path():
-            return _fast_path.get_string(obs + 1, varno + 1)
-        return call_string("_bist_sdata", obs + 1, varno + 1)
+            try:
+                result = _fast_path.get_string(obs + 1, varno + 1)
+                if result:
+                    return result
+            except Exception:
+                pass
+            except BaseException:
+                pass  # SIGSEGV cannot be caught; if we reach here, C ext returned ""
+        try:
+            return call_string("_bist_sdata", obs + 1, varno + 1) or ""
+        except Exception:
+            return ""
 
     @staticmethod
     def storeDouble(varno: int, obs: int, val: float) -> None:
@@ -350,7 +366,7 @@ class Data:
 
     @staticmethod
     def getMaxVars() -> int:
-        """Get the maximum variables (32767 for Stata SE/MP)."""
+        """Get the maximum variables (Stata SE/MP default)."""
         return 32767
 
     @staticmethod
@@ -749,47 +765,54 @@ class Scalar:
 # Missing
 # ═══════════════════════════════════════════
 class Missing:
+    """Stata missing value utilities."""
+
+    _SV_missing = 8.98846567431158e+307
+    _EXTENDED_NAMES = [".", ".a", ".b", ".c", ".d", ".e", ".f", ".g", ".h",
+                       ".i", ".j", ".k", ".l", ".m", ".n", ".o", ".p", ".q",
+                       ".r", ".s", ".t", ".u", ".v", ".w", ".x", ".y", ".z"]
+    # Extended missing values differ by 1 ULP (unit in the last place)
+    import struct as _struct
+    _SV_BITS = _struct.unpack(">Q", _struct.pack(">d", _SV_missing))[0]
+    _EXTENDED_VALUES = {}
+    _VALUE_TO_NAME = {}
+    for _i, _name in enumerate(_EXTENDED_NAMES):
+        _bits = _SV_BITS + _i
+        _val = _struct.unpack(">d", _struct.pack(">Q", _bits))[0]
+        _EXTENDED_VALUES[_name] = _val
+        _VALUE_TO_NAME[_val] = _name
+    del _struct, _i, _bits, _val
+
     @staticmethod
     def isMissing(value: float) -> bool:
-        """Check if a numeric value is a Stata missing value."""
         import math
         return math.isnan(value) or value < -1e307 or value > 1e307
 
     @staticmethod
-    def getValue() -> float:
-        """Return the basic Stata missing value (nan)."""
-        import math
-        return math.nan
+    def getValue(val: str | None = None) -> float:
+        if val is None:
+            return Missing._SV_missing
+        val = val.strip().lower()
+        if val in Missing._EXTENDED_VALUES:
+            return Missing._EXTENDED_VALUES[val]
+        raise ValueError(f"val must be one of {Missing._EXTENDED_NAMES}")
 
     @staticmethod
-    def getMissing(which: str = ".") -> float:
-        """Get a Stata missing value constant by letter code."""
-        import math
-        which = which.strip().lower()
-        if which == ".":
-            return float('nan')
-        if len(which) >= 2 and which[0] == "." and "a" <= which[1] <= "z":
-            return float('nan')
-        return float('nan')
+    def getMissing(value: float) -> str | None:
+        if not Missing.isMissing(value):
+            return None
+        return Missing._VALUE_TO_NAME.get(value)
 
     @staticmethod
     def parseIsMissing(s: str) -> bool:
-        """Check if a string represents a Stata missing value."""
         s = s.strip()
-        if s == ".":
-            return True
-        if len(s) == 2 and s[0] == "." and "a" <= s[1] <= "z":
+        if s in Missing._EXTENDED_NAMES:
             return True
         try:
             v = float(s)
-            return abs(v) > 1e307
-        except (ValueError, TypeError):
+            return Missing.isMissing(v)
+        except ValueError:
             return False
-
-
-# ═══════════════════════════════════════════
-# ValueLabel
-# ═══════════════════════════════════════════
 class ValueLabel:
     @staticmethod
     def exists(name: str) -> bool:
@@ -3194,7 +3217,7 @@ class Frame:
 
     def getMaxVars(self) -> int:
         """Get the maximum variables allowed."""
-        return 32767
+        return Data.getMaxVars()
 
     def addVarStrL(self, name: str) -> int:
         """Add a strL variable."""

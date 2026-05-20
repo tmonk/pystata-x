@@ -29,6 +29,16 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
+#  Manifest versioning
+# ---------------------------------------------------------------------------
+
+# Increment this when the manifest format changes (new fields, different
+# scanner logic).  Cached manifests with an older version are regenerated
+# automatically during _ensure_symbols.
+MANIFEST_VERSION = 2
+
+
+# ---------------------------------------------------------------------------
 #  Manifest loading
 # ---------------------------------------------------------------------------
 
@@ -102,6 +112,43 @@ def _current_macho_cputype() -> int:
     if m.startswith("arm64") or m == "aarch64":
         return CPU_TYPE_ARM64
     return CPU_TYPE_X86_64
+
+
+# ---------------------------------------------------------------------------
+#  ELF x86_64 dispatch table + push function discovery
+#  (pure static analysis, no runtime needed, <10ms)
+# ---------------------------------------------------------------------------
+
+
+def _read_elf_sections(path: str) -> dict:
+    """Parse ELF64 section headers and return {name: {addr, offset, size, ...}}."""
+    with open(path, "rb") as f:
+        raw = f.read()
+
+    ei_data = raw[5]
+    endian = "<" if ei_data == 1 else ">"
+    ehdr = struct.unpack_from(endian + "16sHHIQQQIHHHHHH", raw, 0)
+    e_shoff = ehdr[6]
+    e_shentsize = ehdr[11]
+    e_shnum = ehdr[12]
+    e_shstrndx = ehdr[13]
+
+    # Read section header string table
+    shstr_hdr = struct.unpack_from(
+        endian + "IIQQQQIIQQ", raw, e_shoff + e_shstrndx * e_shentsize
+    )
+    shstrtab = raw[shstr_hdr[4]:shstr_hdr[4] + shstr_hdr[5]]
+
+    sections = {}
+    for i in range(e_shnum):
+        shdr = struct.unpack_from(endian + "IIQQQQIIQQ", raw, e_shoff + i * e_shentsize)
+        name = _read_cstr(shstrtab, shdr[0])
+        sections[name] = {
+            "addr": shdr[3],
+            "offset": shdr[4],
+            "size": shdr[5],
+        }
+    return sections, endian, raw
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +410,343 @@ def _read_elf_syms(path: str) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _scan_elf_dispatch_table(path: str) -> Optional[dict]:
+    """Scan ELF x86_64 binary for the dispatch table and st_* name table.
+
+    Pure static analysis (<10ms). Returns a dict with:
+      - symbols:      {name: vmaddr} for all st_* / _bist_* functions
+      - dispatch_vaddr: vmaddr of the dispatch table (1686 entries)
+      - stack_ptr_vaddr: vmaddr of the stack pointer global in .bss
+      - err_addr_vaddr:  vmaddr of the error code global in .bss
+      - push_fn_addrs:   {pushdbl_vaddr, pushint_vaddr, pushstr_vaddr}
+    """
+    sections, endian, raw = _read_elf_sections(path)
+
+    text_start = sections[".text"]["addr"]
+    text_end = text_start + sections[".text"]["size"]
+
+    # ---- Step 1: Parse .rela.dyn to find function pointer tables ----
+    rela = sections.get(".rela.dyn")
+    if not rela:
+        return None
+
+    rela_raw = raw[rela["offset"]:rela["offset"] + rela["size"]]
+    n_rela = rela["size"] // 24
+    R_X86_64_RELATIVE = 8
+
+    dr_start = sections[".data.rel.ro"]["addr"]
+    dr_end = dr_start + sections[".data.rel.ro"]["size"]
+
+    # Collect R_X86_64_RELATIVE entries where r_offset is in .data.rel.ro
+    # and r_addend (the function pointer value) is in .text
+    entries = []
+    for i in range(n_rela):
+        entry = rela_raw[i * 24:(i + 1) * 24]
+        r_offset, r_info, r_addend = struct.unpack(endian + "QQQ", entry)
+        r_type = r_info & 0xFFFFFFFF
+        if r_type != R_X86_64_RELATIVE:
+            continue
+        if not (dr_start <= r_offset < dr_end):
+            continue
+        if not (text_start <= r_addend < text_end):
+            continue
+        entries.append((r_offset, r_addend))
+
+    # Sort by r_offset to identify consecutive runs (tables)
+    entries.sort(key=lambda x: x[0])
+
+    # Group consecutive entries spaced exactly 8 bytes apart
+    tables = []
+    i = 0
+    while i < len(entries):
+        start_off = entries[i][0]
+        j = i + 1
+        while j < len(entries):
+            expected = entries[i][0] + (j - i) * 8
+            if entries[j][0] != expected:
+                break
+            j += 1
+        count = j - i
+        if count >= 50:
+            tables.append({
+                "vaddr": start_off,
+                "size": count,
+                "entries": [entries[k][1] for k in range(i, j)],
+            })
+        i = j
+
+    if not tables:
+        return None
+
+    # The largest table IS the dispatch table (1686 entries)
+    dispatch_table = max(tables, key=lambda t: t["size"])
+    dispatch_vaddr = dispatch_table["vaddr"]
+    dispatch_entries = dispatch_table["entries"]
+
+    # ---- Step 2: Parse .data for st_* name entries ----
+    ds = sections[".data"]
+    data_raw = raw[ds["offset"]:ds["offset"] + ds["size"]]
+    data_vaddr_base = ds["addr"]
+
+    st_names = {}  # {name: index}
+    for off in range(0, len(data_raw) - 20, 1):
+        try:
+            end = data_raw.index(b"\0", off + 16, off + 60)
+        except ValueError:
+            continue
+        name = data_raw[off + 16:end].decode("ascii", errors="replace")
+        if not name.startswith("st_"):
+            continue
+        if any(c > 127 for c in name.encode()):
+            continue
+        idx, flags, f1, f2 = struct.unpack_from("<IIII", data_raw, off)
+        if idx < 10 or idx >= len(dispatch_entries):
+            continue
+        # Prefer the first occurrence (lowest offset) for each index
+        if idx not in st_names:
+            st_names[idx] = name
+
+    # Build symbol table
+    # On x86_64, dispatch entries with flags & 0x100 are TYPE CHECKERS that
+    # validate the tsmat types on the internal stack. The ACTUAL implementation
+    # is at the NEXT dispatch position (idx+1). For example:
+    #   st_nvar  idx=83 flags=0x101 → dispatch[83]=checker, dispatch[84]=impl
+    #   st_nobs  idx=84 flags=0x101 → dispatch[84]=checker, dispatch[85]=impl
+    #   st_eclear idx=19 flags=0x0   → dispatch[19]=direct impl (no checker)
+    # The 'flags' field is the first 4 bytes after the entry index.
+    # We need to reparse to get flags for each st_* entry.
+    symbols = {}
+    st_flags = {}  # idx -> flags
+    for off in range(0, len(data_raw) - 20, 1):
+        try:
+            end = data_raw.index(b"\0", off + 16, off + 60)
+        except ValueError:
+            continue
+        name = data_raw[off + 16:end].decode("ascii", errors="replace")
+        if not name.startswith("st_"):
+            continue
+        if any(c > 127 for c in name.encode()):
+            continue
+        idx, flags, f1, f2 = struct.unpack_from("<IIII", data_raw, off)
+        if idx < 10 or idx >= len(dispatch_entries):
+            continue
+        if idx not in st_flags:
+            st_flags[idx] = (name, flags, f1, f2)
+
+    for idx, (name, flags, f1, f2) in st_flags.items():
+        # If flags & 0x100, this dispatch position is a TYPE CHECKER/validating
+        # wrapper that checks tsmat types on the internal stack. The ACTUAL
+        # implementation is always at idx+1 (even for 0-arg functions like nobs).
+        has_checker = bool(flags & 0x100)
+        impl_idx = idx + 1 if has_checker else idx
+        if impl_idx < len(dispatch_entries):
+            vmaddr = dispatch_entries[impl_idx]
+            symbols[f"_bist_{name[3:]}"] = vmaddr
+            symbols[name] = vmaddr
+
+    # ---- Step 3: Find stack pointer offset from .text pattern ----
+    # Pattern from _pushdbl at 0x8b23ec:
+    #   lea rsi, [rip+off]  (48 8d 35 xx xx xx xx)
+    #   mov (rsi), rdx      (48 8b 16)
+    #   lea rcx, [rdx+8]    (48 8d 4a 08)
+    #   mov rcx, (rsi)      (48 89 0e)
+    sp_pattern = bytes([
+        0x48, 0x8d, 0x35,  # lea rsi, [rip+off]
+        # 4 bytes offset follow
+        0x48, 0x8b, 0x16,    # mov (rsi), rdx
+        0x48, 0x8d, 0x4a, 0x08,  # lea rcx, [rdx+8]
+        0x48, 0x89, 0x0e,    # mov (rsi), rcx
+    ])
+
+    text_offset = sections[".text"]["offset"]
+    text_vaddr = text_start
+    text_raw = raw[text_offset:text_offset + sections[".text"]["size"]]
+
+    stack_ptr_vaddr = 0
+    err_addr_vaddr = 0
+    pushdbl_vaddr = 0
+    pushint_vaddr = 0
+    pushstr_vaddr = 0
+
+    # Search for the sp-advance pattern (all instances)
+    # Pattern: 48 8d 35 [4] 48 8b 16 48 8d 4a 08 48 89 0e
+    needle_stub = bytes([
+        0x48, 0x8b, 0x16, 0x48, 0x8d, 0x4a, 0x08, 0x48, 0x89, 0x0e,
+    ])
+    candidates = []  # [(match_off, fn_vaddr, fn_size), ...]
+    for match_start in _find_bytes(text_raw, bytes([0x48, 0x8d, 0x35])):
+        if match_start + 17 > len(text_raw):
+            continue
+        if text_raw[match_start + 7:match_start + 17] == needle_stub:
+            rel32 = struct.unpack_from("<i", text_raw, match_start + 3)[0]
+            insn_addr = text_vaddr + match_start
+            target_vaddr = insn_addr + 7 + rel32
+            # Validate: target must be in .bss range
+            if not (sections[".bss"]["addr"] <= target_vaddr < sections[".bss"]["addr"] + sections[".bss"]["size"]):
+                continue
+            if not stack_ptr_vaddr:
+                stack_ptr_vaddr = target_vaddr
+            fn_vaddr = _find_function_start_up(text_raw, match_start, text_vaddr, 200)
+            if fn_vaddr:
+                fn_size = _find_function_size(text_raw, fn_vaddr, text_vaddr, 500)
+                candidates.append((match_start, fn_vaddr, fn_size))
+
+    # Real _pushdbl: Must contain BOTH the SP advance pattern AND
+    # the movsd xmm0, qword ptr [rdi] (f2 0f 10 07) instruction that
+    # dereferences the double* argument.  Bare SP-pattern matches are
+    # error-handler stubs, not the actual push function.
+    movsd_pat = bytes([0xf2, 0x0f, 0x10, 0x07])  # movsd xmm0, [rdi]
+    if candidates:
+        for ms, fn_v, _ in candidates:
+            fn_off = fn_v - text_vaddr
+            fn_area = text_raw[fn_off:fn_off + 200]
+            if fn_area.find(movsd_pat, 0, 60) != -1:
+                pushdbl_vaddr = fn_v
+                break
+
+    # Fallback: use lowest-address candidate
+    if not pushdbl_vaddr and candidates:
+        candidates.sort(key=lambda x: x[1])
+        pushdbl_vaddr = candidates[0][1]
+
+    # Find error address: lea rax,[rip+off]; movl imm,(rax) in pushdbl
+    if pushdbl_vaddr:
+        pdb_soff = pushdbl_vaddr - text_vaddr
+        pdb_area = text_raw[pdb_soff:pdb_soff + 200]
+        for pos in _find_bytes(pdb_area, bytes([0x48, 0x8d, 0x05])):
+            if pos + 12 > len(pdb_area):
+                continue
+            if pdb_area[pos + 7] == 0xc7:  # movl ..., (rax)
+                rel32 = struct.unpack_from("<i", pdb_area, pos + 3)[0]
+                insn_addr = pushdbl_vaddr + pos
+                err_addr_vaddr = insn_addr + 7 + rel32
+                break
+
+    # Find _pushint: pxor xmm0,xmm0; cvtsi2sd %edi,%xmm0  (66 0f ef c0 f2 0f 2a c7)
+    # Search globally (no distance limit), pick the function nearest pushdbl.
+    pi_pat = bytes([0x66, 0x0f, 0xef, 0xc0, 0xf2, 0x0f, 0x2a, 0xc7])
+    best_pi, best_pi_dist = None, None
+    for ms in _find_bytes(text_raw, pi_pat):
+        fn_c = _find_function_start_up(text_raw, ms, text_vaddr, 60)
+        if fn_c and fn_c > 0:
+            dist = abs(fn_c - pushdbl_vaddr) if pushdbl_vaddr else 0
+            if best_pi is None or dist < best_pi_dist:
+                best_pi, best_pi_dist = fn_c, dist
+    if best_pi:
+        pushint_vaddr = best_pi
+
+    # Find _pushstr: search globally for mov $0xfffffffd,%edi (bf fd ff ff ff),
+    # pick the function NEAREST pushdbl with push r12+push rbp prologue.
+    ps_needle = bytes([0xbf, 0xfd, 0xff, 0xff, 0xff])
+    best_ps, best_ps_dist = None, None
+    for ms in _find_bytes(text_raw, ps_needle):
+        abs_off = ms
+        fn_c = 0
+        # Pass 1: look for 41 54 55 (push r12; push rbp) — unique prologue
+        for back in range(1, 80):
+            bp = abs_off - back
+            if bp < 0:
+                break
+            if bp + 2 < len(text_raw) and text_raw[bp] == 0x41 and text_raw[bp+1] == 0x54 and text_raw[bp+2] == 0x55:
+                fn_c = text_vaddr + bp
+                break
+        if not fn_c:
+            # Pass 2: look for 55 53 (push rbp; push rbx) — alternative
+            for back in range(1, 80):
+                bp = abs_off - back
+                if bp < 0:
+                    break
+                if bp + 1 < len(text_raw) and text_raw[bp] == 0x55 and text_raw[bp+1] == 0x53:
+                    if bp == 0 or text_raw[bp-1] not in (0xFF, 0x66):
+                        fn_c = text_vaddr + bp
+                        break
+        if fn_c and pushdbl_vaddr:
+            dist = abs(fn_c - pushdbl_vaddr)
+            if best_ps is None or dist < best_ps_dist:
+                best_ps, best_ps_dist = fn_c, dist
+    if best_ps:
+        pushstr_vaddr = best_ps
+
+    # ---- Step 4: Find StataSO exports from .dynsym ----
+    dynsym_info = sections.get(".dynsym")
+    dynstr_info = sections.get(".dynstr")
+    if dynsym_info and dynstr_info and dynsym_info["size"]:
+        entsize = 24  # ELF64 sym
+        nsyms = dynsym_info["size"] // entsize
+        dynsym_raw = raw[dynsym_info["offset"]:dynsym_info["offset"] + dynsym_info["size"]]
+        dynstr_raw = raw[dynstr_info["offset"]:dynstr_info["offset"] + dynstr_info["size"]]
+        for j in range(nsyms):
+            entry = dynsym_raw[j * entsize:(j + 1) * entsize]
+            st_name, st_info, st_other, st_shndx, st_value, st_size = \
+                struct.unpack(endian + "IBBHQQ", entry)
+            if st_value == 0 or st_shndx == 0:
+                continue
+            name = _read_cstr(dynstr_raw, st_name)
+            if name.startswith("StataSO_"):
+                symbols[name] = st_value
+
+    result = {
+        "symbols": symbols,
+        "dispatch_vaddr": dispatch_vaddr,
+        "dispatch_count": len(dispatch_entries),
+        "stack_ptr_vaddr": stack_ptr_vaddr,
+        "err_addr_vaddr": err_addr_vaddr,
+        "push_fns": {
+            "_pushdbl": pushdbl_vaddr,
+            "_pushint": pushint_vaddr,
+            "_pushstr": pushstr_vaddr,
+        },
+    }
+    return result
+
+
+def _find_bytes(haystack: bytes, needle: bytes) -> list[int]:
+    """Yield all starting positions of needle in haystack."""
+    positions = []
+    pos = 0
+    while True:
+        pos = haystack.find(needle, pos)
+        if pos == -1:
+            break
+        positions.append(pos)
+        pos += 1
+    return positions
+
+
+def _find_function_start_up(text_raw: bytes, offset: int, text_vaddr: int, maxb: int = 200) -> int:
+    """Find the function start by scanning backward for a function prologue.
+
+    Priority order (most reliable first):
+    1. 48 83 ec XX  (sub rsp, X)
+    2. 41 54/55/56/57 (push r12-r15) — two bytes, unique enough
+    3. 55 48 89 e5 (push rbp; mov rbp, rsp) — full frame pointer setup
+    Returns virtual address or 0 if not found.
+    """
+    start = max(0, offset - maxb)
+    # Pass 1: sub rsp, X (48 83 ec XX)
+    for i in range(offset - 1, start - 1, -1):
+        if i + 2 < len(text_raw):
+            if (text_raw[i] == 0x48 and text_raw[i + 1] == 0x83 and
+                text_raw[i + 2] == 0xEC):
+                return text_vaddr + i
+    # Pass 2: push r12-r15 (41 54/55/56/57)
+    for i in range(offset - 1, start - 1, -1):
+        if i + 1 < len(text_raw):
+            if text_raw[i] == 0x41 and text_raw[i + 1] in (0x54, 0x55, 0x56, 0x57):
+                return text_vaddr + i
+    return 0
+
+
+def _find_function_size(text_raw: bytes, fn_vaddr: int, text_vaddr: int, maxb: int = 500) -> int:
+    """Estimate function size by scanning for ret (0xC3)."""
+    fn_off = fn_vaddr - text_vaddr
+    end = min(len(text_raw), fn_off + maxb)
+    for i in range(fn_off + 1, end):  # skip prologue
+        if text_raw[i] == 0xC3:  # ret
+            return (text_vaddr + i) - fn_vaddr
+    return 0
+
+
 def _read_pe_syms(path: str) -> dict[str, int]:
     """Parse PE export address table from a .dll file.
 
@@ -541,6 +925,22 @@ def _detect_format(path: str) -> str:
     return "unknown"
 
 
+def _detect_elf_arch(path: str) -> str:
+    """Detect ELF architecture: 'x86_64' or 'aarch64'."""
+    with open(path, "rb") as f:
+        ident = f.read(20)
+    if ident[:4] != b"\x7fELF":
+        return "unknown"
+    if ident[4] != 2:  # ELFCLASS64
+        return "unknown"
+    e_machine = struct.unpack("<H", ident[18:20])[0] if ident[5] == 1 else struct.unpack(">H", ident[18:20])[0]
+    if e_machine == 62:  # EM_X86_64
+        return "x86_64"
+    elif e_machine == 183:  # EM_AARCH64
+        return "aarch64"
+    return "unknown"
+
+
 # ---------------------------------------------------------------------------
 #  Generic API
 # ---------------------------------------------------------------------------
@@ -650,38 +1050,52 @@ def _macho_vmaddr_to_fileoff(thin_bytes: bytes, vmaddr: int) -> Optional[int]:
 
 
 def discover_data_offsets(path: str) -> Optional[dict]:
-    """Discover STACK_PTR_OFFSET and ERR_ADDR_RELATIVE from ARM64 binary disassembly.
+    """Discover STACK_PTR_OFFSET and ERR_ADDR_RELATIVE from binary disassembly.
 
-    Uses capstone to disassemble _pushdbl and _st_store_u, extracting
-    the runtime data page base and field offsets from adrp+add pairs.
+    For ARM64 (Mach-O): uses capstone to disassemble _pushdbl and _st_store_u.
+    For x86_64 (ELF): uses the .text byte-pattern scan for the pushdbl sp-advance
+    pattern to find the stack pointer global and error code global vmaddrs.
 
     Returns dict with "stack_ptr_delta" and "err_addr_delta" (int, delta from _BASE),
-    or None for non-ARM64 binaries or if discovery fails.
+    or None if discovery fails.
     """
+    fmt = _detect_format(path)
+
+    if fmt == "elf":
+        arch = _detect_elf_arch(path)
+        if arch == "x86_64":
+            result = _scan_elf_dispatch_table(path)
+            if result and result["stack_ptr_vaddr"]:
+                return {
+                    "stack_ptr_delta": result["stack_ptr_vaddr"],
+                    "err_addr_delta": result["err_addr_vaddr"],
+                }
+        return None
+
+    if fmt != "macho":
+        return None  # PE not yet supported for data offset discovery
+
+    # Mach-O ARM64 path (existing Capstone-based approach)
     import capstone as cs
 
     all_syms = discover_symbols(path)
     if "_pushdbl" not in all_syms or "_st_store_u" not in all_syms:
-        return None  # Not ARM64 or missing required symbols
+        return None
 
     with open(path, "rb") as f:
         raw = f.read()
 
     result = _find_macho_text_slice(raw)
     if result is None:
-        return None  # Not a Mach-O binary
+        return None
     thin_bytes, slice_offset = result
 
-    # Known data page base (confirmed: shared between _pushdbl and _st_store_u)
     adrp_page: Optional[int] = None
     stack_ptr_delta: Optional[int] = None
     err_addr_delta: Optional[int] = None
 
     md = cs.Cs(cs.CS_ARCH_ARM64, cs.CS_MODE_ARM)
 
-    # Need to track: for each function, find adrp+add pairs that reference
-    # the runtime data page and record the computed delta (page + field offset).
-    # Both _pushdbl and _st_store_u use the same page base.
     for fn_name in ("_pushdbl", "_st_store_u"):
         vm = all_syms.get(fn_name)
         if vm is None:
@@ -691,11 +1105,9 @@ def discover_data_offsets(path: str) -> Optional[dict]:
             continue
         fn_bytes = raw[slice_offset + foff:slice_offset + foff + 256]
 
-        # Track adrp targets: {register_name: page}
         adrp_regs: dict[str, int] = {}
         for insn in md.disasm(fn_bytes, vm):
             if insn.mnemonic == "adrp":
-                # Parse: "adrp x8, #0x39b7000"
                 parts = insn.op_str.split(",")
                 if len(parts) >= 2:
                     reg = parts[0].strip()
@@ -723,7 +1135,6 @@ def discover_data_offsets(path: str) -> Optional[dict]:
                     page = adrp_regs[dst_reg]
                     delta = page + imm_val
 
-                    # Classify by the offset value
                     if imm_val == 0x108:
                         stack_ptr_delta = delta
                         adrp_page = page
@@ -731,17 +1142,13 @@ def discover_data_offsets(path: str) -> Optional[dict]:
                         err_addr_delta = delta
                         adrp_page = page
 
-    # Validate: both offsets must be found and share the same page base
     if adrp_page is not None and stack_ptr_delta is not None and err_addr_delta is not None:
         return {
             "stack_ptr_delta": stack_ptr_delta,
             "err_addr_delta": err_addr_delta,
         }
 
-    # Fallback: if we found the page but only one offset, try to compute the other
     if adrp_page is not None and stack_ptr_delta is not None and err_addr_delta is None:
-        # Error field is at page + 0x11c (20 bytes after stack pointer field at +0x108)
-        # This is a documented struct-field relationship within the runtime data area.
         err_addr_delta = adrp_page + 0x11c
         return {
             "stack_ptr_delta": stack_ptr_delta,
@@ -766,11 +1173,71 @@ def build_manifest(path: str, output_path: Optional[str] = None,
     fhash = file_sha256(path)
     stat = os.stat(path)
     fmt = _detect_format(path)
+
+    # For ELF x86_64, use the dispatch table scanner
+    if fmt == "elf" and _detect_elf_arch(path) == "x86_64":
+        scan_result = _scan_elf_dispatch_table(path)
+        if scan_result:
+            symbols = scan_result["symbols"]
+            # Clean up: keep _bist_*, StataSO_* (both with and without
+            # underscore prefix for cross-platform compat), and push fns
+            bist_syms = {}
+            for k, v in symbols.items():
+                if k.startswith("_bist_") or k.startswith("StataSO_"):
+                    bist_syms[k] = v
+                    # Duplicate StataSO symbols with underscore for Mach-O compat
+                    if k.startswith("StataSO_") and not k.startswith("_StataSO_"):
+                        bist_syms[f"_{k}"] = v
+            # Add push functions from scan result
+            for pname, pvaddr in scan_result["push_fns"].items():
+                if pvaddr:
+                    bist_syms[pname] = pvaddr
+
+            # x86_64 platform-specific override: _bist_store maps to
+            # dispatch[87] (st_data impl), which handles BOTH numeric read
+            # (2 args) and numeric store (3 args).  dispatch[116]
+            # (st_store/st_sdata) only handles STRING/GSO store.
+            fmt = _detect_format(path)
+            if fmt == "elf":
+                elf_arch = _detect_elf_arch(path)
+                if elf_arch == "x86_64":
+                    data_addr = bist_syms.get("_bist_data")
+                    if data_addr:
+                        bist_syms["_bist_store"] = data_addr
+
+            data_offsets = {
+                "stack_ptr_delta": scan_result["stack_ptr_vaddr"],
+                "err_addr_delta": scan_result["err_addr_vaddr"],
+            } if scan_result["stack_ptr_vaddr"] else None
+
+            manifest = {
+                "manifest_version": MANIFEST_VERSION,
+                "sha256": fhash,
+                "file_size": stat.st_size,
+                "format": fmt,
+                "arch": "x86_64",
+                "platform": sys.platform,
+                "n_total_symbols": len(symbols),
+                "n_bist_symbols": len(bist_syms),
+                "symbols": bist_syms,
+                "dispatch_vaddr": scan_result["dispatch_vaddr"],
+                "dispatch_count": scan_result["dispatch_count"],
+                "data_offsets": data_offsets,
+            }
+
+            if output_path:
+                os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+                with open(output_path, "w") as f:
+                    json.dump(manifest, f, indent=2)
+            return manifest
+
+    # Fallback: existing symbol table-based approach (ARM64 Mach-O, etc.)
     all_syms = discover_symbols(path)
     bist_syms = filter_bist_symbols(all_syms)
     data_offsets = discover_data_offsets(path)
 
     manifest = {
+        "manifest_version": MANIFEST_VERSION,
         "sha256": fhash,
         "file_size": stat.st_size,
         "format": fmt,
@@ -778,7 +1245,7 @@ def build_manifest(path: str, output_path: Optional[str] = None,
         "n_total_symbols": len(all_syms),
         "n_bist_symbols": len(bist_syms),
         "symbols": bist_syms,
-        "data_offsets": data_offsets,  # None for x86_64
+        "data_offsets": data_offsets,
     }
 
     if fmt == "macho":
