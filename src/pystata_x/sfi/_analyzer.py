@@ -1641,8 +1641,11 @@ def run_e2e_suite(test_dir: Optional[str] = None,
         history = TestHistory()
 
     print(f"Running e2e suite in {project_root}...", flush=True)
+    # Run e2e tests marked requires_stata (subset designed to pass on all platforms).
+    # Oracle tests and platform-specific tests use skip/xfail markers.
     result = subprocess.run(
-        ["python3", "-m", "pytest", test_dir, "-v", "--tb=line", "-m", "requires_stata"],
+        ["python3", "-m", "pytest", test_dir, "-v", "--tb=short",
+         "-m", "requires_stata"],
         cwd=project_root,
         capture_output=True,
         text=True,
