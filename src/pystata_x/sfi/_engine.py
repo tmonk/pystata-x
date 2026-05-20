@@ -574,8 +574,10 @@ def call_string(name: str, *args) -> Optional[str]:
     """Call a _bist_* function that returns a string.
 
     Uses push+stack on ALL platforms (universal internal convention).
-    On x86_64, applies tsmat flag and type-tag fixes for functions
-    that check data_ptr[-0x94] (like varname).
+    On x86_64, sets tsmat[0x34] = 0xFFFD (string return request) on the
+    last pushed tsmat so dispatch entries take the string return path.
+    Does NOT set tsmat[0x36] (argument flag) because dispatch entries
+    expect the argument to be typed as numeric (0x36 == 0).
     """
     if not _INITIALIZED:
         initialize()
@@ -587,21 +589,19 @@ def call_string(name: str, *args) -> Optional[str]:
     sp_before = _save_sp()
     _push_args(args)
 
-    # x86_64: set tsmat[0x36] flags so dispatch entries that check
-    # tsmat flags (e.g. dispatch[143] for varname) don't take the
-    # error-3104 path.  This write is within the tsmat allocation
-    # (64+ bytes) and is always safe.
-    #
-    # NOTE: We do NOT patch data_ptr[-0x94] here because that field
-    # is OUTSIDE the standalone 8-byte allocation that pushint creates.
-    # Only pool-allocated tsmats have a valid header at data_ptr[-0x94],
-    # and Stata's pool control is all zeros under QEMU emulation on
-    # x86_64 Linux.  Patching it corrupts glibc heap metadata.
+    # Set tsmat[0x34] = 0xFFFD (string return request) on the last arg.
+    # This tells the dispatch entry to take the string-return code path.
+    # The tsmat[-0x94] pool-header tag (0x2b) is already set by Stata's
+    # internal pool allocator (tsmat_alloc), so no pool-header patch needed.
+    # We do NOT set tsmat[0x36] = 2 because dispatch entries like
+    # _bist_varindex expect tsmat[0x36] == 0 (numeric arg flag) and
+    # error out with code 0xc1f otherwise.
     if _PLATFORM in ("x86_64", "windows"):
         sp = _save_sp()
         tsmat = ctypes.c_uint64.from_address(sp).value
         if tsmat:
-            (ctypes.c_uint8 * 64).from_address(tsmat)[0x36] = 2
+            # Set type field to request string return
+            ctypes.c_uint16.from_address(tsmat + 0x34).value = 0xFFFD
 
     w0 = len(args) if args else 0
     fn = _get_fn(rt, None, ctypes.c_int)
