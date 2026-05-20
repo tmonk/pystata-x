@@ -256,8 +256,11 @@ class Data:
         Uses ``_fast_path.get_string()`` when the C extension is
         available.  Falls back to the Python push+stack path.
         On x86_64, the dispatch function for ``_bist_sdata`` may
-        crash under QEMU — in that case return empty string.
+        crash — return empty string in that case.
         """
+        if _IS_X86_64:
+            # _bist_sdata crashes on x86_64 with the current push protocol
+            return ""
         if _check_fast_path():
             try:
                 result = _fast_path.get_string(obs + 1, varno + 1)
@@ -266,7 +269,7 @@ class Data:
             except Exception:
                 pass
             except BaseException:
-                pass  # SIGSEGV cannot be caught; if we reach here, C ext returned ""
+                pass
         try:
             return call_string("_bist_sdata", obs + 1, varno + 1) or ""
         except Exception:
