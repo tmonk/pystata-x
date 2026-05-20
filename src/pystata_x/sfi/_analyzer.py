@@ -2232,11 +2232,11 @@ class StataEngine:
         """Initialize the Stata engine."""
         if self._inited:
             return
-        from pystata_x.sfi._engine import initialize, _INITIALIZED
-        initialize()
-        if not _INITIALIZED:
+        import pystata_x.sfi._engine as _eng_mod
+        _eng_mod.initialize()
+        if not _eng_mod._INITIALIZED:
             raise RuntimeError("Engine failed to initialize")
-        self._engine = __import__("pystata_x.sfi._engine", fromlist=[""])
+        self._engine = _eng_mod
         self._inited = True
 
     def _load_auto(self):
