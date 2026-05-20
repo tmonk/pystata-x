@@ -442,12 +442,10 @@ def store_double(varno: int, obs: int, value: float) -> bool:
         return False
     tmp = _next_tmp_macro()
     try:
-        eng.StataSO_Execute(f"global {tmp} {value}".encode())
         eng.StataSO_ClearOutputBuffer()
         rc = eng.StataSO_Execute(
-            f"replace {tbl_name} = ${tmp} in {obs + 1}".encode()
+            f"replace {tbl_name} = {value} in {obs + 1}".encode()
         )
-        eng.StataSO_Execute(f"macro drop {tmp}".encode())
         return rc == 0
     except Exception:
         return False
