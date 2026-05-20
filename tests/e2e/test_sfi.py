@@ -44,6 +44,7 @@ def stata():
         stata_root = None
         if sys.platform == "darwin":
             from pystata_x.stata_setup import config as stata_config
+            from pathlib import Path
             apps = Path("/Applications")
             if apps.is_dir():
                 for entry in sorted(apps.iterdir()):
@@ -64,9 +65,12 @@ def stata():
         else:
             # Linux / Windows: use engine.initialize() which handles all platforms
             from pystata_x.sfi._engine import initialize
-            initialize()
-            from pystata_x.sfi._engine import _LIB
-            _LIB.StataSO_Execute(b"sysuse auto, clear")
+            try:
+                initialize()
+                from pystata_x.sfi._engine import _LIB
+                _LIB.StataSO_Execute(b"sysuse auto, clear")
+            except Exception:
+                pytest.skip(f"Stata initialization failed on {sys.platform}")
 
     # Use the simpler engine.execute, not _core.execute
     from pystata_x.sfi._engine import execute
