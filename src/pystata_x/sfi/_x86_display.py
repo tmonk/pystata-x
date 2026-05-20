@@ -365,16 +365,13 @@ def read_var_value_label(varno: int) -> str:
 
 def read_value_label_names() -> list:
     """List all value-label names via ``label dir``."""
-    out = _exec("label dir")
-    if not out:
+    lines = _exec_all("label dir")
+    if not lines:
         return []
-    # ``label dir`` outputs lines like:
-    #   "origin"
-    #   "yesno"
     names = []
-    for line in out.split("\n"):
+    for line in lines:
         s = line.strip().strip('"')
-        if s and not s.startswith(".") and not s.startswith("r("):
+        if s:
             names.append(s)
     return names
 
@@ -384,14 +381,13 @@ def read_value_label(name: str) -> dict:
 
     Returns dict {int_value: str_label}.
     """
-    out = _exec(f"label list {name}")
-    if not out:
-        # Check if label doesn't exist
+    lines = _exec_all(f"label list {name}")
+    if not lines:
         return {}
     pairs: dict = {}
-    for line in out.split("\n"):
+    for line in lines:
         s = line.strip()
-        if s and not s.startswith(".") and not s.startswith("r(") and not s.startswith(f"{name}:"):
+        if s and not s.startswith(f"{name}:"):
             # Parse "N LabelText"
             parts = s.split(None, 1)
             if len(parts) == 2:
@@ -405,10 +401,10 @@ def read_value_label(name: str) -> dict:
 
 def read_value_label_exists(name: str) -> bool:
     """Check if a value label exists."""
-    out = _exec(f"label list {name}")
-    if out is None:
+    lines = _exec_all(f"label list {name}")
+    if not lines:
         return False
-    for line in out.split("\n"):
+    for line in lines:
         s = line.strip()
         if s.startswith(f"{name}:"):
             return True
