@@ -1151,6 +1151,7 @@ class StataBinary:
           mov qword ptr [rax], rX  # SP_GLOBAL = arg buffer address
 
         Returns the arg buffer address and the SP global address.
+        Only returns sp_reset protocol when the triple pattern is found.
         """
         if not name.startswith("_bist_"):
             name = f"_bist_{name}"
@@ -1175,68 +1176,65 @@ class StataBinary:
         except Exception:
             return {"name": name, "error": "disassembly failed"}
 
-        arg_buffer = None
-        sp_global = None
-        seen_lea_rax = False
+        result = {"name": name, "vaddr": vaddr, "protocol": "standard_push_stack"}
 
-        for insn in insns[:20]:
+        # Look for the SP-reset triple pattern in first 15 instructions:
+        #   1. lea rax, [rip + X]  (SP global address)
+        #   2. lea rX, [rip + Y]   (arg buffer address, rX != rax)
+        #   3. mov [rax], rX       (SP_global = arg_buffer)
+        lea_rax_target = None
+        lea_other_target = None
+        lea_other_reg = None
+        sp_global_addr = None
+
+        for insn in insns[:15]:
             op = f"{insn.mnemonic} {insn.op_str}"
 
             if insn.mnemonic == "lea" and "rax" in insn.op_str and "rip" in insn.op_str:
-                # lea rax, [rip + X] — load address of something
-                try:
-                    parts = insn.op_str.replace(",", " ").split()
-                    for p in parts:
-                        if p.startswith("0x"):
-                            target = int(p, 16)
-                            if not seen_lea_rax:
-                                seen_lea_rax = True
-                            break
-                except (ValueError, IndexError):
-                    pass
+                # First pattern: lea rax, [rip + X]
+                if lea_rax_target is None:
+                    import re as _re
+                    m = _re.search(r'\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]', insn.op_str)
+                    if m:
+                        sign = 1 if m.group(1) == '+' else -1
+                        disp = int(m.group(2), 16)
+                        lea_rax_target = disp
+                        sp_global_addr = insn.address + insn.size + sign * disp
 
-            if insn.mnemonic == "lea" and seen_lea_rax and "rip" in insn.op_str:
-                # Second lea: this is the arg buffer address
-                # It uses a register like rsi, rdx, rcx, rdi, r8, r9
-                try:
-                    parts = insn.op_str.replace(",", " ").split()
-                    for p in parts:
-                        if p.startswith("0x"):
-                            arg_buffer = int(p, 16)
-                            break
-                except (ValueError, IndexError):
-                    pass
+            elif insn.mnemonic == "lea" and "rip" in insn.op_str and lea_rax_target is not None:
+                # Second pattern: lea rX, [rip + Y] where rX is not rax
+                import re as _re
+                m = _re.search(r'\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]', insn.op_str)
+                if m:
+                    sign = 1 if m.group(1) == '+' else -1
+                    disp = int(m.group(2), 16)
+                    # Extract the register: op_str starts with 'rX, '
+                    reg = insn.op_str.split(",")[0].strip() if "," in insn.op_str else ""
+                    if reg and reg != "rax":
+                        lea_other_target = insn.address + insn.size + sign * disp
+                        lea_other_reg = reg
 
-            if insn.mnemonic == "mov" and "qword ptr [rax]" in op and seen_lea_rax:
-                # mov qword ptr [rax], rX — this is the SP-reset
-                pass  # We already have the addresses
-
-            if arg_buffer is not None:
-                break
-
-        # Compute SP global address from the first lea
-        if seen_lea_rax:
-            # Find the first lea instruction again to compute target
-            for insn in insns[:20]:
-                if insn.mnemonic == "lea" and "rax" in insn.op_str and "rip" in insn.op_str:
-                    # Compute: target = next_insn_addr + displacement
-                    # The displacement is the offset in the instruction encoding
-                    for opnd in insn.operands:
-                        if hasattr(opnd, 'mem') and hasattr(opnd.mem, 'disp'):
-                            sp_global = insn.address + insn.size + opnd.mem.disp
-                            break
+            elif insn.mnemonic == "mov" and "qword ptr" in op and lea_other_reg is not None:
+                # Third pattern: mov qword ptr [rax], rX
+                if f"qword ptr [rax]" in op and lea_other_reg in op:
+                    result["protocol"] = "sp_reset"
+                    if sp_global_addr:
+                        result["sp_global_addr"] = sp_global_addr
+                    if lea_other_target:
+                        result["arg_buffer_addr"] = lea_other_target
                     break
 
-        result = {"name": name, "vaddr": vaddr}
-        if arg_buffer:
-            result["arg_buffer_addr"] = arg_buffer
-        if sp_global:
-            result["sp_global_addr"] = sp_global
-        if not arg_buffer and not sp_global:
-            result["protocol"] = "standard_push_stack"  # no SP reset
-        else:
-            result["protocol"] = "sp_reset"
+                # Also check: mov qword ptr [rax], rX without specific register check
+                if "qword ptr [rax], r" in op and lea_other_target:
+                    result["protocol"] = "sp_reset"
+                    if sp_global_addr:
+                        result["sp_global_addr"] = sp_global_addr
+                    if lea_other_target:
+                        result["arg_buffer_addr"] = lea_other_target
+                    break
+
         return result
+
 
     def analyze_protocol(self, name: str) -> dict:
         """Deep protocol analysis of a dispatch entry.
