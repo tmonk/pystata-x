@@ -313,9 +313,31 @@ def _get_fn(addr: int, restype, *argtypes) -> ctypes._CFuncPtr:
     return _FN_CACHE[key]
 
 
+def _patch_last_tsmat() -> None:
+    """Patch the last pushed tsmat's [-0x10] field to be a self-pointer.
+
+    On x86_64, dispatch functions check ``tsmat[-0x94] == 0x2b`` by
+    reading ``rbx = tsmat[-0x10]`` first (a pool-block forward link),
+    then checking ``[rbx - 0x94] == 0x2b``.  Stata's pool allocator
+    normally stores a self-pointer (or block-header pointer) at
+    ``tsmat[-0x10]``, but our pool-allocated tsmats leave this field
+    as 0, causing the pool-header check to fail (SIGSEGV).
+
+    Setting ``tsmat[-0x10] = tsmat`` (self-pointer) makes:
+    ``[tsmat[-0x10] - 0x94] == [tsmat - 0x94] == 0x2b`` ✓
+    """
+    if _PLATFORM not in ("x86_64", "windows"):
+        return
+    sp = _save_sp()
+    tsmat = ctypes.c_uint64.from_address(sp).value
+    if tsmat and tsmat > 0x100000:
+        ctypes.c_uint64.from_address(tsmat - 0x10).value = tsmat
+
+
 def _push_int(val: int) -> None:
     """Push an int argument onto Stata's internal stack (all platforms)."""
     _pushint_fn(val)
+    _patch_last_tsmat()
 
 
 def _push_double(val: float) -> None:
@@ -326,6 +348,7 @@ def _push_double(val: float) -> None:
     """
     buf = ctypes.c_double(val)
     _pushdbl_fn(ctypes.addressof(buf))
+    _patch_last_tsmat()
 
 
 def _push_str(s: bytes) -> None:
@@ -339,6 +362,7 @@ def _push_str(s: bytes) -> None:
     that SP-resetting dispatch functions check.  See call_string docs.
     """
     _pushstr_fn(s, len(s))
+    _patch_last_tsmat()
 
 
 def _pop_and_read_double(sp_before: int) -> Optional[float]:
