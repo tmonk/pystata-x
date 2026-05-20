@@ -27,4 +27,6 @@ build2/
 
 # Stata installation directories
 stata*-linux/
-stata19-linux/
+stata19-linux/manifests/
+*_history.json
+src/pystata_x/sfi/manifests/
