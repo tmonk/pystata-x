@@ -308,8 +308,9 @@ class Data:
     def storeDouble(varno: int, obs: int, val: float) -> None:
         """Write a numeric value to a cell."""
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import store_double
+            from pystata_x.sfi._x86_display import store_double, clear_cache
             store_double(varno, obs, val)
+            clear_cache()
         else:
             call_store_double("_bist_store", obs + 1, varno + 1, val)
 
@@ -317,8 +318,9 @@ class Data:
     def storeString(varno: int, obs: int, val: str) -> None:
         """Write a string value to a cell."""
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import store_string
+            from pystata_x.sfi._x86_display import store_string, clear_cache
             store_string(varno, obs, val)
+            clear_cache()
         else:
             call_store_string("_bist_sstore", obs + 1, varno + 1, val.encode())
 
