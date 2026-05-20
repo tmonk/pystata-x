@@ -1835,15 +1835,16 @@ def run_test_suite(engine=None, history: Optional[TestHistory] = None,
         ("nobs", engine.call_int, [], lambda r: r is not None and r > 0, False),
         ("nvar", engine.call_int, [], lambda r: r is not None and r > 0, False),
         ("data", engine.call_double, [1, 2], lambda r: r is not None, False),
-        # numscalar: use Scalar.getValue on x86_64 (display path), raw dispatch elsewhere
-        if _is_x86_64_linux:
-            from pystata_x.sfi._core import Scalar as _Scalar
-            test_cases.append(("numscalar", lambda *a: _Scalar.getValue("pi"), [],
-                               lambda r: r is not None and r > 0, False))
-        else:
-            test_cases.append(("numscalar", engine.call_double, ["pi"],
-                               lambda r: r is not None, _is_x86_64_linux))
     ]
+
+    # numscalar: use Scalar.getValue on x86_64 (display path), raw dispatch elsewhere
+    if _is_x86_64_linux:
+        from pystata_x.sfi._core import Scalar as _Scalar
+        test_cases.append(("numscalar", lambda *a: _Scalar.getValue("pi"), [],
+                           lambda r: r is not None and r > 0, False))
+    else:
+        test_cases.append(("numscalar", engine.call_double, ["pi"],
+                           lambda r: r is not None, False))
 
     for name, fn, args, check, xfail in test_cases:
         try:
