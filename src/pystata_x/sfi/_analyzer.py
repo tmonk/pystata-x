@@ -2204,6 +2204,54 @@ Examples:
         return
 
     # ── find string-returning dispatch functions ──
+    if args.protocol:
+        if not args.path:
+            parser.print_help()
+            sys.exit(1)
+        path = args.path
+        if not os.path.exists(path):
+            print(f"Error: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        ana = StataBinary(path)
+        ana.analyze()
+        proto = ana.analyze_protocol(args.protocol)
+        if args.json:
+            print(json.dumps(proto, indent=2, default=str))
+        else:
+            print(f"Protocol analysis: {proto['name']} (idx={proto.get('dispatch_idx','?')})")
+            for k, v in sorted(proto.items()):
+                if v is None or (isinstance(v, list) and not v):
+                    continue
+                if k in ("error_codes", "pushstr_call_sites", "dispatch_idx") and not v:
+                    continue
+                print(f"  {k}: {v}")
+        return
+
+    if args.catalog:
+        if not args.path:
+            parser.print_help()
+            sys.exit(1)
+        path = args.path
+        if not os.path.exists(path):
+            print(f"Error: {path} not found", file=sys.stderr)
+            sys.exit(1)
+        ana = StataBinary(path)
+        ana.analyze()
+        catalog = ana.catalog_all_protocols()
+        print(f"Protocol catalog: {len(catalog)} dispatch entries")
+        str_count = sum(1 for p in catalog if p.get("protocol_type") == "string_return")
+        num_count = sum(1 for p in catalog if p.get("protocol_type") == "numeric_return")
+        print(f"  {'Function':30s} {'Type':20s} {'PoolCheck':12s} {'PushStr':8s}")
+        print(f"  {'-'*70}")
+        for p in catalog:
+            pt = p.get("protocol_type", "?")
+            pc = "Y" if p.get("pool_header_check") else "N"
+            ps = "Y" if p.get("calls_pushstr") else "N"
+            print(f"  {p['name']:30s} {pt:20s} {pc:12s} {ps:8s}")
+        print(f"\nSummary: {str_count} string_return, {num_count} numeric_return, "
+              f"{len(catalog)-str_count-num_count} other")
+        return
+
     if args.find_strings:
         if not args.path:
             parser.print_help()
