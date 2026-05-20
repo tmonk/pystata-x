@@ -22,7 +22,22 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# REPO_ROOT: try known paths in order; falls back to parent-of-parent
+for _root in [Path(__file__).resolve().parent.parent.parent / "src" / "stata-fast",  # alternate depth
+             Path(__file__).resolve().parent.parent]:
+    if (_root / "src" / "stata-fast").is_dir():
+        REPO_ROOT = _root
+        break
+else:
+    # Last resort: traverse up until we find pyproject.toml
+    _p = Path(__file__).resolve().parent
+    while _p != _p.parent:
+        if (_p / "pyproject.toml").exists():
+            REPO_ROOT = _p
+            break
+        _p = _p.parent
+    else:
+        REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src" / "stata-fast"
 BUILD_DIR = SRC_DIR / "build"
 PKG_DIR = REPO_ROOT / "src" / "pystata_x"

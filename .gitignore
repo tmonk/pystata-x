@@ -24,3 +24,7 @@ nul
 NUL
 Nul
 build2/
+
+# Stata installation directories
+stata*-linux/
+stata19-linux/

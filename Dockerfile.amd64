@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+FROM --platform=linux/amd64 ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install essential tools and Python 3 (3.12 on 24.04)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gcc \
+    git \
+    libc6-dev \
+    libcurl4 \
+    libffi-dev \
+    libncurses6 \
+    libssl-dev \
+    libstdc++6 \
+    libzstd-dev \
+    make \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    wget \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks pointing to Python 3
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Create and activate a persistent virtual environment
+RUN python3 -m venv /venv
+ENV VIRTUAL_ENV=/venv
+ENV PATH=/venv/bin:$PATH
+
+# Copy pystata-x source
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY scripts/ ./scripts/
+
+# Install pystata-x in the venv
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0 pip install --no-cache-dir -e ".[dev,test]"
+
+# Stata will be mounted at /usr/local/stata19 at runtime
+ENV STATAPATH=/usr/local/stata19
+ENV PATH=$STATAPATH:/venv/bin:$PATH
+
+# Verify setup
+RUN python --version
+
+CMD ["python3", "-m", "pytest", "tests/", "-v", "--tb=short", "-m", "requires_stata"]
