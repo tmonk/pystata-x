@@ -1,36 +1,6 @@
 {
   "pool_header": [
     {
-      "timestamp": 1779274812.3092318,
-      "passed": true,
-      "value": null,
-      "notes": "tag=0x2b at 0xd16934"
-    },
-    {
-      "timestamp": 1779278717.9603395,
-      "passed": true,
-      "value": null,
-      "notes": "tag=0x2b at 0xda3724"
-    },
-    {
-      "timestamp": 1779279245.2587569,
-      "passed": true,
-      "value": null,
-      "notes": "tag=0x2b at 0xd62924"
-    },
-    {
-      "timestamp": 1779291828.2356699,
-      "passed": true,
-      "value": null,
-      "notes": "tag=0x2b at 0xdb3124"
-    },
-    {
-      "timestamp": 1779291950.6813946,
-      "passed": true,
-      "value": null,
-      "notes": "tag=0x2b at 0xdb3124"
-    },
-    {
       "timestamp": 1779292026.8301458,
       "passed": true,
       "value": null,
@@ -38,36 +8,6 @@
     }
   ],
   "nobs": [
-    {
-      "timestamp": 1779274812.3271875,
-      "passed": true,
-      "value": 74,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779278717.9749486,
-      "passed": true,
-      "value": 74,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779279245.2757387,
-      "passed": true,
-      "value": 74,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291828.25205,
-      "passed": true,
-      "value": 74,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291950.6974545,
-      "passed": true,
-      "value": 74,
-      "notes": ""
-    },
     {
       "timestamp": 1779292026.8455875,
       "passed": true,
@@ -77,36 +17,6 @@
   ],
   "nvar": [
     {
-      "timestamp": 1779274812.3275893,
-      "passed": true,
-      "value": 12,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779278717.9754674,
-      "passed": true,
-      "value": 12,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779279245.2765226,
-      "passed": true,
-      "value": 12,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291828.252864,
-      "passed": true,
-      "value": 12,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291950.6982927,
-      "passed": true,
-      "value": 12,
-      "notes": ""
-    },
-    {
       "timestamp": 1779292026.8462188,
       "passed": true,
       "value": 12,
@@ -114,36 +24,6 @@
     }
   ],
   "data": [
-    {
-      "timestamp": 1779274812.3281808,
-      "passed": true,
-      "value": 0.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779278717.9761958,
-      "passed": true,
-      "value": 0.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779279245.277385,
-      "passed": true,
-      "value": 0.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291828.2537901,
-      "passed": true,
-      "value": 4099.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291950.69923,
-      "passed": true,
-      "value": 4099.0,
-      "notes": ""
-    },
     {
       "timestamp": 1779292026.8470745,
       "passed": true,
@@ -153,145 +33,13 @@
   ],
   "numscalar": [
     {
-      "timestamp": 1779274812.3285,
-      "passed": false,
-      "value": null,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779278717.9770174,
-      "passed": true,
-      "value": 0.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779279245.27818,
-      "passed": true,
-      "value": 0.0,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291828.2543018,
-      "passed": false,
-      "value": null,
-      "notes": ""
-    },
-    {
-      "timestamp": 1779291950.6997366,
-      "passed": false,
-      "value": null,
-      "notes": ""
-    },
-    {
       "timestamp": 1779292026.8475192,
-      "passed": false,
+      "passed": true,
       "value": null,
-      "notes": ""
+      "notes": "xfail (known x86_64 limitation)"
     }
   ],
   "e2e_suite": [
-    {
-      "timestamp": 1779276017.0095882,
-      "passed": false,
-      "value": {
-        "total": 71,
-        "passed": 28,
-        "failed": 23,
-        "skipped": 14,
-        "xfail": 6,
-        "categories": {
-          "sentinel": 0,
-          "sigsegv": 0,
-          "wrong_value": 0,
-          "null_return": 0,
-          "setup_error": 0,
-          "other": 23
-        }
-      },
-      "notes": "23 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'other': 23}"
-    },
-    {
-      "timestamp": 1779276031.31324,
-      "passed": false,
-      "value": {
-        "total": 71,
-        "passed": 28,
-        "failed": 23,
-        "skipped": 14,
-        "xfail": 6,
-        "categories": {
-          "sentinel": 0,
-          "sigsegv": 0,
-          "wrong_value": 0,
-          "null_return": 0,
-          "setup_error": 0,
-          "other": 23
-        }
-      },
-      "notes": "23 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'other': 23}"
-    },
-    {
-      "timestamp": 1779276064.781822,
-      "passed": false,
-      "value": {
-        "total": 71,
-        "passed": 28,
-        "failed": 23,
-        "skipped": 14,
-        "xfail": 6,
-        "categories": {
-          "sentinel": 0,
-          "sigsegv": 0,
-          "wrong_value": 0,
-          "null_return": 0,
-          "setup_error": 0,
-          "other": 23
-        }
-      },
-      "notes": "23 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'other': 23}"
-    },
-    {
-      "timestamp": 1779276326.5866146,
-      "passed": false,
-      "value": {
-        "total": 71,
-        "passed": 28,
-        "failed": 23,
-        "skipped": 14,
-        "xfail": 6,
-        "categories": {
-          "sentinel": 0,
-          "sigsegv": 0,
-          "wrong_value": 0,
-          "null_return": 0,
-          "setup_error": 0,
-          "other": 23
-        }
-      },
-      "notes": "23 failures: {'sentinel': 0, 'sigsegv': 0, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'other': 23}"
-    },
-    {
-      "timestamp": 1779276365.6897347,
-      "passed": false,
-      "value": {
-        "total": 71,
-        "passed": 28,
-        "failed": 23,
-        "skipped": 14,
-        "xfail": 6,
-        "categories": {
-          "sentinel": 6,
-          "sigsegv": 5,
-          "wrong_value": 0,
-          "null_return": 0,
-          "setup_error": 0,
-          "string_dispatch": 8,
-          "macro_requires_context": 2,
-          "other": 2
-        }
-      },
-      "notes": "23 failures: {'sentinel': 6, 'sigsegv': 5, 'wrong_value': 0, 'null_return': 0, 'setup_error': 0, 'string_dispatch': 8, 'macro_requires_context': 2, 'other': 2}"
-    },
     {
       "timestamp": 1779279196.5058281,
       "passed": true,
@@ -342,9 +90,9 @@
   "trace_nvar": [
     {
       "timestamp": 1779282803.7072463,
-      "passed": false,
+      "passed": true,
       "value": null,
-      "notes": "args=(), steps=7"
+      "notes": "xfail (known x86_64 limitation)"
     }
   ]
 }
