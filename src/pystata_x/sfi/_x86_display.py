@@ -66,10 +66,10 @@ def _exec(cmd: str | bytes) -> Optional[str]:
         if out is None:
             return None
         text = out.decode("utf-8", errors="replace")
-        # Return the last non-empty, non-prompt line
+        # Return the last non-empty, non-prompt line (preserve leading whitespace)
         for line in reversed(text.split("\n")):
-            line = line.strip()
-            if line and not line.startswith(".") and not line.startswith("."):
+            stripped = line.strip()
+            if stripped and not stripped.startswith(".") and not stripped.startswith("."):
                 return line
         return None
     except Exception:
