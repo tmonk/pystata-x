@@ -120,10 +120,10 @@ class Macro:
     @staticmethod
     def getGlobal(name: str) -> str:
         """Get the value of a Stata global macro."""
-        if _check_fast_path():
-            return _fast_path.get_macro(name)
         if _IS_X86_64:
             return _x86_disp.get_macro(name)
+        if _check_fast_path():
+            return _fast_path.get_macro(name)
         return call_string("_bist_global", name.encode())
 
     @staticmethod
@@ -845,10 +845,10 @@ class Scalar:
     @staticmethod
     def getValue(name: str) -> float:
         """Get the value of a numeric scalar."""
-        if _check_fast_path():
-            return _fast_path.get_scalar(name)
         if _IS_X86_64:
             return _x86_disp.read_scalar(name)
+        if _check_fast_path():
+            return _fast_path.get_scalar(name)
         return call_double("_bist_numscalar", name.encode())
 
     @staticmethod
@@ -859,10 +859,11 @@ class Scalar:
     @staticmethod
     def getString(name: str) -> str:
         """Get the value of a string scalar."""
-        if _check_fast_path():
-            return _fast_path.get_scalar_str(name)
         if _IS_X86_64:
             return _x86_disp.read_string_scalar(name) or ""
+        if _check_fast_path():
+            return _fast_path.get_scalar_str(name)
+        return call_string("_bist_strscalar", name.encode())
         return call_string("_bist_strscalar", name.encode())
 
     @staticmethod
