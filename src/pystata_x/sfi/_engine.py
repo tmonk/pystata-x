@@ -918,6 +918,49 @@ def execute(command: str) -> tuple[str, int]:
 
 # ─── Variable Metadata Reading ────────────────────────────────────────
 
+
+def _read_var_name_x86(varno: int) -> str:
+    """Read variable name from Stata's name table (stride 129) on x86_64."""
+    try:
+        name_global_addr = _BASE + 0x832997 + 0x4469071
+        name_base = ctypes.c_uint64.from_address(name_global_addr).value
+        if name_base:
+            raw = ctypes.string_at(name_base + varno * 129, 32)
+            null_idx = raw.find(b'\x00')
+            if null_idx > 0:
+                raw = raw[:null_idx]
+            return raw.decode('latin-1', errors='replace')
+    except Exception:
+        pass
+    return ""
+
+
+def _read_var_type_x86(varno: int) -> str:
+    """Read variable storage type from Stata's type table on x86_64."""
+    try:
+        type_global_addr = _BASE + 0x823d5b + 0x4477ca5
+        type_base = ctypes.c_uint64.from_address(type_global_addr).value
+        if type_base:
+            typ = ctypes.c_uint16.from_address(type_base + varno * 2).value
+            if typ == 0xFFF5:
+                return "strL"
+            elif typ == 0xFFF9 or typ == 0:
+                return "float"
+            elif typ == 0xFFFA:
+                return "byte"
+            elif typ == 0xFFF7:
+                return "int"
+            elif typ == 0xFFF8:
+                return "long"
+            elif 0 < typ < 256:
+                return f"str{typ}"
+            else:
+                return f"type_{typ}"
+    except Exception:
+        pass
+    return ""
+
+
 _VAR_NAMES_CACHE: dict[int, str] = {}
 _VAR_LABELS_CACHE: dict[int, str] = {}
 _VAR_TYPES_CACHE: dict[int, str] = {}
