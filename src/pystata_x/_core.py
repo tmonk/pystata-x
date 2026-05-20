@@ -160,8 +160,20 @@ def _read_graph_names() -> list[str] | None:
     Must be called **immediately after** a ``quietly graph dir, memory``
     was executed.  No separate StataSO round-trip needed.
 
-    Returns a list of graph names, or None if SFI is unavailable.
+    Returns a list of graph names, or None if tracking is unavailable.
     """
+    # x86_64: use _x86_display.get_macro instead of official sfi.Macro
+    import sys, platform
+    if sys.platform in ("linux", "linux2") and platform.machine() in ("x86_64", "amd64"):
+        try:
+            from pystata_x.sfi._x86_display import get_macro, clear_cache
+            raw = get_macro("r(list)")
+            clear_cache()
+            if raw and raw.strip():
+                return raw.split()
+            return []
+        except Exception:
+            return None
     try:
         from sfi import Macro
         raw = Macro.getGlobal("r(list)")
