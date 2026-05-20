@@ -17,6 +17,18 @@
       "passed": true,
       "value": null,
       "notes": "tag=0x2b at 0xd62924"
+    },
+    {
+      "timestamp": 1779291828.2356699,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xdb3124"
+    },
+    {
+      "timestamp": 1779291950.6813946,
+      "passed": true,
+      "value": null,
+      "notes": "tag=0x2b at 0xdb3124"
     }
   ],
   "nobs": [
@@ -34,6 +46,18 @@
     },
     {
       "timestamp": 1779279245.2757387,
+      "passed": true,
+      "value": 74,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291828.25205,
+      "passed": true,
+      "value": 74,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291950.6974545,
       "passed": true,
       "value": 74,
       "notes": ""
@@ -57,6 +81,18 @@
       "passed": true,
       "value": 12,
       "notes": ""
+    },
+    {
+      "timestamp": 1779291828.252864,
+      "passed": true,
+      "value": 12,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291950.6982927,
+      "passed": true,
+      "value": 12,
+      "notes": ""
     }
   ],
   "data": [
@@ -77,6 +113,18 @@
       "passed": true,
       "value": 0.0,
       "notes": ""
+    },
+    {
+      "timestamp": 1779291828.2537901,
+      "passed": true,
+      "value": 4099.0,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291950.69923,
+      "passed": true,
+      "value": 4099.0,
+      "notes": ""
     }
   ],
   "numscalar": [
@@ -96,6 +144,18 @@
       "timestamp": 1779279245.27818,
       "passed": true,
       "value": 0.0,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291828.2543018,
+      "passed": false,
+      "value": null,
+      "notes": ""
+    },
+    {
+      "timestamp": 1779291950.6997366,
+      "passed": false,
+      "value": null,
       "notes": ""
     }
   ],

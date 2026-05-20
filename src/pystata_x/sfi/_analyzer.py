@@ -2314,33 +2314,30 @@ class StataEngine:
             state["sp"] = hex(sp)
             state["sp_raw"] = sp
 
-            # Read tsmat at SP
-            if sp and sp > 0x1000:
+            # Read tsmat at SP — only if address looks valid
+            if sp is not None and 0x100000 < sp < 0x800000000000:
                 try:
                     tsmat_val = ctypes.c_uint64.from_address(sp).value
-                    state["tsmat_ptr"] = hex(tsmat_val)
-                    # Read tsmat[0] (double value)
-                    dbl = ctypes.c_double.from_address(tsmat_val).value
-                    state["tsmat_double"] = dbl
-                    # Read tsmat[0x34] (sentinel marker)
-                    try:
-                        marker = ctypes.c_uint16.from_address(tsmat_val + 0x34).value
-                        state["tsmat_sentinel"] = hex(marker)
-                    except Exception:
-                        pass
-                    # Read tsmat[0x36] (type byte)
-                    try:
-                        type_byte = ctypes.c_uint8.from_address(tsmat_val + 0x36).value
-                        state["tsmat_type"] = type_byte
-                    except Exception:
-                        pass
-                    # Read data pointer (tsmat[0] is also data for doubles)
-                    try:
-                        data_tag = ctypes.c_uint8.from_address(tsmat_val - 0x94).value
-                        state["data_tag"] = hex(data_tag)
-                    except Exception:
-                        pass
-                except Exception:
+                    if 0x100000 < tsmat_val < 0x800000000000:
+                        state["tsmat_ptr"] = hex(tsmat_val)
+                        dbl = ctypes.c_double.from_address(tsmat_val).value
+                        state["tsmat_double"] = dbl
+                        try:
+                            marker = ctypes.c_uint16.from_address(tsmat_val + 0x34).value
+                            state["tsmat_sentinel"] = hex(marker)
+                        except Exception:
+                            pass
+                        try:
+                            type_byte = ctypes.c_uint8.from_address(tsmat_val + 0x36).value
+                            state["tsmat_type"] = type_byte
+                        except Exception:
+                            pass
+                        try:
+                            tag = ctypes.c_uint8.from_address(tsmat_val - 0x94).value
+                            state["data_tag"] = hex(tag)
+                        except Exception:
+                            pass
+                except (OSError, ValueError):
                     pass
         except Exception as e:
             state["error"] = str(e)
