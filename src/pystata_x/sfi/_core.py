@@ -165,27 +165,23 @@ class Data:
     @staticmethod
     def getVarName(varno: int) -> str:
         """Get the name of a variable by its Python index (0-based)."""
-        if _check_fast_path():
-            result = _fast_path.get_varname(varno + 1)
-            if result:
-                return result
-        # x86_64: read from Stata's name table directly
+        # On x86_64, bypass C fast path (dispatch convention differs)
         if _IS_X86_64:
             try:
                 from pystata_x.sfi._engine import _read_var_name_x86
                 return _read_var_name_x86(varno)
             except Exception:
                 pass
+        if _check_fast_path():
+            result = _fast_path.get_varname(varno + 1)
+            if result:
+                return result
         return call_string("_bist_varname", varno + 1)
 
     @staticmethod
     def getVarLabel(varno: int) -> str:
         """Get the label of a variable by its Python index (0-based)."""
-        if _check_fast_path():
-            result = _fast_path.get_varlabel(varno + 1)
-            if result:
-                return result
-        # x86_64: read var name then call _bist_varlabel(name)
+        # On x86_64, bypass C fast path, use name+_bist_varlabel
         if _IS_X86_64:
             try:
                 name = Data.getVarName(varno)
@@ -194,22 +190,27 @@ class Data:
                     return r or ""
             except Exception:
                 pass
+            return ""
+        if _check_fast_path():
+            result = _fast_path.get_varlabel(varno + 1)
+            if result:
+                return result
         return call_string("_bist_varlabel", varno + 1)
 
     @staticmethod
     def getVarType(varno: int) -> str:
         """Get the storage type of a Stata variable, e.g. 'str18', 'strL', 'double', 'int', 'byte', 'long', 'float'."""
-        if _check_fast_path():
-            result = _fast_path.get_vartype(varno + 1)
-            if result:
-                return result
-        # x86_64: read from Stata's type table directly
+        # On x86_64, bypass C fast path (dispatch convention differs)
         if _IS_X86_64:
             try:
                 from pystata_x.sfi._engine import _read_var_type_x86
                 return _read_var_type_x86(varno)
             except Exception:
                 pass
+        if _check_fast_path():
+            result = _fast_path.get_vartype(varno + 1)
+            if result:
+                return result
         return call_string("_bist_vartype", varno + 1)
 
     @staticmethod
