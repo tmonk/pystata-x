@@ -123,7 +123,7 @@ class Macro:
         if _check_fast_path():
             return _fast_path.get_macro(name)
         if _IS_X86_64:
-            return _x86_disp.get_macro(name) or ""
+            return _x86_disp.get_macro(name)
         return call_string("_bist_global", name.encode())
 
     @staticmethod

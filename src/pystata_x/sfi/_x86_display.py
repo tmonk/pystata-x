@@ -160,12 +160,20 @@ _NUMERIC_SCALAR_CACHE: dict[str, float] = {}
 
 
 def read_scalar(name: str) -> float:
-    """Read a numeric scalar via ``display scalar(<name>)``."""
+    """Read a numeric scalar via ``display``.
+
+    ``c()``-style system values use ``display c(<name>)``;
+    regular scalars use ``display scalar(<name>)``.
+    """
     cached = _NUMERIC_SCALAR_CACHE.get(name)
     if cached is not None:
         return cached
 
-    cmd = f"display scalar({name})"
+    if name.startswith("c(") or name.startswith("c_"):
+        inner = name[2:-1] if name.startswith("c(") else name[2:]
+        cmd = f"display c({inner})"
+    else:
+        cmd = f"display scalar({name})"
     out = _exec(cmd)
     if out is None:
         _NUMERIC_SCALAR_CACHE[name] = 0.0
@@ -187,12 +195,21 @@ _STRING_SCALAR_CACHE: dict[str, str] = {}
 
 
 def read_string_scalar(name: str) -> Optional[str]:
-    """Read a string scalar via ``display scalar(<name>)``."""
+    """Read a system/string scalar via ``display``.
+
+    ``c()``-style system values use ``display c(<name>)``;
+    regular string scalars use ``display scalar(<name>)``.
+    """
     cached = _STRING_SCALAR_CACHE.get(name)
     if cached is not None:
         return cached
 
-    cmd = f"display scalar({name})"
+    # c(...) values are system constants, not named scalars
+    if name.startswith("c(") or name.startswith("c_"):
+        inner = name[2:-1] if name.startswith("c(") else name[2:]
+        cmd = f"display c({inner})"
+    else:
+        cmd = f"display scalar({name})"
     out = _exec(cmd)
     if out is None:
         _STRING_SCALAR_CACHE[name] = ""
@@ -210,16 +227,20 @@ _MACRO_CACHE: dict[str, str] = {}
 
 
 def get_macro(name: str) -> Optional[str]:
-    """Get a global macro via ``display "$<name>"``."""
+    """Get a global macro via ``display "$<name>"``.
+
+    Returns ``None`` when the macro does not exist (Stata errors),
+    matching the original SFI API contract.
+    """
     cached = _MACRO_CACHE.get(name)
     if cached is not None:
-        return cached
+        return None if cached == "" else cached
 
     cmd = f'display "${name}"'
     out = _exec(cmd)
     if out is None:
         _MACRO_CACHE[name] = ""
-        return ""
+        return None
     _MACRO_CACHE[name] = out
     return out
 
