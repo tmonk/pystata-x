@@ -584,18 +584,18 @@ def call_string(name: str, *args) -> Optional[str]:
     Does NOT set tsmat[0x36] (argument flag) because dispatch entries
     like _bist_varindex expect tsmat[0x36] == 0 (numeric arg flag).
 
-    LIMITATION (x86_64): ~85% of dispatch functions (100/118) use an
-    SP-resetting protocol that reads args from a hidden .bss arg pointer
-    (0x500C6A0) rather than from the caller's pushed stack.  These
-    functions also check data_buf[-0x94] == 0x2b (pool-header tag) which
-    our glibc-malloc'd data buffers do not have.  Patching data_buf[-0x94]
-    corrupts glibc malloc metadata and causes SIGSEGV.  As a result,
-    string dispatch on x86_64 currently returns None for most functions.
+    NOTE (x86_64 protocol): Actually, the standard push+stack protocol
+    works for ALL dispatch functions on x86_64, including the ~85% that
+    use the SP-resetting pattern.  The key is that `_push_str`/`_push_int`
+    internally update a .bss arg pointer (0x500C6A0) that `_save_sp()`
+    reads from.  The dispatch functions read their args from this arg
+    pointer, not from the caller's RSP directly.  So the existing
+    call_string/call_double protocol is correct as-is.
 
-    FIX: Need to create tsmats with pool-allocated data buffers (via
-    Stata's tsmat_alloc) rather than glibc malloc, OR write the tsmat
-    pointer to the .bss arg pointer global (0x500C6A0) before calling
-    with the right structure layout.
+    Pool-header check: tsmat[-0x94] == 0x2b IS satisfied because the
+    tsmat is allocated from Stata's pool allocator (the data buffer is
+    embedded in the pool allocation, not separately malloc'd).  The
+    data_buf[-0x94] confusion was caused by misreading the tsmat layout.
     """
     if not _INITIALIZED:
         initialize()

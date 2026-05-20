@@ -1144,34 +1144,33 @@ class StataBinary:
     # Protocol analysis — x86_64 dispatch protocol classification
     # ═══════════════════════════════════════════════════════════════
     #
-    # CRITICAL ARCHITECTURE DISCOVERY (2026-05-20):
+    # ARCHITECTURE NOTE (x86_64 dispatch protocol):
     #
-    # On x86_64, ~85% of dispatch functions (100/118) use an
-    # "SP-resetting protocol" which is FUNDAMENTALLY different from
-    # the ARM64 push+stack protocol:
+    # On x86_64, ~85% of dispatch functions (100/118) reset the
+    # stack pointer (SP_global at 0x500C638) to a .data address
+    # before reading their args.  Despite this SP reset, the
+    # functions actually read their args from the ARG POINTER at
+    # 0x500C6A0 (also in .bss), which is SEPARATE from SP_global.
     #
-    #   1. The function loads the SP global address via lea rax, [rip+X]
-    #   2. It loads a .data address via lea rX, [rip+Y] (arg buffer)
-    #   3. It sets SP_global = arg buffer (mov [rax], rX)
-    #   4. The function then reads args from the ARG POINTER at
-    #      0x500C6A0 (a .bss global, different from SP_global at
-    #      0x500C638)
-    #   5. The arg pointer holds a pointer to a structure where:
-    #      - [0x00]: data (GSO ptr for strings, double for numbers)
-    #      - [0x20]: obs dimension
-    #      - [0x28]: var dimension
-    #      - [0x34]: type field (0xFFFD=string, 0x0000=numeric)
-    #      - [0x36]: flags field
-    #   6. Functions check data_buf[-0x94] == 0x2b (pool-header tag),
-    #      but our _push_* functions create data buffers via glibc
-    #      malloc which don't have this tag. Patching data_buf[-0x94]
-    #      corrupts glibc malloc metadata (SIGSEGV).
+    # The push functions (_push_str, _push_int, _push_double)
+    # internally update THIS arg pointer (0x500C6A0) — they store
+    # the tsmat pointer there and advance it by 8 on each push.
+    # The engine's _save_sp() also reads from 0x500C6A0 (via the
+    # manifest's stack_ptr_delta config).
     #
-    # The remaining ~15% of functions (nobs, nvar, vartype, etc.)
-    # use the standard push+stack protocol compatible with ARM64.
+    # This means the STANDARD push+stack protocol works for ALL
+    # dispatch functions on x86_64, including SP-resetting ones.
+    # No special calling convention is needed for these functions.
     #
-    # Methods in this section help classify and extract the
-    # addresses needed for the SP-resetting protocol.
+    # Pool-header checks: tsmat[-0x94] == 0x2b IS satisfied because
+    # the tsmat is pool-allocated.  The tsmat struct has embedded
+    # data at offset 0 (the first 8 bytes are the double value or
+    # GSO string pointer, NOT a separate data buffer pointer).
+    # Checking data_buf[-0x94] was based on a misinterpretation;
+    # the actual check is on the tsmat itself.
+    #
+    # Methods in this section extract SP/arg buffer addresses for
+    # reference and protocol classification.
     # ───────────────────────────────────────────────────────────────
 
     def extract_arg_buffer_addr(self, name: str) -> dict:
