@@ -151,7 +151,7 @@ def _ensure_symbols(lib_path: str) -> None:
     3. Fall back to dynamic binary parsing, then permanently cache
        the result to a manifest file keyed by SHA256.
     """
-    global _SYMS, _MANIFEST
+    global _SYMS, _MANIFEST, _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
 
     fhash = _file_sha256(lib_path)
 
@@ -174,12 +174,16 @@ def _ensure_symbols(lib_path: str) -> None:
                     _SYMS.clear()
                     _SYMS.update(mdata.get("symbols", {}))
                     if _SYMS:
+                        # Also update data offsets from the cached manifest
+                        _ddo_offsets = mdata.get("data_offsets") or {}
+                        if _ddo_offsets.get("stack_ptr_delta"):
+                            _STACK_PTR_OFFSET = _ddo_offsets["stack_ptr_delta"]
+                            _ERR_ADDR_RELATIVE = _ddo_offsets.get("err_addr_delta", 0)
                         return
             except (json.JSONDecodeError, OSError):
                 continue
 
     # Tier 2: Dynamic binary parsing
-    global _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
     try:
         # For ELF x86_64, use the dispatch table scanner (pure static analysis)
         if _PLATFORM == "x86_64":
