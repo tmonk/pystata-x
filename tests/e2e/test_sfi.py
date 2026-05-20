@@ -483,11 +483,9 @@ class TestMacros:
         _, Macro, *_ = _load_auto(execute)
         Macro.setGlobal("e2e_test_macro2", "value")
         Macro.delGlobal("e2e_test_macro2")
-        # After deletion, the macro value is set to a space
+        # After deletion, the macro is dropped and returns empty string
         result = Macro.getGlobal("e2e_test_macro2")
-        # delGlobal sets to space (workaround for empty-string limitation)
-        # so get returns either None or " " depending on internal logic
-        assert result is None or result == " "
+        assert result == ""
 
     def test_get_nonexistent(self, stata):
         execute, run = stata
