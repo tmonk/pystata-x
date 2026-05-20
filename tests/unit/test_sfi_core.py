@@ -23,6 +23,8 @@ def _mock_engine():
     Because _core.py does ``from _engine import call_int, ...``,
     the names are direct module references.  We use ``patch.object``
     on the already-imported _core module to replace each name.
+    Also forces ``_IS_X86_64 = False`` so unit tests exercise the
+    mocked code paths (display-based fallback tests are e2e-only).
     """
     import pystata_x.sfi._core as core_mod
 
@@ -41,6 +43,11 @@ def _mock_engine():
         p = patch.object(core_mod, name, m)
         p.start()
         patchers.append(p)
+
+    # Force _IS_X86_64 to False so unit tests use mocked call path
+    p_is86 = patch.object(core_mod, "_IS_X86_64", False)
+    p_is86.start()
+    patchers.append(p_is86)
 
     yield mocks
 
