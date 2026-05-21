@@ -170,6 +170,10 @@ class Macro:
             return
         call_int("_bist_putglobal", name.encode(), b" ")
 
+    @staticmethod
+    def getLocal(name: str) -> str:
+        """Get the value of a Stata local macro.
+
         On x86_64, uses _bist_macroexpand (dispatch path).
         """
         if _IS_X86_64:
