@@ -21,6 +21,7 @@ import atexit
 import os
 import sys
 from ctypes import cdll, c_char_p, c_int, POINTER
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -63,10 +64,9 @@ def _decode(b: bytes | None) -> str:
 
 def _find_lib(st_home: str, edition: str, os_system: str = "") -> str | None:
     """Locate the Stata shared library.  Returns absolute path or None."""
-    import platform
-
     if not os_system:
-        os_system = platform.system()
+        import platform as _platform
+        os_system = _platform.system()
     if os_system == "Windows":
         lib_name = f"{edition}-64.dll"
         lib_path = os.path.join(st_home, lib_name)
@@ -122,7 +122,8 @@ def _get_executable_path() -> str:
 
 def _is_arm_arch() -> bool:
     """Return True when running on an ARM-family machine."""
-    machine = platform.machine().lower()
+    import platform as _platform
+    machine = _platform.machine().lower()
     return machine.startswith("arm") or machine.startswith("aarch64")
 
 
@@ -214,6 +215,20 @@ def init(
     except Exception as exc:
         raise RuntimeError(f"Failed to load Stata shared library: {exc}")
 
+    rc = _init_stata(splash)
+    msg = get_output()
+    if rc < 0:
+        if rc == -7100:
+            # StataSO_Main returns -7100 when the license check has an issue,
+            # but the Stata engine is still usable. This matches the vendor
+            # behaviour: show the message and continue.
+            print(msg, end="")
+        else:
+            raise RuntimeError(f"Stata initialisation failed (rc={rc}):\n{msg}")
+    else:
+        if msg:
+            print(msg, end="")
+
     sthome = st_path
     stinitialized = True
     stsplash = splash
@@ -222,26 +237,9 @@ def init(
     stconfig["streamout"] = "on" if streamout else "off"
 
     # On macOS, work around KMP duplicate-lib issue for MP edition
-    if edition == "mp":
-        import platform as _platform
-        if _platform.system() == "Darwin":
-            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
-
-    # Bootstrap the Stata engine immediately (StataSO_Main).
-    # This is the single most expensive init step (~75-85 ms) but
-    # ensures the first execute() / run() call is equally fast.
-    rc = _init_stata(splash)
-    msg = get_output()
-    if rc < 0:
-        if rc == -7100:
-            print(msg, end="")
-        else:
-            raise RuntimeError(
-                f"Stata engine bootstrap failed (rc={rc}):\n{msg}"
-            )
-    else:
-        if msg:
-            print(msg, end="")
+    import platform as _platform
+    if _platform.system() == "Darwin" and edition == "mp":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
 
     # Read Stata version
     try:

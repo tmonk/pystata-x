@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
+
 from pystata_x import _config as config
 
-# Persistent temp-do-file path (resolved lazily — avoids import of
-# ``tempfile`` at init time, which pulls in ~8 ms of stdlib).
-# The file descriptor is opened on first use in :func:`_ensure_temp_fd`.
+# Persistent temp-do-file path (resolved lazily to avoid tempfile import
+# during cold startup).
 _STATA_TEMP_DO: str | None = None
 _STATA_TEMP_FD: int | None = None
 
@@ -58,21 +59,21 @@ def _set_showcommand(state_on: bool) -> None:
     _SHOWCOMMAND_IS_ON = state_on
 
 
-def _get_temp_do_path() -> str:
-    """Return (and cache) the temp-do-file path."""
-    global _STATA_TEMP_DO
-    if _STATA_TEMP_DO is None:
-        import tempfile as _tempfile
-        _STATA_TEMP_DO = os.path.join(_tempfile.gettempdir(), "_pystata_x_temp.do")
-    return _STATA_TEMP_DO
-
-
 def _get_include_cmd_bytes() -> bytes:
     """Return the pre-encoded include command for the temp do-file."""
     global _STATA_TEMP_DO_BYTES
     if _STATA_TEMP_DO_BYTES is None:
         _STATA_TEMP_DO_BYTES = _get_temp_do_path().encode("utf-8")
     return _INCLUDE_CMD_PREFIX + _STATA_TEMP_DO_BYTES + _INCLUDE_CMD_SUFFIX
+
+
+def _get_temp_do_path() -> str:
+    """Return the temp-do-file path, computing it on first use."""
+    global _STATA_TEMP_DO
+    if _STATA_TEMP_DO is None:
+        import tempfile as _tempfile
+        _STATA_TEMP_DO = os.path.join(_tempfile.gettempdir(), "_pystata_x_temp.do")
+    return _STATA_TEMP_DO
 
 
 def _ensure_temp_fd() -> int:
