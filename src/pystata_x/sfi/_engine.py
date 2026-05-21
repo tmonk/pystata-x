@@ -880,104 +880,60 @@ def call_set_strscalar(name: str, value: str) -> int:
         return 0
 
 
-# ─── x86_64 scalar memory reader ─────────────────────────────────
+# ─── x86_64 scalar hybrid reader ────────────────────────────────────
+# Numeric scalars: use temp variable + C dispatch (execute-set + C-read)
+# String scalars: not yet supported on x86_64 (dispatch functions echo)
 
-_x86_scalar_region = None  # cache: (start, end, name_to_val_off)
+_x86_tmp_scl_var = -1  # var index for temp scalar, discovered on first use
 
-def _discover_x86_scalar_region():
-    """Discover scalar storage region via sentinel scalar.
-
-    Creates a temp scalar with a known value, scans libstata's mapped
-    rw-p memory for it, finds the name nearby, and caches the region
-    and name-to-value offset.
-    """
-    import ctypes, struct
-    global _x86_scalar_region
-    if _x86_scalar_region is not None:
-        return True
-    sentinel_val = 12345.6789
+def _get_tmp_scl_var() -> int:
+    """Get or create temp variable for scalar reads."""
+    global _x86_tmp_scl_var
+    if _x86_tmp_scl_var >= 0:
+        return _x86_tmp_scl_var
     try:
-        execute(f'cap drop __px_find')
-        execute(f'scalar __px_find = {sentinel_val}')
-        target = struct.pack('d', sentinel_val)
-        name_b = b'__px_find'
-        with open('/proc/self/maps') as f:
-            maps = f.read()
-        for line in maps.split('\n'):
-            parts = line.split()
-            if len(parts) < 2 or 'rw' not in parts[1] or 'libstata' not in line:
-                continue
-            r = parts[0].split('-')
-            seg_start, seg_end = int(r[0], 16), int(r[1], 16)
-            for off in range(0, seg_end - seg_start - 8, 8):
-                addr = seg_start + off
-                try:
-                    buf = ctypes.string_at(addr, 8)
-                    if buf == target:
-                        for n_off in range(max(0, off - 512), min(seg_end - seg_start, off + 512)):
-                            ch = ctypes.c_char.from_address(seg_start + n_off).value
-                            if ch and ch > ord(' ') and n_off < off:
-                                nbuf = ctypes.string_at(seg_start + n_off, 15)
-                                if name_b in nbuf:
-                                    name_to_val = off - n_off
-                                    region_start = (seg_start + n_off) & ~0xFFFF
-                                    region_end = min(seg_start + 0x40000, seg_end)
-                                    _x86_scalar_region = (
-                                        region_start, region_end, name_to_val
-                                    )
-                                    return True
-                except Exception:
-                    continue
+        # Create temp var if it does not exist
+        execute('capture confirm variable __px_scl, exact')
+        rc = _error_code() if hasattr(_LIB, '_st_error') else -1
+        # If confirm failed (rc != 0), create the var
+        execute('capture confirm variable __px_scl, exact')
+        # We use a different approach: just create or ensure exists
+        execute('capture drop __px_scl')
+        execute('generate double __px_scl = 0')
+        from pystata_x.sfi._engine import call_double
+        nvar = call_double('_bist_nvar')
+        if nvar is not None:
+            _x86_tmp_scl_var = int(nvar)
+        else:
+            _x86_tmp_scl_var = 1
     except Exception:
-        pass
-    return False
+        _x86_tmp_scl_var = 1
+    return _x86_tmp_scl_var
 
 
 def _read_scalar_x86(name: str) -> Optional[float]:
-    """Read a numeric scalar from Stata memory by name (x86_64)."""
-    import ctypes
-    if not _discover_x86_scalar_region():
-        return None
-    start, end, name_off = _x86_scalar_region
-    name_b = name.encode()
-    for addr in range(start, end, 1):
-        try:
-            raw = ctypes.string_at(addr, len(name) + 2)
-            null = raw.find(b'\x00')
-            if null >= 0:
-                raw = raw[:null]
-            if raw == name_b:
-                val_addr = addr - name_off
-                return ctypes.c_double.from_address(val_addr).value
-        except Exception:
-            break
+    """Read a numeric scalar by name using hybrid execute-set + C-read.
+
+    Uses a temp variable: execute() writes scalar value to var[1],
+    then call_double('_bist_data') reads it via C dispatch.
+    """
+    try:
+        var_idx = _get_tmp_scl_var()
+        execute(f'quietly replace __px_scl = scalar({name}) in 1')
+        from pystata_x.sfi._engine import call_double
+        return call_double('_bist_data', 1.0, float(var_idx))
+    except Exception:
+        pass
     return None
 
 
 def _read_string_scalar_x86(name: str) -> str:
-    """Read a string scalar from Stata memory by name (x86_64)."""
-    import ctypes
-    if not _discover_x86_scalar_region():
-        return ''
-    start, end, name_off = _x86_scalar_region
-    name_b = name.encode()
-    for addr in range(start, end, 1):
-        try:
-            raw = ctypes.string_at(addr, len(name) + 2)
-            null = raw.find(b'\x00')
-            if null >= 0:
-                raw = raw[:null]
-            if raw == name_b:
-                val_addr = addr - name_off
-                gso_ptr = ctypes.c_uint64.from_address(val_addr).value
-                if gso_ptr and 0x100000 <= gso_ptr <= 0x7f0000000000:
-                    slen = ctypes.c_int32.from_address(gso_ptr).value
-                    if 0 < slen < 2048:
-                        raw_str = ctypes.string_at(gso_ptr + 4, slen)
-                        return raw_str.rstrip(b'\x00').decode('utf-8', errors='replace')
-                return ''
-        except Exception:
-            break
+    """Read a string scalar by name.
+
+    String dispatch functions echo input on x86_64. Direct memory
+    scanning is unreliable. Returns empty string as fallback.
+    """
+    # TODO: Implement via strvar hybrid when _bist_sdata is fixed
     return ''
 
 
