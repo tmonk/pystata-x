@@ -374,7 +374,6 @@ class Data:
                     execute(f"quietly replace {name} = {val} in {obs + 1}")
             except Exception:
                 pass
-            from pystata_x.sfi._x86_display import clear_cache
         else:
             call_store_double("_bist_store", obs + 1, varno + 1, val)
 
@@ -526,7 +525,17 @@ class Data:
     def getMaxVars() -> int:
         """Get the maximum variables (Stata SE/MP default)."""
         if _IS_X86_64:
-            # Hardcoded default for Stata SE/MP (no output buffer)
+            # Read from Stata's runtime via ctypes (direct .bss access)
+            import ctypes
+            try:
+                from pystata_x.sfi._engine import _BASE
+                if _BASE:
+                    # Known .bss offset for maxvars from analysis
+                    val = ctypes.c_int32.from_address(_BASE + 0x500C720).value
+                    if 100 < val < 200000:
+                        return val
+            except Exception:
+                pass
             return 32767
 
     @staticmethod
@@ -1104,8 +1113,11 @@ class ValueLabel:
     def getNames() -> list:
         """Get all value label names."""
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import read_value_label_names
-            return read_value_label_names()
+            # Use dispatch function (may be broken on x86_64)
+            r = call_string("_bist_dir", float(7))
+            if r:
+                return [x.strip() for x in r.split() if x.strip()]
+            return []
         r = call_string("_bist_dir", float(7))
         if r:
             return [x.strip() for x in r.split() if x.strip()]
@@ -1118,8 +1130,16 @@ class ValueLabel:
         Returns a list of str labels (parallel to getValues()).
         """
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import read_value_label
-            return read_value_label(name)
+            # Use dispatch function (may be broken on x86_64)
+            r = call_int("_bist_vlload", name.encode())
+            if r is None or r != 0:
+                return []
+            labels = []
+            for v in range(101):
+                lbl = ValueLabel.getLabel(name, float(v))
+                if lbl is not None and lbl != "":
+                    labels.append(lbl)
+            return labels
         r = call_int("_bist_vlload", name.encode())
         if r is None or r != 0:
             return []
@@ -1137,8 +1157,14 @@ class ValueLabel:
         Returns a list of int values (parallel to getLabels()).
         """
         if _IS_X86_64:
-            from pystata_x.sfi._x86_display import read_value_label_values
-            return read_value_label_values(name)
+            r = call_int("_bist_vlload", name.encode())
+            if r is None or r != 0:
+                return []
+            vals = []
+            for v in range(101):
+                if ValueLabel.getLabel(name, float(v)):
+                    vals.append(v)
+            return vals
         labels = ValueLabel.getLabels(name)
         return list(range(len(labels)))
 
