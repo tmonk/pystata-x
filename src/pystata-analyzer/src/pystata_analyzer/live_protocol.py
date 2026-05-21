@@ -1638,7 +1638,7 @@ class LiveProtocolValidatorPlugin:
             return "string"
         return "double"
 
-n    def shutdown(self):
+    def shutdown(self):
         """Shutdown the engine."""
         if self.engine:
             self.engine.shutdown()
@@ -1665,6 +1665,12 @@ class StataMemoryReader:
 
     def __init__(self, base_addr: int = 0):
         self._base = base_addr
+        self._scalar_region_cache: dict = {
+            "start": 0,
+            "end": 0,
+            "name_to_value_offset": -132,
+            "scanned": False,
+        }
 
     @property
     def base(self) -> int:
@@ -1892,4 +1898,73 @@ class StataMemoryReader:
         """Read a string scalar directly from memory."""
         # Similar to read_scalar but reads GSO string from scalar entry
         # Requires locate_scalar with the string scalar
+        return ""
+
+    # ─── Cached scalar reader ────────────────────────────────────────
+
+    def _discover_scalar_region(self, engine_conn=None):
+        """Find scalar hash table region in memory using locate_scalar."""
+        if engine_conn:
+            engine_conn.execute("capture scalar drop __px_find")
+            info = self.locate_scalar("__px_find", known_val=12345.0,
+                                       engine_conn=engine_conn)
+            if info.get("value_address"):
+                va = info["value_address"]
+                region_start = va & ~0xFFFF
+                self._scalar_region_cache = {
+                    "start": region_start,
+                    "end": region_start + 0x20000,
+                    "name_to_value_offset": info.get("name_offset_from_value", -132),
+                    "scanned": True,
+                }
+                return True
+        return False
+
+    def read_scalar_by_name(self, name: str, engine_conn=None) -> float:
+        """Read numeric scalar by name from Stata's memory."""
+        import ctypes
+        if not self._scalar_region_cache["scanned"]:
+            if not self._discover_scalar_region(engine_conn):
+                return None
+        cache = self._scalar_region_cache
+        name_bytes = name.encode()
+        off = cache["name_to_value_offset"]
+        addr = cache["start"]
+        while addr < cache["end"]:
+            try:
+                raw = ctypes.string_at(addr, len(name) + 1)
+                if raw.rstrip(b"\x00") == name_bytes:
+                    val_addr = addr - off
+                    return ctypes.c_double.from_address(val_addr).value
+            except Exception:
+                pass
+            addr += 1
+        return None
+
+    def read_string_scalar_by_name(self, name: str, engine_conn=None) -> str:
+        """Read string scalar by name from Stata's memory."""
+        import ctypes
+        if not self._scalar_region_cache["scanned"]:
+            if not self._discover_scalar_region(engine_conn):
+                return ""
+        cache = self._scalar_region_cache
+        name_bytes = name.encode()
+        off = cache["name_to_value_offset"]
+        addr = cache["start"]
+        while addr < cache["end"]:
+            try:
+                raw = ctypes.string_at(addr, len(name) + 1)
+                if raw.rstrip(b"\x00") == name_bytes:
+                    val_addr = addr - off
+                    # Check for GSO string
+                    data = ctypes.c_uint64.from_address(val_addr).value
+                    if data and 0x100000 <= data <= 0x7f0000000000:
+                        slen = ctypes.c_int32.from_address(data).value
+                        if 0 < slen < 2048:
+                            raw_str = ctypes.string_at(data + 4, slen)
+                            return raw_str.rstrip(b"\x00").decode("utf-8", errors="replace")
+                    return ""
+            except Exception:
+                pass
+            addr += 1
         return ""
