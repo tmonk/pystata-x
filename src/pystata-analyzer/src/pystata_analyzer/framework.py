@@ -423,6 +423,196 @@ class Framework:
                     })
         return detected
 
+    def classify_unclassified(self, threshold: float = 0.8
+                              ) -> dict[str, Any]:
+        """Automated classification workflow for unclassified functions.
+
+        Scans all functions flagged as *unclassified*, runs deep analysis,
+        matches against known registry patterns, and generates classification
+        candidates with confidence scores.
+
+        Parameters
+        ----------
+        threshold : float
+            Confidence threshold (0.0–1.0) for auto-registration.  Candidates
+            with confidence >= *threshold* are automatically registered as
+            new patterns.  Default 0.8.
+
+        Returns
+        -------
+        dict with keys:
+            - ``candidates``: list of classification candidates
+            - ``auto_registered``: names of functions auto-registered
+            - ``needs_review``: names of low-confidence functions
+            - ``total_unclassified``: count before classification
+            - ``remaining_unclassified``: count after auto-registration
+        """
+        functions = self._last_report.get("functions", {})
+        sha256 = self.binary.sha256
+
+        # Collect unclassified
+        unclassified = [
+            (name, r) for name, r in functions.items()
+            if r.get("unclassified")
+        ]
+        total_unclassified = len(unclassified)
+
+        candidates: list[dict] = []
+        auto_registered: list[str] = []
+        needs_review: list[dict] = []
+
+        for name, result in unclassified:
+            candidate = self._classify_single(name, result)
+            candidates.append(candidate)
+            if candidate["confidence"] >= threshold:
+                # Auto-register the pattern
+                pt = candidate.get("inferred_protocol", "unknown")
+                self.registry.register_detected(
+                    name=name,
+                    data={
+                        "protocol_type": pt,
+                        "dispatch_index": result.get("dispatch_index"),
+                        "classifier_notes": candidate.get("reasoning", []),
+                        "classification_confidence": candidate["confidence"],
+                    },
+                    sha256=sha256,
+                    pattern_type="protocol",
+                    description=f"Auto-classified {name}: {pt} "
+                                f"(confidence={candidate['confidence']:.2f})",
+                    tags=["auto_classified", "protocol"],
+                )
+                # Update the function result so it's no longer unclassified
+                result["unclassified"] = False
+                result["protocol_type"] = pt
+                result["classification_confidence"] = candidate["confidence"]
+                auto_registered.append(name)
+            else:
+                needs_review.append({
+                    "name": name,
+                    "confidence": candidate["confidence"],
+                    "reasoning": candidate.get("reasoning", []),
+                    "inferred_protocol": candidate.get("inferred_protocol"),
+                })
+
+        # Rebuild report stats
+        remaining = len([
+            n for n, r in functions.items()
+            if r.get("unclassified")
+        ])
+
+        return {
+            "candidates": candidates,
+            "auto_registered": auto_registered,
+            "needs_review": needs_review,
+            "total_unclassified": total_unclassified,
+            "remaining_unclassified": remaining,
+        }
+
+    def _classify_single(self, name: str, result: dict) -> dict:
+        """Classify a single unclassified function.
+
+        Runs heuristics:
+        - Check for ARG_PTR reads (-> push_stack)
+        - Check for SP_global accesses (-> sp_reset)
+        - Check for push function calls (-> push_stack with args)
+        - Check for error-code-only functions (-> utility)
+        - Check for multiple entry points (-> multi_entry)
+        - Match function name to known pattern prefixes
+
+        Returns dict with ``confidence``, ``inferred_protocol``, and
+        ``reasoning`` list.
+        """
+        reasoning: list[str] = []
+        confidence = 0.0
+        inferred_protocol = "unknown"
+
+        arg_reads = result.get("arg_ptr_reads", [])
+        sp_access = result.get("sp_global_access", [])
+        push_calls = result.get("push_calls", [])
+        ep = result.get("entry_candidates", [])
+        ecs = result.get("error_codes", []) or result.get("error_codes_found", [])
+
+        # Heuristic 1: ARG_PTR reads → push_stack
+        if arg_reads:
+            n_reads = len(arg_reads)
+            reasoning.append(f"{n_reads} ARG_PTR read(s) detected — "
+                             f"indicating push+stack argument access")
+            confidence += 0.4
+            inferred_protocol = "push_stack_call"
+
+        # Heuristic 2: push function calls → push_stack with args
+        if push_calls:
+            n_pushes = len(push_calls)
+            push_types = set(p.get("push_function", "") for p in push_calls)
+            reasoning.append(f"{n_pushes} push function call(s): "
+                             f"{', '.join(sorted(push_types))}")
+            if "_pushstr" in push_types:
+                inferred_protocol = "string_return"
+            confidence += 0.3
+
+        # Heuristic 3: SP_global accesses → sp_reset
+        if sp_access:
+            n_sp = len(sp_access)
+            writes = sum(1 for s in sp_access if s.get("is_write"))
+            reasoning.append(f"{n_sp} SP_global access(es) ({writes} writes) — "
+                             f"indicating SP-reset protocol")
+            if writes > 0:
+                confidence += 0.3
+                if confidence < 0.5:
+                    inferred_protocol = "sp_reset"
+            else:
+                confidence += 0.1
+
+        # Heuristic 4: multiple entry points → branching/read_write
+        if len(ep) > 1:
+            reasoning.append(f"{len(ep)} entry points detected — "
+                             f"multi-entry dispatch")
+            confidence += 0.2
+            if inferred_protocol == "push_stack_call":
+                inferred_protocol = "read_write"
+
+        # Heuristic 5: edi checks (argument count branching)
+        edi = result.get("edi_checks", [])
+        if edi:
+            reasoning.append(f"{len(edi)} argument count check(s) (edi)")
+            confidence += 0.15
+
+        # Heuristic 6: error codes with no other signals → utility
+        if ecs and not arg_reads and not push_calls:
+            reasoning.append(f"{len(ecs)} error code(s) but no arg reads — "
+                             f"likely internal utility function")
+            inferred_protocol = "no_stack_args"
+            confidence += 0.2
+
+        # Heuristic 7: name-based pattern matching
+        name_lower = name.lower()
+        name_patterns = {
+            "push_stack_call": ["set", "get", "put", "drop", "clear"],
+            "sp_reset": ["nobs", "nvar", "k", "exists"],
+            "string_return": ["name", "label", "format", "dir", "expand"],
+            "no_stack_args": ["clear", "reset", "eclear", "sclear", "rclear"],
+        }
+        for proto, patterns in name_patterns.items():
+            for pat in patterns:
+                if pat in name_lower:
+                    reasoning.append(f"name contains '{pat}' → suggests {proto}")
+                    if inferred_protocol == "unknown":
+                        inferred_protocol = proto
+                        confidence += 0.15
+                    break
+
+        # Cap confidence at 1.0
+        confidence = min(confidence, 1.0)
+
+        return {
+            "name": name,
+            "confidence": round(confidence, 2),
+            "inferred_protocol": inferred_protocol,
+            "reasoning": reasoning,
+            "vaddr": result.get("vaddr"),
+            "dispatch_index": result.get("dispatch_index"),
+        }
+
     def _build_report(self, function_results: dict[str, dict],
                       unclassified: list[str],
                       detected: list[dict]) -> dict[str, Any]:
