@@ -430,6 +430,41 @@ class Framework:
             lines.append(f"| `{name}` | {di} | {pt} | {ps} | {ec} | {errs} | {pc} |")
         lines.append("")
 
+        # ── Cross-Reference Index ──
+        xref = self._build_cross_reference_index(report.get("functions", {}))
+        shared_entries = xref.get("shared_dispatch_entries", {})
+        if shared_entries:
+            lines.append("## Cross-Reference Index")
+            lines.append("")
+            lines.append("### Shared Dispatch Entry Groups")
+            lines.append("")
+            lines.append("| VAddr | Functions |")
+            lines.append("|-------|-----------|")
+            for vaddr_hex, names in sorted(shared_entries.items()):
+                lines.append(f"| `{vaddr_hex}` | {', '.join(f'`{n}`' for n in names)} |")
+            lines.append("")
+
+        call_graph = xref.get("call_graph", {})
+        if call_graph:
+            lines.append("### Call Graph (Push Function Usage)")
+            lines.append("")
+            lines.append("| Function | Push Function Calls |")
+            lines.append("|----------|--------------------|")
+            for fn, targets in sorted(call_graph.items()):
+                lines.append(f"| `{fn}` | {', '.join(f'`{t}`' for t in targets)} |")
+            lines.append("")
+
+        by_protocol = xref.get("by_protocol_type", {})
+        if by_protocol:
+            lines.append("### Protocol Type Groups")
+            lines.append("")
+            for pt, names in sorted(by_protocol.items()):
+                lines.append(f"- **{pt}** ({len(names)} functions): "
+                             f"{', '.join(f'`{n}`' for n in names[:5])}")
+                if len(names) > 5:
+                    lines.append(f"  ... and {len(names) - 5} more")
+            lines.append("")
+
         plugins = report.get("plugins", [])
         lines.append("## Plugins Loaded")
         lines.append("")
@@ -1182,6 +1217,7 @@ class Framework:
         # ── Cross-references ──
         lines.append("## Cross-References")
         lines.append("")
+        # Shared dispatch
         if di != "?":
             try:
                 di_int = int(str(di))
@@ -1191,11 +1227,12 @@ class Framework:
                 ]
                 if siblings:
                     lines.append(f"- **Shared dispatch index [{di}]**: ")
-                    refs = ", ".join(f"`{s}`" for s in siblings)
+                    refs = ", ".join(f"[{s}]({s}.md)" for s in siblings)
                     lines.append(f"  {refs}")
             except ValueError:
                 pass
 
+        # Protocol pattern
         reg_entries = self.registry.lookup_by_type("protocol")
         matched = [
             r.name for r in reg_entries
@@ -1206,14 +1243,19 @@ class Framework:
             refs = ", ".join(f"`{m}`" for m in matched)
             lines.append(f"  {refs}")
 
+        # Push-function call graph
         push_targets = sorted(set(
             pc.get("push_function", "") for pc in push_calls
         ))
         if push_targets:
             lines.append(f"- **Calls push functions**: ")
-            refs = ", ".join(f"`{t}`" for t in push_targets)
+            refs = ", ".join(f"[{t}]({t}.md)" for t in push_targets
+                              if t.startswith("_push"))
+            if not refs:
+                refs = ", ".join(f"`{t}`" for t in push_targets)
             lines.append(f"  {refs}")
 
+        # Registry patterns referencing this function
         all_entries = self.registry.list()
         refs = [
             e.name for e in all_entries
