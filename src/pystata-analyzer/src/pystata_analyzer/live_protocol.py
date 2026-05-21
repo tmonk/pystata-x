@@ -1159,6 +1159,178 @@ class ProtocolAutoTester:
                 pass
         return None
 
+    def universal_call(self, name: str, *args) -> dict:
+        """Call a dispatch function and return the result with automatic type detection.
+
+        Unlike call_string (which sets tsmat[0x34] = 0xFFFD on x86_64 and may crash)
+        and call_double (which returns GSO pointer as double for string results),
+        this method:
+        1. Pushes args using the standard _push_* functions
+        2. Does NOT set tsmat[0x34] (safe for all functions)
+        3. Reads the result tsmat and auto-detects whether it's a GSO string or inline double
+        4. Returns the correct Python type (str or float)
+
+        Returns dict with:
+        - "type": "string" | "double" | "none"
+        - "value": the Python value (str, float, or None)
+        - "error_code": error code after call
+        - "result_type_flag": tsmat[0x34] raw value
+        """
+        import ctypes
+        result: dict = {"type": "none", "value": None, "error_code": 0}
+
+        if not self.engine._base:
+            self.engine.initialize()
+
+        addr = self.engine._resolve_name(name)
+        if addr is None:
+            result["error"] = f"symbol {name} not found"
+            return result
+
+        sp_before = self.engine.save_sp()
+        try:
+            # Push args exactly as call_double does
+            for a in args:
+                if isinstance(a, (int, float)):
+                    self.engine.push_double(float(a))
+                elif isinstance(a, (bytes, bytearray)):
+                    self.engine.push_str(bytes(a))
+
+            # Call function with arg count
+            rt = addr + self.engine._base
+            fn = self.engine._get_fn(rt, None, ctypes.c_int)
+            fn(len(args))
+
+            # Read result
+            sp = self.engine.save_sp()
+            tsmat_ptr = ctypes.c_uint64.from_address(sp).value
+            if not tsmat_ptr:
+                result["type"] = "none"
+                return result
+
+            # Read error code
+            try:
+                result["error_code"] = self.engine.read_error()
+            except Exception:
+                pass
+
+            result["result_ptr"] = f"0x{tsmat_ptr:x}"
+            result["result_type_flag"] = hex(
+                ctypes.c_uint16.from_address(tsmat_ptr + 0x34).value)
+
+            data_buf = ctypes.c_uint64.from_address(tsmat_ptr).value
+            if not data_buf:
+                return result
+
+            # Check result type
+            rtype = ctypes.c_uint32.from_address(tsmat_ptr + 0x34).value & 0xFF
+            if rtype == 0:
+                # Numeric — read inline double
+                dval = ctypes.c_double.from_address(data_buf).value
+                result["type"] = "double"
+                result["value"] = dval
+                result["raw_hex"] = hex(ctypes.c_uint64.from_address(data_buf).value)
+            else:
+                # String — read GSO
+                str_ptr = ctypes.c_uint64.from_address(data_buf).value
+                if str_ptr:
+                    slen = ctypes.c_uint32.from_address(str_ptr).value
+                    if 0 < slen < 2048:
+                        raw = ctypes.string_at(ctypes.c_void_p(str_ptr + 4), slen)
+                        result["type"] = "string"
+                        result["value"] = raw.rstrip(b"\x00").decode("utf-8", errors="replace")
+                        result["gso_len"] = slen
+        finally:
+            self.engine.restore_sp(sp_before)
+
+        return result
+
+    def find_working_convention(self, name: str) -> dict:
+        """Auto-discover the calling convention for a dispatch function.
+
+        Tries all reasonable combinations of:
+        - Arg types: no-arg, string name, int, double, string name as var index
+        - Arg counts: 0, 1, 2
+        - Push approach: _push_str vs _push_double
+
+        Returns dict with entries for each tried convention and which works.
+        """
+        results: dict = {
+            "name": name,
+            "conventions": [],
+            "working": None,
+        }
+
+        addr = self.engine._resolve_name(name)
+        if addr is None:
+            results["error"] = f"symbol {name} not found"
+            return results
+
+        results["vaddr"] = f"0x{addr:x}"
+
+        # Build trial combinations based on function name heuristics
+        trials: list[list] = []  # list of (arg_list, note)
+
+        # Zero-arg
+        trials.append(([], "zero_arg"))
+
+        # One-arg: various types
+        is_var_fn = any(v in name for v in ["var", "data"])
+        is_scalar_fn = "scalar" in name
+        is_macro_fn = "macro" in name or "global" in name
+
+        if is_var_fn or not (is_scalar_fn or is_macro_fn):
+            # Variable-index functions: try string "1" (like call_double)
+            trials.append(([b"1"], "var_str_idx"))
+            trials.append(([1.0], "var_double_idx"))
+            trials.append(([b"make"], "var_str_name"))  # var name
+
+            # Two-arg: (obs, var)
+            trials.append(([1.0, 2.0], "obs_var_double"))
+            trials.append(([b"1", b"2"], "obs_var_str"))
+        elif is_scalar_fn:
+            trials.append(([b"mynum"], "scalar_name"))
+            trials.append(([b"scalar(mynum)"], "scalar_expr"))
+            trials.append(([1.0], "scalar_double"))
+        elif is_macro_fn:
+            trials.append(([b"mymacro"], "macro_name"))
+
+        # Try each trial
+        for args, note in trials:
+            trial: dict = {
+                "args": [repr(a) for a in args],
+                "note": note,
+                "result": None,
+            }
+            try:
+                uc = self.universal_call(name, *args)
+                trial["result"] = {
+                    "type": uc.get("type"),
+                    "value": uc.get("value"),
+                    "error_code": uc.get("error_code", 0),
+                    "result_ptr": uc.get("result_ptr"),
+                }
+                # Check if this is a working convention
+                if (uc.get("type") != "none"
+                    and uc.get("error_code", 999) == 0
+                    and uc.get("value") is not None):
+                    # Clean working — no error and non-None result
+                    trial["working"] = True
+                    if results["working"] is None:
+                        results["working"] = {
+                            "args": [repr(a) for a in args],
+                            "note": note,
+                            "type": uc["type"],
+                            "value": uc["value"],
+                        }
+            except Exception as e:
+                trial["error"] = str(e)
+                trial["working"] = False
+
+            results["conventions"].append(trial)
+
+        return results
+
 
 # ── Framework integration ────────────────────────────────────────────
 
