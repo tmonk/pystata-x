@@ -464,10 +464,23 @@ class Framework:
         - ``<output>/LATEST`` symlink to the most recent doc set
         - ``<output>/ARCHITECTURE.md`` (cross-version index)
 
-        Returns dict mapping filenames to paths written.
+        Parameters
+        ----------
+        output_dir : str
+            Base output directory (versioned subdirectory is created inside).
+
+        Returns
+        -------
+        dict[str, str]
+            Mapping of logical filenames to absolute paths written.
         """
         if not self._analyzed:
             raise RuntimeError("Call analyze_all() before generate_report()")
+
+        # Load previous knowledge for cross-run changelog
+        prev_knowledge = self._load_previous_knowledge(output_dir)
+        if prev_knowledge:
+            self._prev_report = self._knowledge_to_report(prev_knowledge)
 
         today_str = date.today().isoformat()
         version_dir = os.path.join(output_dir, today_str)
@@ -668,6 +681,67 @@ class Framework:
         for entry in to_remove:
             import shutil
             shutil.rmtree(os.path.join(output_dir, entry), ignore_errors=True)
+
+    def _load_previous_knowledge(self, output_dir: str
+                                 ) -> Optional[dict]:
+        """Load the most recent previous ``agent-knowledge.json`` from
+        a dated subdirectory of *output_dir*, for cross-run changelog.
+        Returns None if no previous knowledge is found."""
+        try:
+            entries = sorted([
+                e for e in os.listdir(output_dir)
+                if os.path.isdir(os.path.join(output_dir, e))
+                and e[0].isdigit()
+            ])
+        except OSError:
+            return None
+        current = date.today().isoformat()
+        # Find the most recent dir that is not today's
+        for entry in reversed(entries):
+            if entry == current:
+                continue
+            kb_path = os.path.join(output_dir, entry, "agent-knowledge.json")
+            if os.path.exists(kb_path):
+                try:
+                    with open(kb_path) as f:
+                        return json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    pass
+        return None
+
+    @staticmethod
+    def _knowledge_to_report(knowledge: dict) -> dict:
+        """Convert an ``agent-knowledge.json`` dict into a report-like
+        dict so that ``_compute_changelog()`` can compare it."""
+        fns = {}
+        for name, entry in knowledge.get("function_knowledge", {}).items():
+            fn = {
+                "name": name,
+                "vaddr": entry.get("vaddr"),
+                "dispatch_index": entry.get("dispatch_index"),
+                "protocol_type": entry.get("protocol_type"),
+                "unclassified": entry.get("unclassified", True),
+                "uses_push_stack": entry.get("uses_push_stack", False),
+                "entry_candidates": [
+                    {"vaddr": e["vaddr"], "type": e["type"],
+                     "push_count": e.get("push_count"),
+                     "offset": e.get("offset")}
+                    for e in entry.get("entry_points", [])
+                ],
+                "error_codes": [
+                    {"vaddr": e["vaddr"],
+                     "error_code": e.get("error_code"),
+                     "guard_context": e.get("context", [])}
+                    for e in entry.get("error_codes", [])
+                ],
+                "push_calls": [
+                    {"vaddr": p["vaddr"],
+                     "push_function": p.get("push_function")}
+                    for p in entry.get("push_calls", [])
+                ],
+            }
+            fns[name] = fn
+        return {"functions": fns}
 
     # ═════════════════════════════════════════════════════════════════
     #  Agent knowledge JSON
