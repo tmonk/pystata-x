@@ -64,6 +64,7 @@ class Framework:
                  plugin_dir: Optional[str] = None):
         self.binary_path = binary_path
         self._auto_cache = auto_cache
+        self._plugin_dir = plugin_dir
 
         # StataBinary (core analysis engine)
         self.binary: StataBinary
@@ -114,6 +115,118 @@ class Framework:
     def analyzed(self) -> bool:
         """Whether analysis has been run at least once."""
         return self._analyzed
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Plugin hot-reloading
+    # ═════════════════════════════════════════════════════════════════
+
+    def register_plugin(self, plugin: Plugin) -> None:
+        """Register a new plugin at runtime and run its ``on_analyze_start``
+        hook (if analysis has already been run).
+
+        The plugin is added to the internal list and dependency resolution
+        is re-run.
+        """
+        if plugin.name in {p.name for p in self._plugins}:
+            raise ValueError(f"Plugin {plugin.name!r} is already registered")
+        self._plugins.append(plugin)
+        try:
+            self._plugins = resolve_dependencies(self._plugins)
+        except ValueError as e:
+            # Rollback
+            self._plugins = [p for p in self._plugins if p.name != plugin.name]
+            raise ValueError(f"Cannot register {plugin.name!r}: {e}") from e
+        # If analysis has already run, fire the start hook
+        if self._analyzed:
+            try:
+                plugin.on_analyze_start(self)
+            except Exception as e:
+                self._log_plugin_error(plugin, "on_analyze_start", e)
+            # Re-run function hooks on existing report
+            for name, result in self._last_report.get("functions", {}).items():
+                try:
+                    plugin.on_analyze_function(self, name, result)
+                except Exception as e:
+                    self._log_plugin_error(plugin,
+                                           f"on_analyze_function({name})", e)
+            try:
+                plugin.on_analyze_end(self, self._last_report)
+            except Exception as e:
+                self._log_plugin_error(plugin, "on_analyze_end", e)
+
+    def unregister_plugin(self, name: str) -> None:
+        """Remove a plugin by name from the framework.
+
+        Does nothing if the plugin is not registered.  Re-runs dependency
+        resolution after removal.
+        """
+        self._plugins = [p for p in self._plugins if p.name != name]
+        try:
+            self._plugins = resolve_dependencies(self._plugins)
+        except ValueError:
+            # Even if resolution fails, the plugin is removed
+            pass
+
+    def reload_plugins(self) -> list[str]:
+        """Re-discover plugins from ``plugin_dir`` and hot-swap.
+
+        Keeps the binary and registry; re-runs all analysis hooks on the
+        existing report.  Returns list of plugin names that were updated.
+        """
+        updated: list[str] = []
+        if not hasattr(self, '_plugin_dir') or not self._plugin_dir:
+            return updated
+
+        # Discover new plugins from dir
+        discovered = discover_plugins(self._plugin_dir)
+        # Remove old discovered plugins (those not built-in or explicitly added)
+        self._plugins = [
+            p for p in self._plugins
+            if p.name in BUILTIN_PLUGINS
+            or hasattr(p, '_explicitly_added')
+        ]
+        # Add newly discovered
+        for plugin in discovered:
+            if plugin.name not in {p.name for p in self._plugins}:
+                self._plugins.append(plugin)
+                updated.append(plugin.name)
+
+        try:
+            self._plugins = resolve_dependencies(self._plugins)
+        except ValueError as e:
+            self._log_plugin_error(None, "reload_plugins", e)
+
+        # Re-run hooks if analysis already done
+        if self._analyzed and updated:
+            for plugin in self._plugins:
+                if plugin.name in updated:
+                    try:
+                        plugin.on_analyze_start(self)
+                    except Exception as e:
+                        self._log_plugin_error(plugin, "on_analyze_start", e)
+            for name, result in self._last_report.get("functions", {}).items():
+                for plugin in self._plugins:
+                    if plugin.name in updated:
+                        try:
+                            plugin.on_analyze_function(self, name, result)
+                        except Exception:
+                            pass
+            for plugin in self._plugins:
+                if plugin.name in updated:
+                    try:
+                        plugin.on_analyze_end(self, self._last_report)
+                    except Exception:
+                        pass
+
+        return updated
+
+    def set_plugin_dir(self, path: str) -> list[str]:
+        """Set the plugin directory and trigger a reload.
+
+        Returns list of newly loaded plugin names.
+        """
+        self._plugin_dir = path
+        return self.reload_plugins()
 
     # ═════════════════════════════════════════════════════════════════
     #  Analysis pipeline
