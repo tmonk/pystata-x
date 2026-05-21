@@ -729,17 +729,10 @@ def call_store_double(name: str, obs: int, var: int, val: float) -> int:
     _push_int(var)
     _push_double(val)
 
-    # x86_64: fix the value tsmat's type tag so the impl function's
-    # type checker passes.  The value tsmat is the top of stack.
-    if _PLATFORM in ("x86_64", "windows"):
-        sp = _save_sp()
-        val_tsmat = ctypes.c_uint64.from_address(sp).value
-        if val_tsmat:
-            val_dp = ctypes.c_uint64.from_address(val_tsmat).value
-            if val_dp and val_dp > 0x100:
-                ctypes.c_uint8.from_address(val_dp - 0x94).value = 0x2b
-            # varname-type checks read tsmat[0x36] flags byte
-            (ctypes.c_uint8 * 64).from_address(val_tsmat)[0x36] = 2
+    # x86_64: _patch_last_tsmat (called by _push_double) already sets
+    # the self-pointer at tsmat[-0x10] so the pool-header check passes.
+    # DO NOT patch data_ptr[-0x94] (data is embedded, not separate) or
+    # tsmat[0x36] (protocol flag check expects 0, not 2).
 
     fn = _get_fn(rt, None, ctypes.c_int)
     fn(3)

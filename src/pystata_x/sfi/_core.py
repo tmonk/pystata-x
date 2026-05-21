@@ -119,47 +119,69 @@ def _matrix_name(name: str) -> str:
 class Macro:
     @staticmethod
     def getGlobal(name: str) -> str:
-        """Get the value of a Stata global macro."""
+        """Get the value of a Stata global macro.
+
+        On x86_64, uses _bist_macroexpand (dispatch path).
+        """
         if _IS_X86_64:
-            return _x86_disp.get_macro(name)
+            import pystata_x.sfi._engine as _eng
+            r = _eng.call_string("_bist_macroexpand", b"$" + name.encode())
+            return r if r is not None else ""
         if _check_fast_path():
             return _fast_path.get_macro(name)
         return call_string("_bist_global", name.encode())
 
     @staticmethod
     def setGlobal(name: str, value: str) -> None:
-        """Set a Stata global macro."""
+        """Set a Stata global macro.
+
+        TODO(x86_64): _bist_putglobal is NOT in the x86_64 dispatch
+        table — it has no st_putglobal entry. Need to find the raw C
+        function address or use an alternative dispatch path.
+        """
         if _IS_X86_64:
-            _x86_disp.set_macro(name, value)
-        else:
-            call_int("_bist_putglobal", name.encode(), value.encode())
+            raise NotImplementedError(
+                "_bist_putglobal not in x86_64 dispatch table — "
+                "macro set not yet implemented via dispatch"
+            )
+        call_int("_bist_putglobal", name.encode(), value.encode())
 
     @staticmethod
     def delGlobal(name: str) -> None:
-        """Delete a Stata global macro by setting it to empty."""
+        """Delete a Stata global macro.
+
+        TODO(x86_64): Uses same _bist_putglobal path as setGlobal.
+        """
         if _IS_X86_64:
-            _x86_disp.del_macro(name)
-        else:
-            call_int("_bist_putglobal", name.encode(), b" ")
+            raise NotImplementedError(
+                "_bist_putglobal not in x86_64 dispatch table — "
+                "macro del not yet implemented via dispatch"
+            )
+        call_int("_bist_putglobal", name.encode(), b" ")
 
     @staticmethod
     def getLocal(name: str) -> str:
-        """Get the value of a Stata local macro."""
+        """Get the value of a Stata local macro.
+
+        On x86_64, uses _bist_macroexpand (dispatch path).
+        """
         if _IS_X86_64:
-            return _x86_disp.get_macro(name) or ""
+            import pystata_x.sfi._engine as _eng
+            r = _eng.call_string("_bist_macroexpand", b"`" + name.encode() + b"'")
+            return r if r is not None else ""
         return call_string("_bist_local", name.encode())
 
     @staticmethod
     def setLocal(name: str, value: str) -> None:
         """Set a Stata local macro.
 
-        Note: _bist_putglobal with additional "local" mode or _bist_local
-        write.  We use call_int or display exec directly.
+        TODO(x86_64): dispatch path needed.
         """
         if _IS_X86_64:
-            _x86_disp.set_macro(name, value)
-        else:
-            call_int("_bist_putglobal", name.encode(), value.encode())
+            raise NotImplementedError(
+                "Local macro set not yet implemented via dispatch on x86_64"
+            )
+        call_int("_bist_putglobal", name.encode(), value.encode())
 
 
 # ═══════════════════════════════════════════
@@ -274,11 +296,13 @@ class Data:
 
     @staticmethod
     def getDouble(varno: int, obs: int) -> float:
-        """Read a numeric value from a cell."""
+        """Read a numeric value from a cell.
+
+        On all platforms (including x86_64), uses the direct _bist_data
+        dispatch path with the standard push+stack protocol.
+        """
         if _check_fast_path():
             return _fast_path.get_double(obs + 1, varno + 1)
-        if _IS_X86_64:
-            return _x86_disp.read_double(varno, obs)
         return call_double("_bist_data", obs + 1, varno + 1)
 
     @staticmethod

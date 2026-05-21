@@ -44,6 +44,11 @@ def _mock_engine():
         p.start()
         patchers.append(p)
 
+    # Force _check_fast_path to False so unit tests exercise the mocked engine path
+    p_fast = patch.object(core_mod, "_check_fast_path", return_value=False)
+    p_fast.start()
+    patchers.append(p_fast)
+
     # Force _IS_X86_64 to False so unit tests use mocked call path
     p_is86 = patch.object(core_mod, "_IS_X86_64", False)
     p_is86.start()

@@ -606,5 +606,14 @@
       "notes": "",
       "xfail": false
     }
+  ],
+  "trace__bist_store,74,0,price,42.0,2": [
+    {
+      "timestamp": 1779355644.7797961,
+      "passed": false,
+      "value": null,
+      "notes": "args=(), steps=1",
+      "xfail": false
+    }
   ]
 }
