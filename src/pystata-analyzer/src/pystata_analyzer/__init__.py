@@ -33,6 +33,11 @@ from pystata_analyzer.plugin import (
     DocstringExtractor,
 )
 from pystata_analyzer.framework import Framework
+from pystata_analyzer.live_protocol import (
+    EngineConnection,
+    ProtocolAutoTester,
+    LiveProtocolValidatorPlugin,
+)
 
 __all__ = [
     "ELFReader",
@@ -52,4 +57,7 @@ __all__ = [
     "ManifestManager",
     "DocstringExtractor",
     "Framework",
+    "EngineConnection",
+    "ProtocolAutoTester",
+    "LiveProtocolValidatorPlugin",
 ]

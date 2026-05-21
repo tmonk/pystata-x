@@ -1,0 +1,841 @@
+"""Live protocol validation for Stata dispatch functions.
+
+Provides:
+- ``LiveProtocolChecker`` — validates dispatch calls against a real Stata
+  engine, dumping tsmat memory, checking error codes, and reporting results
+- Push function verification
+- Automatic calling convention discovery by trial
+"""
+
+from __future__ import annotations
+
+import ctypes
+import logging
+import sys
+from typing import Any, Optional, Callable
+
+log = logging.getLogger(__name__)
+
+# Known push function addresses (x86_64, verified from multiple binary versions)
+KNOWN_PUSH_ADDRS = {
+    "_pushdbl": 0x8B2351,
+    "_pushint": 0x8B23A6,
+    "_pushstr": 0x8B24A6,
+}
+
+
+class EngineConnection:
+    """Minimal connection to a running Stata engine for dispatch testing.
+
+    Wraps the engine push/stack/call primitives and provides diagnostic
+    access to tsmat memory, error codes, and stack state.
+
+    Usage::
+
+        ec = EngineConnection()
+        ec.initialize()
+        ec.execute("sysuse auto, clear")
+        result = ec.call_double("_bist_numscalar", b"mynum")
+        print(result)
+        ec.shutdown()
+    """
+
+    def __init__(self):
+        self._lib: Any = None
+        self._base: int = 0
+        self._initialized = False
+        self._engine = None
+        self._pushint: Optional[ctypes._CFuncPtr] = None
+        self._pushdbl: Optional[ctypes._CFuncPtr] = None
+        self._pushstr: Optional[ctypes._CFuncPtr] = None
+        self._STACK_PTR_OFFSET: int = 0
+        self._ERR_ADDR_RELATIVE: int = 0
+        self._syms: dict[str, int] = {}
+        self._manifest: dict = {}
+        self._push_fns_verified = False
+
+    # ── Lifecycle ────────────────────────────────────────────────
+
+    def initialize(self) -> dict:
+        """Initialise a Stata engine for dispatch testing.
+
+        Returns a dict with connection status and diagnostics.
+        Returns ``{"status": "ok", ...}`` on success, or
+        ``{"status": "error", "reason": ...}`` on failure.
+        """
+        result: dict = {"status": "pending", "steps": []}
+
+        try:
+            # Import and initialize the real engine
+            from pystata_x.sfi._engine import (
+                initialize as _eng_init,
+                _BASE, _LIB, _STACK_PTR_OFFSET,
+                _ERR_ADDR_RELATIVE, _SYMS, _MANIFEST,
+                execute as _eng_exec,
+            )
+            _eng_init()
+            self._base = _BASE
+            self._lib = _LIB
+            self._engine = _eng_exec
+            self._STACK_PTR_OFFSET = _STACK_PTR_OFFSET
+            self._ERR_ADDR_RELATIVE = _ERR_ADDR_RELATIVE
+            self._syms = dict(_SYMS)
+            self._manifest = dict(_MANIFEST)
+            result["steps"].append({"action": "engine_init", "status": "ok",
+                                    "base": f"0x{_BASE:x}"})
+        except Exception as e:
+            result["status"] = "error"
+            result["reason"] = f"Engine init failed: {e}"
+            return result
+
+        # Set up push functions
+        try:
+            from pystata_x.sfi._engine import (
+                _setup_push_fns, _pushint_fn, _pushdbl_fn, _pushstr_fn,
+            )
+            _setup_push_fns()
+            self._pushint = _pushint_fn
+            self._pushdbl = _pushdbl_fn
+            self._pushstr = _pushstr_fn
+
+            result["steps"].append({
+                "action": "setup_push_fns",
+                "status": "ok",
+                "pushint_fn": self._pushint is not None,
+                "pushdbl_fn": self._pushdbl is not None,
+                "pushstr_fn": self._pushstr is not None,
+            })
+        except Exception as e:
+            result["steps"].append({
+                "action": "setup_push_fns",
+                "status": "error",
+                "reason": str(e),
+            })
+
+        # Verify push function setup
+        push_status = self._verify_push_fns()
+        result["push_verification"] = push_status
+
+        # If push fns are None, try the known addresses directly
+        if self._pushstr is None:
+            self._try_known_push_addrs()
+            result["steps"].append({
+                "action": "known_addrs_fallback",
+                "pushint_fn": self._pushint is not None,
+                "pushdbl_fn": self._pushdbl is not None,
+                "pushstr_fn": self._pushstr is not None,
+            })
+
+        # Verify push functions work by calling _pushint(0)
+        if self._pushint is not None:
+            try:
+                self._pushint(0)
+                self._push_fns_verified = True
+                result["steps"].append({
+                    "action": "pushint_test",
+                    "status": "ok",
+                })
+            except Exception as e:
+                result["steps"].append({
+                    "action": "pushint_test",
+                    "status": "error",
+                    "reason": str(e),
+                })
+
+        # Load a dataset to have something to test with
+        try:
+            self.execute("sysuse auto, clear")
+            result["steps"].append({"action": "load_data", "status": "ok"})
+        except Exception as e:
+            result["steps"].append({
+                "action": "load_data",
+                "status": "error",
+                "reason": str(e),
+            })
+
+        result["syms_count"] = len(self._syms)
+        if self._initialized:
+            result["status"] = "ok"
+        else:
+            result["status"] = "partial" if self._pushstr else "no_push_fns"
+        return result
+
+    def _verify_push_fns(self) -> dict:
+        """Check whether push function addresses are in the manifest."""
+        result: dict = {"in_manifest": {}, "found": False}
+        for name in ["_pushint", "_pushdbl", "_pushstr"]:
+            addr = self._syms.get(name)
+            result["in_manifest"][name] = addr is not None
+            if addr:
+                result["found"] = True
+        return result
+
+    def _try_known_push_addrs(self) -> None:
+        """Fall back to known hardcoded push function addresses."""
+        if self._base == 0:
+            return
+        if self._pushint is None:
+            addr = self._base + KNOWN_PUSH_ADDRS["_pushint"]
+            try:
+                fn_type = ctypes.CFUNCTYPE(None, ctypes.c_int)
+                self._pushint = ctypes.cast(addr, fn_type)
+            except Exception:
+                pass
+        if self._pushdbl is None:
+            addr = self._base + KNOWN_PUSH_ADDRS["_pushdbl"]
+            try:
+                fn_type = ctypes.CFUNCTYPE(None, ctypes.c_int)
+                self._pushdbl = ctypes.cast(addr, fn_type)
+            except Exception:
+                pass
+        if self._pushstr is None:
+            addr = self._base + KNOWN_PUSH_ADDRS["_pushstr"]
+            try:
+                fn_type = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_size_t)
+                self._pushstr = ctypes.cast(addr, fn_type)
+            except Exception:
+                pass
+
+    def shutdown(self) -> None:
+        """Shutdown the Stata engine (if applicable)."""
+        try:
+            from pystata_x.sfi._engine import shutdown as _eng_shutdown
+            _eng_shutdown()
+        except Exception:
+            pass
+        self._initialized = False
+
+    # ── Push primitives ──────────────────────────────────────────
+
+    def push_int(self, val: int) -> None:
+        """Push an integer onto Stata's internal stack."""
+        if self._pushint is None:
+            raise RuntimeError("pushint not available")
+        self._pushint(val)
+        self._patch_last_tsmat()
+
+    def push_double(self, val: float) -> None:
+        """Push a double onto Stata's internal stack."""
+        if self._pushdbl is None:
+            raise RuntimeError("pushdbl not available")
+        buf = ctypes.c_double(val)
+        self._pushdbl(ctypes.addressof(buf))
+        self._patch_last_tsmat()
+
+    def push_str(self, s: bytes) -> None:
+        """Push a string onto Stata's internal stack."""
+        if self._pushstr is None:
+            raise RuntimeError("pushstr not available")
+        self._pushstr(s, len(s))
+        self._patch_last_tsmat()
+
+    def _patch_last_tsmat(self) -> None:
+        """Patch the last pushed tsmat's [-0x10] field for pool-header check."""
+        sp = self.save_sp()
+        if not sp:
+            return
+        tsmat_ptr = ctypes.c_uint64.from_address(sp).value
+        if tsmat_ptr and tsmat_ptr > 0x100000:
+            ctypes.c_uint64.from_address(tsmat_ptr - 0x10).value = tsmat_ptr
+
+    # ── Stack management ─────────────────────────────────────────
+
+    def save_sp(self) -> int:
+        """Read current stack pointer value."""
+        if not self._STACK_PTR_OFFSET or not self._base:
+            return 0
+        return ctypes.c_uint64.from_address(
+            self._base + self._STACK_PTR_OFFSET).value
+
+    def restore_sp(self, sp_val: int) -> None:
+        """Restore stack pointer to a previous value."""
+        if not self._STACK_PTR_OFFSET or not self._base:
+            return
+        ctypes.c_uint64.from_address(
+            self._base + self._STACK_PTR_OFFSET).value = sp_val
+
+    # ── Dispatch calls ───────────────────────────────────────────
+
+    def _resolve_name(self, name: str) -> Optional[int]:
+        """Resolve a dispatch function name to a relative address."""
+        if not name.startswith("_bist_") and not name.startswith("st_"):
+            name = f"_bist_{name}"
+        addr = self._syms.get(name)
+        if addr is not None:
+            return addr
+        # Try with leading underscore
+        addr = self._syms.get(f"_{name}")
+        if addr is not None:
+            return addr
+        # Try bare
+        addr = self._syms.get(name.lstrip("_"))
+        return addr
+
+    def _get_fn(self, addr: int, restype=None, *argtypes) -> ctypes._CFuncPtr:
+        """Create a ctypes callable for the given absolute address."""
+        fn_type = ctypes.CFUNCTYPE(restype, *argtypes)
+        return ctypes.cast(addr, fn_type)
+
+    def call_double(self, name: str, *args) -> Optional[float]:
+        """Call a dispatch function returning double."""
+        addr = self._resolve_name(name)
+        if addr is None:
+            return None
+        rt = self._base + addr
+        sp_before = self.save_sp()
+        self._push_args(args)
+        w0 = len(args) if args else 0
+        fn = self._get_fn(rt, None, ctypes.c_int)
+        fn(w0)
+        return self._pop_and_read_double(sp_before)
+
+    def call_string(self, name: str, *args) -> Optional[str]:
+        """Call a dispatch function returning string."""
+        addr = self._resolve_name(name)
+        if addr is None:
+            return None
+        rt = self._base + addr
+        sp_before = self.save_sp()
+        self._push_args(args)
+        w0 = len(args) if args else 0
+        fn = self._get_fn(rt, None, ctypes.c_int)
+        fn(w0)
+        return self._pop_and_read_string(sp_before)
+
+    def call_int(self, name: str, *args) -> Optional[int]:
+        """Call a dispatch function returning int."""
+        addr = self._resolve_name(name)
+        if addr is None:
+            return None
+        rt = self._base + addr
+        sp_before = self.save_sp()
+        self._push_args(args)
+        w0 = len(args) if args else 0
+        fn = self._get_fn(rt, None, ctypes.c_int)
+        fn(w0)
+        return self._pop_and_read_int(sp_before)
+
+    def call_void(self, name: str, *args) -> int:
+        """Call a dispatch function that returns void (store).
+
+        Reads error code after call and returns it.
+        """
+        addr = self._resolve_name(name)
+        if addr is None:
+            return -1
+        rt = self._base + addr
+        sp_before = self.save_sp()
+        self._push_args(args)
+        w0 = len(args) if args else 0
+        fn = self._get_fn(rt, None, ctypes.c_int)
+        fn(w0)
+        # For void functions, just restore stack and check error
+        self.restore_sp(sp_before)
+        return self.read_error()
+
+    def _push_args(self, args: tuple) -> None:
+        """Push a tuple of arguments onto Stata's internal stack."""
+        import struct
+        for arg in args:
+            if isinstance(arg, (int, float)):
+                self.push_double(float(arg))
+            elif isinstance(arg, (bytes, bytearray)):
+                self.push_str(bytes(arg))
+            else:
+                raise TypeError(f"Unsupported arg type: {type(arg).__name__}: {arg!r}")
+
+    def _pop_and_read_double(self, sp_before: int) -> Optional[float]:
+        """Read double result from stack and restore SP."""
+        sp = self.save_sp()
+        try:
+            tsmat = ctypes.c_uint64.from_address(sp).value
+            if not tsmat:
+                return None
+            data_buf = ctypes.c_uint64.from_address(tsmat).value
+            if not data_buf:
+                return None
+            return ctypes.c_double.from_address(data_buf).value
+        finally:
+            self.restore_sp(sp_before)
+
+    def _pop_and_read_string(self, sp_before: int) -> Optional[str]:
+        """Read string result from stack and restore SP."""
+        sp = self.save_sp()
+        try:
+            tsmat = ctypes.c_uint64.from_address(sp).value
+            if not tsmat:
+                return None
+            data_buf = ctypes.c_uint64.from_address(tsmat).value
+            if not data_buf:
+                return None
+            # String tsmats: first 4 bytes = length, then string data
+            length = ctypes.c_int32.from_address(data_buf).value
+            if length <= 0 or length > 65536:
+                return None
+            raw = ctypes.create_string_buffer(length + 1)
+            ctypes.memmove(raw, data_buf + 4, length)
+            return raw.value.decode("utf-8", errors="replace")
+        finally:
+            self.restore_sp(sp_before)
+
+    def _pop_and_read_int(self, sp_before: int) -> Optional[int]:
+        """Read int result from stack and restore SP."""
+        sp = self.save_sp()
+        try:
+            tsmat = ctypes.c_uint64.from_address(sp).value
+            if not tsmat:
+                return None
+            data_buf = ctypes.c_uint64.from_address(tsmat).value
+            if not data_buf:
+                return None
+            val = ctypes.c_double.from_address(data_buf).value
+            return int(val)
+        finally:
+            self.restore_sp(sp_before)
+
+    # ── Diagnostics ──────────────────────────────────────────────
+
+    def execute(self, cmd: str) -> tuple[str, int]:
+        """Execute a Stata command, return (output, rc)."""
+        if self._engine:
+            return self._engine(cmd)
+        if self._lib:
+            self._lib.StataSO_ClearOutputBuffer()
+            rc = self._lib.StataSO_Execute(
+                cmd.encode() if isinstance(cmd, str) else cmd)
+            buf = self._lib.StataSO_GetOutputBuffer()
+            output = ""
+            if buf:
+                raw = ctypes.c_char_p(buf).value
+                if raw:
+                    output = raw.decode("utf-8", errors="replace")
+            return output, rc
+        return "", -1
+
+    def read_error(self) -> int:
+        """Read Stata's internal error code."""
+        if not self._base or not self._ERR_ADDR_RELATIVE:
+            return 0
+        return ctypes.c_int32.from_address(
+            self._base + self._ERR_ADDR_RELATIVE).value
+
+    def dump_tsmat(self, label: str = "") -> dict:
+        """Dump the current top-of-stack tsmat's memory layout.
+
+        Returns a dict with tsmat struct fields, data buffer, and
+        pool-header check information.
+        """
+        result: dict = {
+            "label": label,
+            "tsmat_ptr": 0,
+            "data_buf": 0,
+            "tsmat_fields": {},
+            "data_bytes": b"",
+            "pool_header": {},
+            "self_ptr": {},
+        }
+
+        sp = self.save_sp()
+        if not sp:
+            return result
+
+        tsmat_ptr = ctypes.c_uint64.from_address(sp).value
+        result["sp"] = sp
+        result["tsmat_ptr"] = tsmat_ptr
+
+        if not tsmat_ptr or tsmat_ptr <= 0x100000:
+            return result
+
+        # Dump tsmat struct fields (first 80 bytes)
+        fields = {}
+        for i in range(0, 80, 8):
+            val = ctypes.c_uint64.from_address(tsmat_ptr + i).value
+            fields[f"[{i:#04x}]"] = f"0x{val:016x}"
+        result["tsmat_fields"] = fields
+
+        # Data buffer
+        data_buf = ctypes.c_uint64.from_address(tsmat_ptr).value
+        result["data_buf"] = data_buf
+        if data_buf and data_buf > 0x100000:
+            # Read first 64 bytes of data
+            raw = (ctypes.c_uint8 * 64).from_address(data_buf)
+            result["data_bytes"] = bytes(raw)
+
+            # Read as string (first 64 chars, replace non-printable)
+            try:
+                raw_str = (ctypes.c_char * 64).from_address(data_buf)
+                result["data_str"] = raw_str.value.decode("utf-8", errors="replace") if raw_str.value else ""
+            except Exception:
+                result["data_str"] = ""
+
+        # Pool header check
+        ph_tsmat = ctypes.c_uint32.from_address(tsmat_ptr - 0x94).value
+        ph_data = ctypes.c_uint32.from_address(data_buf - 0x94).value if data_buf and data_buf > 0x100000 else 0
+        result["pool_header"] = {
+            "tsmat[-0x94]": f"0x{ph_tsmat:08x}",
+            "data_buf[-0x94]": f"0x{ph_data:08x}",
+            "tsmat_pool_ok": ph_tsmat == 0x2b,
+            "data_pool_ok": ph_data == 0x2b,
+        }
+
+        # Self-pointer check
+        sp_val = ctypes.c_uint64.from_address(tsmat_ptr - 0x10).value
+        result["self_ptr"] = {
+            "tsmat[-0x10]": f"0x{sp_val:016x}",
+            "ok": sp_val == tsmat_ptr,
+        }
+
+        # Tsmat flags
+        result["flags"] = {
+            "arg_type": ctypes.c_uint8.from_address(tsmat_ptr + 0x36).value,
+            "return_type": ctypes.c_uint16.from_address(tsmat_ptr + 0x34).value,
+            "field_0x20": ctypes.c_uint64.from_address(tsmat_ptr + 0x20).value,
+            "field_0x28": ctypes.c_uint64.from_address(tsmat_ptr + 0x28).value,
+        }
+
+        return result
+
+    def diagnose_dispatch(self, name: str, *args,
+                          return_type: str = "double") -> dict:
+        """Diagnose a dispatch call: perform it and report all state.
+
+        Catches exceptions (including SIGSEGV, though that kills the
+        Python process).  Returns a dict with:
+        - ``name``: function name
+        - ``args``: the arguments passed
+        - ``return_value``: the value returned (or None on error)
+        - ``error_code``: Stata error code after call
+        - ``tsmat_before``: tsmat dump before call
+        - ``tsmat_after``: tsmat dump after call
+        - ``inferred_protocol``: what the calling convention looks like
+        - ``crashes``: whether the call caused a crash
+        """
+        result: dict = {
+            "name": name,
+            "args": [repr(a) for a in args],
+            "return_value": None,
+            "error_code": 0,
+            "tsmat_before": None,
+            "tsmat_after": None,
+            "inferred_protocol": {},
+            "crash": False,
+        }
+
+        # Get address
+        addr = self._resolve_name(name)
+        if addr is None:
+            result["error"] = f"symbol {name} not found in manifest"
+            return result
+        result["vaddr"] = f"0x{addr:x}"
+        result["abs_addr"] = f"0x{self._base + addr:x}"
+
+        # Dump tsmat before
+        result["tsmat_before"] = self.dump_tsmat(f"before {name}")
+
+        # Push args and dump again
+        sp_before = self.save_sp()
+        try:
+            for arg in args:
+                if isinstance(arg, (int, float)):
+                    self.push_double(float(arg))
+                elif isinstance(arg, (bytes, bytearray)):
+                    self.push_str(bytes(arg))
+        except Exception as e:
+            result["error"] = f"push failed: {e}"
+            result["tsmat_after"] = self.dump_tsmat(f"after push-fail {name}")
+            return result
+
+        result["tsmat_after_push"] = self.dump_tsmat(f"pushed args {name}")
+
+        # Call the function
+        w0 = len(args) if args else 0
+        rt = self._base + addr
+        fn = self._get_fn(rt, None, ctypes.c_int)
+
+        err_before = self.read_error()
+
+        # NOTE: This WILL crash Python if the function SIGSEGVs.
+        # There's no way to catch that from Python.
+        try:
+            fn(w0)
+            result["call_completed"] = True
+        except Exception as e:
+            result["call_completed"] = False
+            result["call_error"] = str(e)
+            self.restore_sp(sp_before)
+            return result
+
+        err_after = self.read_error()
+        result["error_before"] = err_before
+        result["error_code"] = err_after
+        result["error_set"] = err_before != err_after
+        result["error_message"] = self._error_to_str(err_after)
+
+        # Read return value
+        sp = self.save_sp()
+        result["tsmat_after"] = self.dump_tsmat(f"after {name}")
+        result["sp_before"] = sp_before
+        result["sp_after"] = sp
+
+        if return_type == "double":
+            try:
+                tsmat = ctypes.c_uint64.from_address(sp).value
+                if tsmat:
+                    data_buf = ctypes.c_uint64.from_address(tsmat).value
+                    if data_buf:
+                        result["return_value"] = ctypes.c_double.from_address(data_buf).value
+            except Exception:
+                pass
+        elif return_type == "string":
+            try:
+                tsmat = ctypes.c_uint64.from_address(sp).value
+                if tsmat:
+                    data_buf = ctypes.c_uint64.from_address(tsmat).value
+                    if data_buf:
+                        length = ctypes.c_int32.from_address(data_buf).value
+                        if 0 < length <= 65536:
+                            raw = ctypes.create_string_buffer(length + 1)
+                            ctypes.memmove(raw, data_buf + 4, length)
+                            result["return_value"] = raw.value.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        elif return_type == "int":
+            try:
+                tsmat = ctypes.c_uint64.from_address(sp).value
+                if tsmat:
+                    data_buf = ctypes.c_uint64.from_address(tsmat).value
+                    if data_buf:
+                        result["return_value"] = int(
+                            ctypes.c_double.from_address(data_buf).value)
+            except Exception:
+                pass
+
+        # Infer protocol from diagnostics
+        result["inferred_protocol"] = self._infer_protocol(name, result)
+
+        self.restore_sp(sp_before)
+        return result
+
+    def _infer_protocol(self, name: str, diag: dict) -> dict:
+        """Infer calling convention from diagnostic data."""
+        proto: dict = {
+            "name": name,
+            "arg_count": len(diag.get("args", [])),
+            "return_type": "unknown",
+            "protocol": "push+stack",
+            "pool_ok_during_call": False,
+        }
+
+        # Check tsmat pool header from the tsmat_after_push dump
+        tsmat_after = diag.get("tsmat_after_push", {})
+        pool_header = tsmat_after.get("pool_header", {})
+        if pool_header:
+            proto["pool_ok_during_call"] = pool_header.get("tsmat_pool_ok", False)
+
+        # Determine return type based on result
+        rv = diag.get("return_value")
+        if rv is not None:
+            if isinstance(rv, str):
+                proto["return_type"] = "string"
+            elif isinstance(rv, (int, float)):
+                if isinstance(rv, float) and rv == int(rv):
+                    proto["return_type"] = "int_or_double"
+                else:
+                    proto["return_type"] = "double"
+        else:
+            proto["return_type"] = "void"
+
+        # Check error
+        if diag.get("error_set") and diag.get("error_code", 0) != 0:
+            proto["error_set"] = True
+            proto["error_code"] = diag["error_code"]
+            proto["error_message"] = diag.get("error_message", "")
+
+        # Check if the tsmat self-pointer was patched
+        flags = tsmat_after.get("flags", {})
+        if flags:
+            proto["arg_type_flag"] = flags.get("arg_type")
+            proto["return_flag"] = flags.get("return_type")
+
+        return proto
+
+    @staticmethod
+    def _error_to_str(code: int) -> str:
+        """Return a human-readable error message for a Stata error code."""
+        errors = {
+            0: "success",
+            3102: "conformability error (pool-header check failed)",
+            3103: "wrong arg type (expected string arg, got numeric)",
+            3254: "wrong return type (expected string return, got double or vice versa)",
+            3204: "tsmat metadata mismatch",
+            3300: "conformability error (bad arg count or value)",
+        }
+        return errors.get(code, f"unknown error {code}")
+
+
+class ProtocolAutoTester:
+    """Automatically tests dispatch functions to determine their protocol.
+
+    Tries different argument combinations and call conventions to
+    discover what works.  Reports the winning convention.
+    """
+
+    def __init__(self, engine: EngineConnection):
+        self.engine = engine
+
+    def test_protocol(self, name: str) -> dict:
+        """Automatically determine the protocol for a dispatch function.
+
+        Tries arg counts 0-3, with string and double types, and reports
+        which combination succeeds.
+        """
+        results: dict = {
+            "name": name,
+            "attempts": [],
+            "winning_convention": None,
+        }
+
+        addr = self.engine._resolve_name(name)
+        if addr is None:
+            results["error"] = f"symbol {name} not found"
+            return results
+
+        results["vaddr"] = f"0x{addr:x}"
+
+        # Try different arg combinations
+        trials = [
+            # (args, return_type)
+            ([], "double"),
+            ([0], "double"),       # zero int
+            ([1], "double"),
+            ([b""], "string"),     # empty string
+            ([b"c(N)"], "double"), # c() system value
+            ([0.0], "double"),
+            ([b"__"], "string"),
+            ([b"mynum"], "double"),  # scalar name
+            ([0, 0], "double"),
+            ([0, 0, 0], "double"),
+        ]
+
+        for args, rtype in trials:
+            rs = self.engine.diagnose_dispatch(name, *args, return_type=rtype)
+            rs["attempt_args"] = [repr(a) for a in args]
+            rs["attempt_return_type"] = rtype
+            results["attempts"].append(rs)
+
+            # Check if it succeeded (no error, has return value, or call completed)
+            if rs.get("call_completed") and not rs.get("error_set"):
+                ec = rs.get("error_code", 0)
+                if ec == 0:
+                    rv = rs.get("return_value")
+                    if rv is not None and rv != 0.0:
+                        results["winning_convention"] = {
+                            "args": args,
+                            "return_type": rtype,
+                            "return_value": rv,
+                        }
+                        break
+                    elif rv is not None and rv == 0.0:
+                        # Could be valid (returning 0) or failure
+                        pass
+
+        return results
+
+
+# ── Framework integration ────────────────────────────────────────────
+
+class LiveProtocolValidatorPlugin:
+    """Plugin entry point for live protocol validation.
+
+    This is designed to be called from a Framework to add live-testing
+    data to analysis results.
+
+    Usage::
+
+        validator = LiveProtocolValidatorPlugin()
+        validator.validate_all(framework)
+    """
+
+    def __init__(self):
+        self.engine: Optional[EngineConnection] = None
+        self.initialized = False
+
+    def initialize(self) -> dict:
+        """Initialize the engine connection. Returns status dict."""
+        self.engine = EngineConnection()
+        status = self.engine.initialize()
+        self.initialized = status.get("status") in ("ok", "partial")
+        return status
+
+    def validate_all(self, framework: "Framework") -> dict:
+        """Run live protocol validation on all functions.
+
+        Requires a running Stata engine.  Returns a dict keyed by
+        function name with diagnostic results.
+        """
+        if not self.initialized:
+            init = self.initialize()
+            if not self.initialized:
+                return {"error": "engine init failed", "init_status": init}
+
+        results: dict = {}
+        report = framework._last_report or {}
+        functions = report.get("functions", {})
+
+        # Validate functions that are unclassified or have suspicious results
+        for name, fn_result in functions.items():
+            if fn_result.get("unclassified") or fn_result.get("protocol_validation", {}).get("valid") == False:
+                diag = self.engine.diagnose_dispatch(
+                    name,
+                    *self._guess_args(fn_result),
+                    return_type=self._guess_return_type(fn_result),
+                )
+                results[name] = diag
+
+                # If the diagnostic shows it works with a specific protocol,
+                # add that to the function result
+                if diag.get("call_completed") and not diag.get("error_set"):
+                    inferred = diag.get("inferred_protocol", {})
+                    if inferred:
+                        fn_result["live_protocol"] = inferred
+
+        return results
+
+    def validate_one(self, name: str, fn_result: dict) -> dict:
+        """Validate a single function live."""
+        if not self.initialized:
+            init = self.initialize()
+            if not self.initialized:
+                return {"error": "engine init failed", "init_status": init}
+
+        return self.engine.diagnose_dispatch(
+            name,
+            *self._guess_args(fn_result),
+            return_type=self._guess_return_type(fn_result),
+        )
+
+    def _guess_args(self, fn_result: dict) -> list:
+        """Guess arguments from function analysis."""
+        # Based on protocol_type, infer what args to pass
+        pt = fn_result.get("protocol_type", "")
+        if pt == "no_stack_args":
+            return []
+        if pt == "read_write":
+            # read_write functions typically expect (name_str, flag_int)
+            return [b"test", 1]
+        return [0]
+
+    def _guess_return_type(self, fn_result: dict) -> str:
+        """Guess return type from function analysis."""
+        pt = fn_result.get("protocol_type", "")
+        if pt == "string_return":
+            return "string"
+        push_calls = fn_result.get("push_calls", [])
+        if any(p.get("push_function") == "_pushstr" for p in push_calls):
+            return "string"
+        return "double"
+
+    def shutdown(self):
+        """Shutdown the engine."""
+        if self.engine:
+            self.engine.shutdown()

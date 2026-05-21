@@ -278,6 +278,113 @@ class DocstringExtractor(Plugin):
         return results
 
 
+class LiveProtocolValidator(Plugin):
+    """Validate dispatch function protocols against a live Stata engine.
+
+    Automatically connects to a running Stata engine (via pystata_x) and
+    tests each dispatch function to verify its calling convention, check
+    error codes, dump tsmat memory, and report actual return values.
+
+    Falls back silently if no Stata engine is available (no crash).
+    """
+    name = "live_protocol_validator"
+    version = "1.0.0"
+    description = "Tests dispatch function protocols against live Stata engine"
+    depends_on: list[str] = []
+
+    def __init__(self):
+        super().__init__()
+        self._validator: Any = None
+
+    def on_analyze_start(self, framework):
+        """Try to initialize the engine connection."""
+        try:
+            from pystata_analyzer.live_protocol import LiveProtocolValidatorPlugin
+            self._validator = LiveProtocolValidatorPlugin()
+            status = self._validator.initialize()
+            if status.get("status") in ("ok", "partial"):
+                print(f"[live] Stata engine connected ({status.get('syms_count', 0)} symbols)")
+            else:
+                print(f"[live] Engine init: {status.get('status')} — running in static mode")
+                self._validator = None
+        except Exception as e:
+            print(f"[live] Cannot connect to Stata engine: {e}")
+            self._validator = None
+
+    def on_analyze_function(self, framework, name, result):
+        """Validate each function that has protocol issues."""
+        if self._validator is None:
+            return
+        if not result.get("unclassified") and result.get("protocol_validation", {}).get("valid") != False:
+            return
+
+        try:
+            # Guess args from static analysis
+            args = self._guess_args(result)
+            rtype = self._guess_return_type(result)
+
+            diag = self._validator.engine.diagnose_dispatch(
+                name, *args, return_type=rtype)
+
+            if diag.get("call_completed") and not diag.get("error_set"):
+                inferred = diag.get("inferred_protocol", {})
+                if inferred:
+                    result["live_protocol"] = inferred
+                    # Also set the protocol_type based on live results
+                    if inferred.get("return_type") and result.get("protocol_type") == "unknown":
+                        result["protocol_type"] = inferred["protocol"]
+
+            # Always record the diagnostics
+            result["live_diagnostics"] = {
+                "vaddr": diag.get("vaddr"),
+                "call_completed": diag.get("call_completed"),
+                "error_code": diag.get("error_code"),
+                "error_set": diag.get("error_set"),
+                "return_value": diag.get("return_value"),
+                "pool_ok": diag.get("tsmat_after_push", {}).get("pool_header", {}).get("tsmat_pool_ok"),
+                "self_ptr_ok": diag.get("tsmat_after_push", {}).get("self_ptr", {}).get("ok"),
+            }
+        except Exception as e:
+            result["live_diagnostics"] = {"error": str(e)}
+
+    def on_analyze_end(self, framework, report):
+        """Generate a summary of live validation results."""
+        if self._validator is None:
+            return
+        live_summary = {"validated": 0, "failed": 0, "bypassed": 0}
+        for name, result in report.get("functions", {}).items():
+            ld = result.get("live_diagnostics", {})
+            if ld:
+                live_summary["validated"] += 1
+                if ld.get("error_set"):
+                    live_summary["failed"] += 1
+            else:
+                live_summary["bypassed"] += 1
+        report["live_validation_summary"] = live_summary
+
+    def _guess_args(self, result: dict) -> list:
+        """Guess arguments from function analysis."""
+        pt = result.get("protocol_type", "")
+        di = result.get("dispatch_index")
+        if di == 87:  # _bist_data/_bist_store combined
+            return [1, 1]  # var[1], obs[1] in 0-based
+        if pt == "no_stack_args" or di in (0, 1, 2):
+            return []
+        if pt == "string_return" or "string" in pt:
+            return [b"test", 1]
+        return [b"test", 1]
+
+    def _guess_return_type(self, result: dict) -> str:
+        """Guess return type from function analysis."""
+        pt = result.get("protocol_type", "")
+        if pt == "string_return" or pt == "read_write" and result.get("push_calls", []):
+            return "string"
+        push_types = {p.get("push_function") for p in result.get("push_calls", [])}
+        if "_pushstr" in push_types:
+            return "string"
+        return "double"
+
+
 # ═════════════════════════════════════════════════════════════════════
 #  Plugin loader
 # ═════════════════════════════════════════════════════════════════════
@@ -289,6 +396,7 @@ BUILTIN_PLUGINS: dict[str, type[Plugin]] = {
     "pool_header_scanner": PoolHeaderScanner,
     "manifest_manager": ManifestManager,
     "docstring_extractor": DocstringExtractor,
+    "live_protocol_validator": LiveProtocolValidator,
 }
 
 
