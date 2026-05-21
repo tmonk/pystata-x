@@ -120,22 +120,25 @@ def _get_executable_path() -> str:
     return sys.executable
 
 
+def _is_arm_arch() -> bool:
+    """Return True when running on an ARM-family machine."""
+    machine = platform.machine().lower()
+    return machine.startswith("arm") or machine.startswith("aarch64")
+
+
 def _init_stata(splash: bool) -> int:
     """Call StataSO_Main to bootstrap the Stata engine.
 
-    This is a direct ctypes binding to Stata's C API.  The argument layout
-    mirrors what the native Stata binary expects on its command line:
-    argv[0] is the program name (empty string = null placeholder), followed
-    by flags ``-q`` (quiet startup) and ``-pyexec <path>`` (Python executable
-    for Stata's embedded Python).
+    Uses NO ``-pyexec`` flag — we access Stata data through direct
+    ``_bist_*`` C function calls, not through Stata's embedded Python.
     """
     stlib.StataSO_Main.restype = c_int
     stlib.StataSO_Main.argtypes = (c_int, POINTER(c_char_p))
 
-    pyexec = _get_executable_path()
-    args = ["", "-q", "-pyexec", pyexec]
     if splash:
-        args = ["-pyexec", pyexec]
+        args = [""]
+    else:
+        args = ["", "-q"]
 
     c_argv = (c_char_p * len(args))()
     for i, a in enumerate(args):
@@ -171,10 +174,15 @@ def init(
         Enable streaming output (legacy behaviour).  Off by default;
         direct buffer drain after execution is much faster.
     """
-    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash
+    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash, stversion
 
     if stinitialized:
         return
+
+    if not _is_arm_arch():
+        raise NotImplementedError(
+            "This upstream merge path supports only the ARM native runtime."
+        )
 
     if st_path is None:
         st_path = _get_st_home()
