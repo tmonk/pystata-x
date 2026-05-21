@@ -522,14 +522,10 @@ def initialize():
     # On x86_64, the generic impl always reads 3 tsmats from [sp-16],[sp-8],[sp],
     # so a single warm-up entry would leave uninitialized reads and crash.
     if _pushint_fn is not None:
-        # Warm up: push and restore to initialize tsmat pool allocators
-        # (first call to tsmat_alloc/pool_alloc returns NULL on all platforms)
-        sp = _save_sp()
+        # Warm up: push WITHOUT restoring SP to initialize the tsmat pool
+        # allocator (first call to tsmat_alloc/pool_alloc returns NULL).
+        # The warm-up entry stays on STATA's stack permanently.
         _pushint_fn(0)
-        _restore_sp(sp)
-        # On ARM64 only: also leave one warm entry so 0-arg functions work
-        if _PLATFORM == "arm64":
-            _pushint_fn(0)
 
     _INITIALIZED = True
 
