@@ -1354,20 +1354,33 @@ class CrashSafeProtocolTester:
                             return_type: str = "auto") -> str:
         """Generate a Python script that imports the framework and calls fn."""
         import json
-        args_json = json.dumps([
-            [a.hex() if isinstance(a, bytes) else a for a in args]
-        ])
+        import json
+        # Encode args: bytes -> hex string, others -> repr
+        args_encoded = []
+        for a in args:
+            if isinstance(a, bytes):
+                args_encoded.append({"__bytes__": a.hex()})
+            elif isinstance(a, float):
+                args_encoded.append(a)
+            elif isinstance(a, int):
+                args_encoded.append(a)
+            else:
+                args_encoded.append(repr(a))
+
         lib_path = self._stata_lib_path or "/usr/local/stata19/libstata-se.so"
+        args_json = json.dumps(args_encoded)
+        fn_json = json.dumps(fn_name)
+
         script = f'''
 import sys, json, ctypes
 sys.path.insert(0, "/pystata-x/src")
 
 # Recover args from JSON
-args_raw = json.loads(''' + json.dumps(args_json) + ''')
+args_encoded = json.loads(''' + args_json + ''')
 args = []
-for a in args_raw[0]:
-    if isinstance(a, str):
-        args.append(bytes.fromhex(a))
+for a in args_encoded:
+    if isinstance(a, dict) and "__bytes__" in a:
+        args.append(bytes.fromhex(a["__bytes__"]))
     else:
         args.append(a)
 
@@ -1380,15 +1393,15 @@ try:
     ec.execute("global mymacro HelloWorld")
     
     tester = ProtocolAutoTester(ec)
-    result = tester.universal_call("''' + fn_name + '''", *args)
-    # Add process info
+    result = tester.universal_call(''' + fn_json + ''', *args)
     result["_status"] = "ok"
-    # Convert non-serializable
+    # Ensure value is serializable
     if isinstance(result.get("value"), bytes):
         result["value"] = result["value"].decode(errors="replace")
     print(json.dumps(result))
 except Exception as e:
-    print(json.dumps({{"_status": "exception", "_error": str(e)}}))
+    import traceback
+    print(json.dumps({{"_status": "exception", "_error": str(e), "_traceback": traceback.format_exc()}}))
 '''
         return script
 
@@ -1447,7 +1460,6 @@ except Exception as e:
                 if line.startswith("{"):
                     try:
                         data = json.loads(line)
-                        data["_pid"] = result.pid
                         return data
                     except json.JSONDecodeError:
                         pass
