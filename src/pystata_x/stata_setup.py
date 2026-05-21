@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any
 
 
 def config(path: str, edition: str, splash: bool = True) -> None:

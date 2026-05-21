@@ -2,6 +2,84 @@
 
 <!-- version list -->
 
+## v0.1.3 (2026-05-19)
+
+### Continuous Integration
+
+- **release**: Remove redundant PyPI publish workflow dispatch
+  ([`70f55e3`](https://github.com/tmonk/pystata-x/commit/70f55e35fd07f6544abf423b5b71dc9d8b4a0e27))
+
+### Performance Improvements
+
+- **init**: Defer engine bootstrap to reduce config latency
+  ([`2f0781a`](https://github.com/tmonk/pystata-x/commit/2f0781a3609716a089c00ef9d13c2834e941c388))
+
+- **init**: Inline engine bootstrap for fast first execute
+  ([`bcd7b4a`](https://github.com/tmonk/pystata-x/commit/bcd7b4a14a8ee04c4112c56de80fee05cc524dbd))
+
+### Testing
+
+- **perf**: Add cold-start initialization benchmark
+  ([`035c99b`](https://github.com/tmonk/pystata-x/commit/035c99bcdde402702f417fedc653acbeb08ee346))
+
+
+## perf/init-10x (unreleased — exploration branch)
+
+### Performance
+
+- **Init time reduced from ~126 ms to ~108 ms (15% improvement)**
+  via aggressive import trimming. The Stata engine bootstrap
+  (``StataSO_Main``, ~78 ms) still runs during ``config()`` so
+  that the first ``execute()`` / ``run()`` call has no additional
+  startup latency (~7 ms for a basic command).
+
+- **Lazy ``importlib.metadata``**: The ``pystata_x.__version__``
+  string is now resolved on first access via ``__getattr__``,
+  avoiding the ~30 ms cost of importing ``importlib.metadata``
+  at module load time.
+
+- **Lazy ``pathlib`` / ``platform`` / ``tempfile`` / ``typing``**:
+  These modules are now imported only in the functions that need
+  them, saving ~12 ms of module-level import time.
+
+- **Cold-start benchmark**: New ``benchmarks/bench_cold_init.py``
+  measures total subprocess wall time and per-phase breakdown.
+
+### Reverse-engineering findings
+
+- **Native ``stata-se -q``** starts in ~30 ms (warm) / ~132 ms (cold
+  subprocess).  Our previous in-process ``StataSO_Main`` call took
+  ~81 ms, suggesting the Stata C engine bootstrap is inherently
+  ~75–85 ms regardless of whether called from the native binary or
+  from Python via ctypes.
+
+- **argv experimentation**: ``StataSO_Main`` accepts ``-q`` (quiet),
+  ``-pyexec <path>`` (embedded Python path), and a leading empty
+  argv[0].  The combination ``["", "-q", "-pyexec", ...]`` suppresses
+  the splash/license output (vs ``["-q", "-pyexec", ...]`` which
+  produces 829 bytes of output).  No other flag combination tested
+  (``-b``, ``-s``, ``-k``) worked with the shared-library API.
+
+- **Environment variables**: ``TMPDIR=/tmp`` and ``STATA_NOLOGO=1``
+  showed small (~2–5 ms) improvements but within noise (SD ~12 ms).
+  No env var reliably reduces StataSO_Main below ~70 ms.
+
+- **ctypes dlopen flags**: ``RTLD_NOW`` crashes on macOS (not
+  supported for dylibs). ``RTLD_GLOBAL`` made no measurable
+  difference.  The default ``cdll.LoadLibrary`` (``RTLD_LAZY``) is
+  optimal.
+
+- **Library loading overhead**: ``cdll.LoadLibrary`` takes ~9.5 ms,
+  measured separately from ``StataSO_Main``.  This is macOS dyld
+  resolving and loading ``libstata-se.dylib`` and its dependencies
+  (BLAS, LAPACK, Arrow, Parquet, gfortran, etc.).
+
+**Implication**: The remaining init time is dominated by
+StataCorp's C-level engine bootstrap which we cannot modify.
+The most effective optimization was deferring the bootstrap to
+first command execution rather than performing it during
+``config()``.
+
 ## v0.1.2 (2026-05-16)
 
 ### Bug Fixes
