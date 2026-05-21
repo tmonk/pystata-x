@@ -258,47 +258,45 @@ docker create --name pystata-x-persist \
 docker start pystata-x-persist
 sleep 2  # wait for entrypoint to reinstall packages
 
-# Run unit tests (no Stata needed)
-docker exec pystata-x-persist ./entrypoint.sh test
-# → runs /pystata-x/tests/unit/
-
-# Run e2e tests (requires Stata)
-docker exec pystata-x-persist ./entrypoint.sh e2e
-# → runs /pystata-x/tests/e2e/ -m requires_stata
-
-# Run ALL tests
-docker exec pystata-x-persist ./entrypoint.sh all
-
-# Get an interactive shell
-docker exec -it pystata-x-persist ./entrypoint.sh shell
-```
-
-### Avoiding stale caches
-
-The entrypoint sets `PYTHONDONTWRITEBYTECODE=1` and reinstalls the
-mounted source as editable on every start.  If you still see stale
-behaviour, just `docker restart pystata-x-persist` before testing.
-
-### After a SIGSEGV
-
-A Stata crash stops the container.  The fix is always:
+### Quick test commands
 
 ```bash
-docker start pystata-x-persist
-# wait 2s, then test
+# Unit tests (115 tests, no Stata needed)
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh unit
+
+# pystata-analyzer tests (10 unit + 13 integration)
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh framework
+
+# E2e tests (71 tests, requires Stata)
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh e2e
+
+# Everything
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh all
 ```
 
-You can also use `docker exec` for quick one-shot commands that don't
-need the daemon:
+### Using the analyzer framework
 
 ```bash
-docker start pystata-x-persist 2>/dev/null; sleep 2
-docker exec pystata-x-persist ./entrypoint.sh test
-```
-This is safe to run repeatedly — `docker start` is a no-op if the
-container is already running.
+# Full protocol report for any dispatch function
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh analyze _bist_data
 
-### One-shot container (no persistence)
+# Catalog all 118+ dispatch functions
+docker exec pystata-x-persist /pystata-x/docker-entrypoint.sh catalog
+```
+
+### Interactive shell
+
+```bash
+docker exec -it pystata-x-persist /pystata-x/docker-entrypoint.sh shell
+
+# Inside the container:
+python -c "
+from pystata_analyzer import StataBinary
+b = StataBinary('/usr/local/stata19/libstata-se.so')
+b.analyze()
+print(b.report())
+"
+```
 
 If you don't want a persistent container:
 
