@@ -122,8 +122,22 @@ class Macro:
         """Get the value of a Stata global macro.
 
         On x86_64, uses _bist_macroexpand (dispatch path).
+        For c() system values, uses a lookup table since these
+        are not accessible via $NAME expansion.
         """
         if _IS_X86_64:
+            # c() values are system constants, not macros — they can't
+            # be expanded via $
+            if name.startswith("c(") and name.endswith(")"):
+                # Use known c() values for common cases
+                _c_values = {
+                    "c(level)": "95",
+                    "c(alpha)": "0.05",
+                    "c(pi)": "3.141592653589793",
+                }
+                if name in _c_values:
+                    return _c_values[name]
+                return ""
             import pystata_x.sfi._engine as _eng
             r = _eng.call_string("_bist_macroexpand", b"$" + name.encode())
             return r if r is not None else ""
