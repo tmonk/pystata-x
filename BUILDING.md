@@ -234,3 +234,99 @@ GitHub Actions CI builds and tests on:
 - Windows 2022 (x86_64) — compile-check only (no Stata on CI)
 
 See `.github/workflows/build-test.yml` for details.
+
+
+## Docker development workflow (x86_64 Linux)
+
+The project supports Linux x86_64 testing via Docker Desktop with Rosetta 2.
+Stata Linux files are mounted from the host at container runtime.
+
+### Quick reference
+
+```bash
+# Build the image (one-time)
+docker build -f Dockerfile.amd64 -t pystata-x-linux .
+
+# Create the persistent container
+docker create --name pystata-x-persist \
+  -v "$(pwd):/pystata-x" \
+  -v "$(pwd)/stata19-linux:/usr/local/stata19" \
+  pystata-x-linux \
+  /pystata-x/docker-entrypoint.sh
+
+# Start the container (always do this before testing)
+docker start pystata-x-persist
+sleep 2  # wait for entrypoint to reinstall packages
+
+# Run unit tests (no Stata needed)
+docker exec pystata-x-persist ./entrypoint.sh test
+# → runs /pystata-x/tests/unit/
+
+# Run e2e tests (requires Stata)
+docker exec pystata-x-persist ./entrypoint.sh e2e
+# → runs /pystata-x/tests/e2e/ -m requires_stata
+
+# Run ALL tests
+docker exec pystata-x-persist ./entrypoint.sh all
+
+# Get an interactive shell
+docker exec -it pystata-x-persist ./entrypoint.sh shell
+```
+
+### Avoiding stale caches
+
+The entrypoint sets `PYTHONDONTWRITEBYTECODE=1` and reinstalls the
+mounted source as editable on every start.  If you still see stale
+behaviour, just `docker restart pystata-x-persist` before testing.
+
+### After a SIGSEGV
+
+A Stata crash stops the container.  The fix is always:
+
+```bash
+docker start pystata-x-persist
+# wait 2s, then test
+```
+
+You can also use `docker exec` for quick one-shot commands that don't
+need the daemon:
+
+```bash
+docker start pystata-x-persist 2>/dev/null; sleep 2
+docker exec pystata-x-persist ./entrypoint.sh test
+```
+This is safe to run repeatedly — `docker start` is a no-op if the
+container is already running.
+
+### One-shot container (no persistence)
+
+If you don't want a persistent container:
+
+```bash
+docker run --rm --platform=linux/amd64 \
+  -v "$(pwd):/pystata-x" \
+  -v "$(pwd)/stata19-linux:/usr/local/stata19" \
+  pystata-x-linux \
+  /pystata-x/docker-entrypoint.sh test
+```
+
+### Debugging a crash
+
+```bash
+docker exec -it pystata-x-persist ./entrypoint.sh shell
+# Inside container:
+python -c "import pystata_x.sfi._engine as e; e.initialize(); ..."
+```
+
+### Rebuilding the image
+
+```bash
+git add -A && git commit -m "sync"
+docker build -f Dockerfile.amd64 -t pystata-x-linux .
+docker rm pystata-x-persist 2>/dev/null
+docker create --name pystata-x-persist \
+  -v "$(pwd):/pystata-x" \
+  -v "$(pwd)/stata19-linux:/usr/local/stata19" \
+  pystata-x-linux \
+  /pystata-x/docker-entrypoint.sh
+```
