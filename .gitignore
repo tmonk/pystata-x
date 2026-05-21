@@ -23,3 +23,16 @@ vendor/
 nul
 NUL
 Nul
+/stata19-linux
+/docs
+/benchmarks/history
+/manifests
+/src/pystata_x/sfi/manifests
+/src/stata-fast/.DS_Store
+/src/stata-fast/build/
+/src/stata-fast/build2/
+/src/stata-fast/*.dylib
+/src/stata-fast/*.so
+/src/stata-fast/*.o
+/src/stata-fast/compile_check
+/src/stata-fast/test_stata_fast
