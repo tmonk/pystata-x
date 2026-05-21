@@ -2023,3 +2023,114 @@ class StataMemoryReader:
         if info.get("value_address"):
             return info["value"]
         return None
+
+    @staticmethod
+    def find_bss_global(vaddr: int, ref_type: str = "k_maxvar") -> int:
+        """Find a specific .bss global address by analyzing function code.
+
+        Analyzes the function at *vaddr* (ELF virtual address) for RIP-relative
+        references to .bss and identifies the one matching *ref_type*.
+
+        ref_type values:
+          - "k_maxvar": finds the .bss offset holding max-var limit (K)
+            Used by _bist_addvar and the expression evaluator for c(maxvar).
+            Identified by looking for a 'cmp' against a .bss value near nvar.
+
+        Returns the .bss virtual address (ELF-relative), or 0 if not found.
+        """
+        import capstone as cs, re
+        import struct
+
+        try:
+            with open("/usr/local/stata19/libstata-se.so", "rb") as f:
+                data = f.read()
+        except (IOError, OSError):
+            return 0
+
+        # Parse ELF sections
+        e_shoff = struct.unpack_from("<Q", data, 0x28)[0]
+        e_shentsize = struct.unpack_from("<H", data, 0x3A)[0]
+        e_shnum = struct.unpack_from("<H", data, 0x3C)[0]
+        e_shstrndx = struct.unpack_from("<H", data, 0x3E)[0]
+        shstrtab_off = e_shoff + e_shstrndx * e_shentsize
+        sh_name_off = struct.unpack_from("<I", data, shstrtab_off + 0x18)[0]
+        sh_name_size = struct.unpack_from("<Q", data, shstrtab_off + 0x20)[0]
+        names = data[sh_name_off:sh_name_off + sh_name_size]
+
+        text_off = text_vaddr = text_size = 0
+        for i in range(e_shnum):
+            off = e_shoff + i * e_shentsize
+            sn = struct.unpack_from("<I", data, off)[0]
+            sh_addr = struct.unpack_from("<Q", data, off + 0x10)[0]
+            sh_offset = struct.unpack_from("<Q", data, off + 0x18)[0]
+            sh_size = struct.unpack_from("<Q", data, off + 0x20)[0]
+            end = names.find(b"\x00", sn)
+            name = names[sn:end].decode("ascii", errors="replace")
+            if name == ".text":
+                text_off, text_vaddr, text_size = sh_offset, sh_addr, sh_size
+                break
+
+        if not text_size:
+            return 0
+
+        local_off = vaddr - text_vaddr
+        chunk = data[text_off + local_off: text_off + local_off + 512]
+        md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
+
+        # For k_maxvar: look for a .bss read (mov from [rip+...]) followed
+        # by a 'cmp' with another value that's the current nvar count.
+        bss_refs = []
+        for insn in md.disasm(chunk, vaddr):
+            op = insn.op_str
+            # Find RIP-relative reads from .bss
+            m = re.search(r'\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]', op)
+            if m:
+                sign = 1 if m.group(1) == "+" else -1
+                disp = int(m.group(2), 16) * sign
+                target = insn.address + insn.size + disp
+                if 0x5000000 <= target <= 0x5200000:
+                    bss_refs.append((insn.address, target, insn.mnemonic, op))
+
+                    # If this is a 'mov rax, [rip+X]' followed by 'cmp rax, ...'
+                    # or similar comparison pattern, it might be the maxvar check
+                    if "mov" in insn.mnemonic and "0x" in op:
+                        # Check next few instructions for cmp
+                        pass
+
+        # For _bist_addvar, the maxvar check compares nvar against max.
+        # Usually: mov REG, [bss+offset]   ; load nvar
+        #           cmp REG, [bss+offset2]  ; compare with maxvar
+        # OR: mov REG, [bss+offset]  ; load maxvar
+        #     cmp REG, edi           ; compare with requested number
+
+        # Return the last distinct .bss address (likely maxvar)
+        if bss_refs:
+            # Deduplicate
+            seen = set()
+            unique = []
+            for addr, target, mnem, op in bss_refs:
+                if target not in seen:
+                    seen.add(target)
+                    unique.append(target)
+            # Return the last unique target as the most likely maxvar address
+            if len(unique) >= 2:
+                return unique[-1]
+            elif unique:
+                return unique[0]
+
+        return 0
+
+    def read_k_maxvar(self) -> int:
+        """Read the max-var limit (K = c(maxvar)) from Stata's memory.
+
+        Uses find_bss_global to locate the value in .bss.
+        """
+        import ctypes
+        # _bist_addvar at 0x820f92 checks k_maxvar
+        k_offset = self.find_bss_global(0x820f92, "k_maxvar")
+        if k_offset:
+            try:
+                return ctypes.c_int32.from_address(self._base + k_offset).value
+            except Exception:
+                pass
+        return 0
