@@ -985,7 +985,34 @@ class StataBinary:
         has_edi = len(edi_checks) > 0
         calls_ps = len(pushstr_calls) > 0
 
-        if not uses_stack:
+        # Detect tsmat[0x36] arg-type protocol and numeric-arg stub
+        has_tsmat36_check = False
+        has_numeric_stub = False
+        numeric_stub_error = None
+        for insn in insns[:40]:
+            op = f"{insn.mnemonic} {insn.op_str}"
+            # Check for movzx edx, byte ptr [rax + 0x36] pattern
+            if insn.mnemonic == "movzx" and "0x36" in insn.op_str:
+                has_tsmat36_check = True
+            # Check for numeric-arg stub: error 0xC20 set then immediate ret
+            if insn.mnemonic == "mov" and "0xc20" in insn.op_str.lower():
+                has_numeric_stub = True
+                numeric_stub_error = 0xC20
+            # Check for error 0xC1E (arg type != 0)
+            if insn.mnemonic == "mov" and "0xc1e" in insn.op_str.lower():
+                numeric_stub_error = 0xC1E
+
+        if has_tsmat36_check:
+            result["tsmat36_protocol"] = True
+            if has_numeric_stub:
+                result["numeric_arg_stub"] = True
+                result["numeric_stub_error"] = hex(numeric_stub_error) if numeric_stub_error else "0xc20"
+                result["note"] = ("String-arg protocol: tsmat[0x36] != 0 required. "
+                                  "Numeric args (tsmat[0x36]==0) hit error stub. "
+                                  "Use _push_str not _push_double._push_int.")
+            else:
+                result["note"] = "String-arg protocol: tsmat[0x36] != 0 required"
+        elif not uses_stack:
             result["protocol_type"] = "no_stack_args"
             result["note"] = "No ARG_PTR read — uses internal global"
         elif has_edi and has_multi:

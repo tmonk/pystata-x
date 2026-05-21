@@ -368,9 +368,43 @@ def _push_str(s: bytes) -> None:
     _patch_last_tsmat()
 
 
+def _read_gso_string(sp_before: int) -> Optional[str]:
+    """Read a string GSO from the current stack, then restore SP.
+
+    Shared helper used by _pop_and_read_double and _pop_and_read_string.
+    Returns the string content, or None if no valid GSO is present.
+    """
+    sp = _save_sp()
+    try:
+        tsmat = ctypes.c_uint64.from_address(sp).value
+        if not tsmat:
+            return None
+        result_type = ctypes.c_uint32.from_address(tsmat + 0x34).value & 0xFF
+        if result_type == 0:
+            return None  # numeric result, not string
+        data_buf = ctypes.c_uint64.from_address(tsmat).value
+        if not data_buf:
+            return None
+        str_ptr = ctypes.c_uint64.from_address(data_buf).value
+        if not str_ptr:
+            return None
+        slen = ctypes.c_uint32.from_address(str_ptr).value
+        if slen == 0:
+            return ""
+        raw = ctypes.string_at(ctypes.c_void_p(str_ptr + 4), min(slen, 2048))
+        return raw.rstrip(b"\x00").decode("utf-8", errors="replace")
+    finally:
+        _restore_sp(sp_before)
+
+
 def _pop_and_read_double(sp_before: int) -> Optional[float]:
     """After a _bist_* call, read the double result from
-    Stata's internal stack and restore SP."""
+    Stata's internal stack and restore SP.
+
+    On x86_64, some dispatch functions return GSO string results
+    even for numeric-return functions (the converter pushes result
+    via _pushstr).  We detect this and parse the GSO content as float.
+    """
     sp = _save_sp()
     try:
         tsmat = ctypes.c_uint64.from_address(sp).value
@@ -379,6 +413,23 @@ def _pop_and_read_double(sp_before: int) -> Optional[float]:
         data_buf = ctypes.c_uint64.from_address(tsmat).value
         if not data_buf:
             return None
+
+        # Check if result is a string GSO — parse as float
+        result_type = ctypes.c_uint32.from_address(tsmat + 0x34).value & 0xFF
+        if result_type != 0:
+            str_ptr = ctypes.c_uint64.from_address(data_buf).value
+            if str_ptr:
+                slen = ctypes.c_uint32.from_address(str_ptr).value
+                if 0 < slen < 100:
+                    raw = ctypes.string_at(
+                        ctypes.c_void_p(str_ptr + 4), slen
+                    ).rstrip(b"\x00")
+                    try:
+                        return float(raw.decode("utf-8", errors="replace"))
+                    except (ValueError, UnicodeDecodeError):
+                        pass
+
+        # Default: read inline double
         return ctypes.c_double.from_address(data_buf).value
     finally:
         _restore_sp(sp_before)
@@ -418,31 +469,11 @@ def _pop_and_read_string(sp_before: int) -> Optional[str]:
     (TYPE=0) even for string reads.  In that case data_buf[-0x94]
     won't have the 0x2b tag and data_buf[0] is a double, not a
     GSO pointer.  We detect this and return None instead.
+
+    On x86_64, the string GSO reading is delegated to _read_gso_string
+    to maintain a single correct implementation.
     """
-    sp = _save_sp()
-    try:
-        tsmat = ctypes.c_uint64.from_address(sp).value
-        if not tsmat:
-            return None
-        # Check TYPE field at tsmat[0x34] — TYPE != 0 means string/GSO
-        result_type = ctypes.c_uint32.from_address(tsmat + 0x34).value & 0xFF
-        if result_type == 0:
-            # Numeric result, not a string — cannot read GSO
-            return None
-        data_buf = ctypes.c_uint64.from_address(tsmat).value
-        if not data_buf:
-            return None
-        str_ptr = ctypes.c_uint64.from_address(data_buf).value
-        if not str_ptr:
-            return None
-        slen = ctypes.c_uint32.from_address(str_ptr).value
-        if slen == 0:
-            return ""
-        raw = ctypes.string_at(ctypes.c_void_p(str_ptr + 4), slen)
-        # Remove trailing null bytes
-        return raw.rstrip(b"\x00").decode("utf-8", errors="replace")
-    finally:
-        _restore_sp(sp_before)
+    return _read_gso_string(sp_before)
 
 
 # ─── Initialization ────────────────────────────────────────────────
