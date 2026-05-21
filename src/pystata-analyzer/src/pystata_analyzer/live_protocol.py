@@ -1332,6 +1332,199 @@ class ProtocolAutoTester:
         return results
 
 
+class CrashSafeProtocolTester:
+    """Run protocol tests in subprocess isolation so crashes don't kill the agent.
+
+    Each test is executed in a separate Python subprocess.  If the function
+    call triggers a SIGSEGV, only the child process dies; the parent (agent)
+    continues unaffected.  Results are communicated via stdout JSON.
+
+    Usage::
+
+        tester = CrashSafeProtocolTester(stata_lib_path="/usr/local/stata19/libstata-se.so")
+        result = tester.universal_call_safe("_bist_varname", types=[b"1"])
+        print(result)
+    """
+
+    def __init__(self, stata_lib_path: str = None):
+        self._stata_lib_path = stata_lib_path
+        self._timeout = 15  # seconds per call
+
+    def _make_runner_script(self, fn_name: str, *args,
+                            return_type: str = "auto") -> str:
+        """Generate a Python script that imports the framework and calls fn."""
+        import json
+        args_json = json.dumps([
+            [a.hex() if isinstance(a, bytes) else a for a in args]
+        ])
+        lib_path = self._stata_lib_path or "/usr/local/stata19/libstata-se.so"
+        script = f'''
+import sys, json, ctypes
+sys.path.insert(0, "/pystata-x/src")
+
+# Recover args from JSON
+args_raw = json.loads(''' + json.dumps(args_json) + ''')
+args = []
+for a in args_raw[0]:
+    if isinstance(a, str):
+        args.append(bytes.fromhex(a))
+    else:
+        args.append(a)
+
+try:
+    from pystata_analyzer.live_protocol import EngineConnection, ProtocolAutoTester
+    ec = EngineConnection()
+    ec.initialize()
+    ec.execute("sysuse auto, clear")
+    ec.execute("scalar mynum = 42.5")
+    ec.execute("global mymacro HelloWorld")
+    
+    tester = ProtocolAutoTester(ec)
+    result = tester.universal_call("''' + fn_name + '''", *args)
+    # Add process info
+    result["_status"] = "ok"
+    # Convert non-serializable
+    if isinstance(result.get("value"), bytes):
+        result["value"] = result["value"].decode(errors="replace")
+    print(json.dumps(result))
+except Exception as e:
+    print(json.dumps({{"_status": "exception", "_error": str(e)}}))
+'''
+        return script
+
+    def universal_call_safe(self, fn_name: str, *args,
+                            return_type: str = "auto") -> dict:
+        """Call a dispatch function in a subprocess, returning results.
+
+        If the child process crashes (SIGSEGV), returns a crash result
+        instead of killing the parent.
+        """
+        import subprocess as sp
+        import tempfile
+        import os
+
+        # Write script to temp file
+        script = self._make_runner_script(fn_name, *args, return_type=return_type)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py",
+                                          delete=False, dir="/tmp") as f:
+            f.write(script)
+            script_path = f.name
+
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self._stata_lib_path:
+            env["STATA_LIB_PATH"] = self._stata_lib_path
+
+        try:
+            result = sp.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                timeout=self._timeout,
+                env=env,
+            )
+            stdout = result.stdout.decode("utf-8", errors="replace")
+            stderr = result.stderr.decode("utf-8", errors="replace")
+
+            if result.returncode == -11:  # SIGSEGV
+                return {
+                    "_status": "crash",
+                    "_signal": "SIGSEGV",
+                    "fn": fn_name,
+                    "args": [repr(a) for a in args],
+                }
+            elif result.returncode != 0:
+                return {
+                    "_status": "error",
+                    "_returncode": result.returncode,
+                    "_stderr": stderr[:500],
+                    "fn": fn_name,
+                }
+
+            # Parse JSON from stdout
+            import json
+            for line in stdout.split("\n"):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        data = json.loads(line)
+                        data["_pid"] = result.pid
+                        return data
+                    except json.JSONDecodeError:
+                        pass
+
+            return {
+                "_status": "parse_error",
+                "_stdout": stdout[:500],
+                "fn": fn_name,
+            }
+        except sp.TimeoutExpired:
+            return {"_status": "timeout", "fn": fn_name}
+        finally:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+
+    def find_working_convention_safe(self, fn_name: str) -> dict:
+        """Auto-discover calling convention with crash protection.
+
+        Tests each arg combination in a separate subprocess, so a
+        crash in one test doesn't affect the others.
+        """
+        results: dict = {
+            "name": fn_name,
+            "conventions": [],
+            "working": None,
+        }
+
+        # Build trial combinations (same as ProtocolAutoTester.find_working_convention)
+        trials: list[list] = []
+        trials.append(([], "zero_arg"))
+
+        is_var_fn = any(v in fn_name for v in ["var", "data"])
+        is_scalar_fn = "scalar" in fn_name
+        is_macro_fn = "macro" in fn_name or "global" in fn_name
+
+        if is_var_fn or not (is_scalar_fn or is_macro_fn):
+            trials.append(([b"1"], "var_str_idx"))
+            trials.append(([1.0], "var_double_idx"))
+            trials.append(([b"make"], "var_str_name"))
+            trials.append(([1.0, 2.0], "obs_var_double"))
+        elif is_scalar_fn:
+            trials.append(([b"mynum"], "scalar_name"))
+            trials.append(([1.0], "scalar_double"))
+        elif is_macro_fn:
+            trials.append(([b"mymacro"], "macro_name"))
+
+        for args, note in trials:
+            trial: dict = {"args": [repr(a) for a in args], "note": note}
+            try:
+                uc = self.universal_call_safe(fn_name, *args)
+                trial["result"] = {
+                    "status": uc.get("_status"),
+                    "type": uc.get("type"),
+                    "value": uc.get("value"),
+                    "error_code": uc.get("error_code", -1),
+                }
+                if (uc.get("_status") == "ok"
+                    and uc.get("type") not in ("none", None)
+                    and uc.get("error_code", 999) == 0):
+                    trial["working"] = True
+                    if results["working"] is None:
+                        results["working"] = {
+                            "args": [repr(a) for a in args],
+                            "note": note,
+                            "type": uc["type"],
+                            "value": uc["value"],
+                        }
+            except Exception as e:
+                trial["error"] = str(e)
+
+            results["conventions"].append(trial)
+
+        return results
+
+
 # ── Framework integration ────────────────────────────────────────────
 
 class LiveProtocolValidatorPlugin:
