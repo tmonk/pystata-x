@@ -1383,6 +1383,229 @@ class StataBinary:
             "interesting_flows": interesting_flows,
         }
 
+    def trace_jump_table(self, vaddr: int, table_rip_offset: int,
+                         entry_count: int = 8) -> list[dict]:
+        """Resolve a jump table referenced via ``lea rdx, [rip + offset]``.
+
+        Returns list of {index, target_addr} for each entry in the table.
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        # The jump table is at text_vaddr + the RIP-relative offset
+        table_vaddr = vaddr + table_rip_offset
+        table_file_off = table_vaddr - text_vaddr
+        if table_file_off < 0 or table_file_off + entry_count * 4 > len(text_raw):
+            return []
+        import struct
+        results = []
+        table_data = text_raw[table_file_off:table_file_off + entry_count * 4]
+        for i in range(entry_count):
+            disp = struct.unpack_from("<i", table_data, i * 4)[0]
+            target = table_vaddr + disp
+            results.append({"index": i, "disp": disp, "target_vaddr": target})
+        return results
+
+    def auto_test_call_convention(self, name: str) -> dict:
+        """Automatically determine the calling convention for a dispatch function.
+
+        Tries all plausible combinations of:
+        - Entry points (thunk, implementation, and alternative entries)
+        - Arg types (string, double, int, none)
+        - Arg counts (0-3)
+        - Return type (double, string)
+
+        For each combination, calls the function and reports:
+        - Return value (or None if it crashes)
+        - Error code set
+        - Whether the result differs from the input (not identity)
+        - Pool-header and flag check status
+
+        Returns the winning combination and a full attempt log.
+        """
+        log = logging.getLogger(__name__ + ".auto_test_call")
+        result: dict = {
+            "name": name,
+            "winning_convention": None,
+            "attempts": [],
+            "entry_points": [],
+        }
+
+        # Get the symbol vaddr
+        vaddr = self._symbols.get(name)
+        if not vaddr:
+            result["error"] = f"{name} not found"
+            return result
+
+        # Get entry points
+        entry_points = self._follow_thunk(vaddr, max_depth=2)
+        if not entry_points:
+            entry_points = [vaddr]
+
+        result["entry_points"] = [
+            {"vaddr": ep, "offset": ep - vaddr}
+            for ep in entry_points
+        ]
+
+        # Try each entry point
+        for ep_addr in entry_points[:3]:  # Limit to first 3
+            offsets = [ep_addr - vaddr]
+
+            # Also try with offsets 0x00 (first entry), 0xAA (second entry)
+            for target_vaddr in [vaddr, vaddr + 0xAA]:
+                for arg_combo in self._generate_arg_combos():
+                    for ret_type in ("double", "string"):
+                        attempt = self._try_call_convention(
+                            name, target_vaddr, arg_combo, ret_type)
+                        result["attempts"].append(attempt)
+
+                        if attempt.get("is_winning"):
+                            result["winning_convention"] = {
+                                "entry_vaddr": target_vaddr,
+                                "args": arg_combo,
+                                "return_type": ret_type,
+                                "return_value": attempt.get("return_value"),
+                            }
+                            return result  # Return early on first success
+
+        return result
+
+    def _generate_arg_combos(self) -> list[list]:
+        """Generate plausible argument combinations for testing."""
+        return [
+            [],                          # No args
+            [0],                          # int 0
+            [1],                          # int 1
+            [b""],                        # empty string
+            [b"test"],                    # simple string
+            [b"c(N)"],                    # Stata system value
+            [0.0],                        # double 0
+            [1.0],                        # double 1
+            [b"test", 1],                 # string + flag
+            [1, 1],                       # two doubles (data: obs, var)
+            [0, 0],                       # two zero doubles
+        ]
+
+    def _try_call_convention(self, name: str, entry_vaddr: int,
+                               args: list, return_type: str) -> dict:
+        """Try a single calling convention and report the result."""
+        import ctypes
+        attempt: dict = {
+            "entry_vaddr": entry_vaddr,
+            "args": [repr(a) for a in args],
+            "return_type": return_type,
+            "success": False,
+            "is_winning": False,
+            "error_code": None,
+            "return_value": None,
+        }
+
+        try:
+            from pystata_x.sfi._engine import (
+                _save_sp, _restore_sp, _push_int, _push_double, _push_str,
+                _patch_last_tsmat, _read_stata_err, _get_fn, _BASE,
+            )
+        except ImportError:
+            attempt["error"] = "engine not available"
+            return attempt
+
+        rt = _BASE + entry_vaddr
+        if not rt:
+            return attempt
+
+        sp_before = _save_sp()
+        if not sp_before:
+            return attempt
+
+        # Push args
+        try:
+            for arg in args:
+                if isinstance(arg, int):
+                    _push_int(arg)
+                elif isinstance(arg, float):
+                    _push_double(arg)
+                elif isinstance(arg, (bytes, bytearray)):
+                    _push_str(bytes(arg))
+                _patch_last_tsmat()
+        except Exception as e:
+            attempt["error"] = f"push failed: {e}"
+            _restore_sp(sp_before)
+            return attempt
+
+        # Set string return flag if needed
+        if return_type == "string":
+            sp = _save_sp()
+            tsmat = ctypes.c_uint64.from_address(sp).value if sp else 0
+            if tsmat:
+                ctypes.c_uint16.from_address(tsmat + 0x34).value = 0xFFFD
+
+        # Call function
+        w0 = len(args)
+        fn = _get_fn(rt, None, ctypes.c_int)
+        try:
+            fn(w0)
+            attempt["success"] = True
+        except Exception as e:
+            attempt["error"] = f"call crashed: {e}"
+            _restore_sp(sp_before)
+            return attempt
+
+        # Read error code
+        try:
+            attempt["error_code"] = _read_stata_err()
+        except Exception:
+            pass
+
+        # Read return value
+        sp = _save_sp()
+        tsmat = ctypes.c_uint64.from_address(sp).value if sp else 0
+        if tsmat:
+            data_buf = ctypes.c_uint64.from_address(tsmat).value
+            if data_buf:
+                if return_type == "double":
+                    try:
+                        attempt["return_value"] = ctypes.c_double.from_address(
+                            data_buf).value
+                    except Exception:
+                        pass
+                elif return_type == "string":
+                    try:
+                        str_ptr = ctypes.c_uint64.from_address(data_buf).value
+                        if str_ptr:
+                            slen = ctypes.c_int32.from_address(str_ptr).value
+                            if 0 < slen < 65536:
+                                raw = ctypes.create_string_buffer(slen + 1)
+                                ctypes.memmove(raw, str_ptr + 4, slen)
+                                attempt["return_value"] = raw.value.decode(
+                                    "utf-8", errors="replace")
+                    except Exception:
+                        pass
+
+        # Check if non-identity (result != input)
+        if args and attempt.get("return_value") is not None:
+            first_arg = args[0]
+            rv = attempt["return_value"]
+            is_identity = False
+            if isinstance(first_arg, (int, float)) and isinstance(rv, (int, float)):
+                if abs(float(first_arg) - float(rv)) < 0.001:
+                    is_identity = True
+            elif isinstance(first_arg, bytes) and isinstance(rv, str):
+                if first_arg.decode("utf-8", errors="replace") == rv:
+                    is_identity = True
+            attempt["is_identity"] = is_identity
+
+            # Winning: success, no error, non-zero non-identity result
+            if (attempt["success"]
+                    and attempt.get("error_code") == 0
+                    and rv is not None
+                    and not is_identity
+                    and (not isinstance(rv, (int, float)) or abs(rv) > 1e-10)):
+                attempt["is_winning"] = True
+
+        _restore_sp(sp_before)
+        return attempt
+
     def live_test_protocol(self, name: str,
                            call_fn: Optional[callable] = None
                            ) -> dict:

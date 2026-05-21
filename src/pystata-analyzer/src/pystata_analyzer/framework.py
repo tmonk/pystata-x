@@ -374,6 +374,14 @@ class Framework:
             except Exception:
                 pass
 
+        # Dispatch behavior classification
+        try:
+            cls = self.binary.classify_dispatch_behavior(name)
+            if cls:
+                result["behavior"] = cls
+        except Exception:
+            pass
+
         # Run plugin analysis hooks
         for plugin in self._plugins:
             try:
