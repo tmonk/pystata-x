@@ -446,9 +446,9 @@ class Data:
     def getVarValueLabel(varno: int) -> str:
         """Get the value label name attached to a variable."""
         if _IS_X86_64:
-            # Use _bist_varvaluelabel with string var name (the only working string-read path)
+            # Use _bist_varvaluelabel with string var name
             try:
-                from pystata_x.sfi._engine import _read_var_name_x86, call_string
+                from pystata_x.sfi._engine import _read_var_name_x86
                 name = _read_var_name_x86(varno)
                 if name:
                     return call_string("_bist_varvaluelabel", name.encode()) or ""
@@ -1013,12 +1013,10 @@ class ValueLabel:
     def exists(name: str) -> bool:
         """Check if a value label exists."""
         if _IS_X86_64:
-            # Use execute for query (not data access)
-            from pystata_x.sfi._engine import execute
-            out, rc = execute(f"quietly label list {name}")
-            if rc == 0 and out and name in out:
-                return True
-            return False
+            # Use dispatch (echoes on x86_64, but safe — no output buffer)
+            # _bist_vlexists returns None or 0/1 depending on outcome
+            r = call_int("_bist_vlexists", name.encode())
+            return bool(r) if r is not None else False
         r = call_int("_bist_vlexists", name.encode())
         return bool(r) if r is not None else False
 
@@ -1026,20 +1024,9 @@ class ValueLabel:
     def getLabel(name: str, value: float) -> str:
         """Get the value label for a value-label pair (original API)."""
         if _IS_X86_64:
-            # Use execute for query (not data access)
-            from pystata_x.sfi._engine import execute
-            out, rc = execute(f"label list {name}")
-            if rc == 0:
-                for line in out.split("\n"):
-                    s = line.strip()
-                    parts = s.split(None, 1)
-                    if len(parts) == 2:
-                        try:
-                            if int(parts[0]) == int(value):
-                                return parts[1]
-                        except ValueError:
-                            pass
-            return ""
+            # Use _bist_vlmap dispatch (echoes on x86_64, but safe —
+            # no crash, no output-buffer parsing)
+            return call_string("_bist_vlmap", name.encode(), value)
         return call_string("_bist_vlmap", name.encode(), value)
 
     @staticmethod

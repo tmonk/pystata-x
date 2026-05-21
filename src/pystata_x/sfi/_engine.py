@@ -640,23 +640,17 @@ def call_string(name: str, *args) -> Optional[str]:
     """Call a _bist_* function that returns a string.
 
     Uses push+stack on ALL platforms (universal internal convention).
-    On x86_64, sets tsmat[0x34] = 0xFFFD (string return request) on the
-    last pushed tsmat so dispatch entries take the string return path.
-    Does NOT set tsmat[0x36] (argument flag) because dispatch entries
-    like _bist_varindex expect tsmat[0x36] == 0 (numeric arg flag).
 
-    NOTE (x86_64 protocol): Actually, the standard push+stack protocol
-    works for ALL dispatch functions on x86_64, including the ~85% that
-    use the SP-resetting pattern.  The key is that `_push_str`/`_push_int`
-    internally update a .bss arg pointer (0x500C6A0) that `_save_sp()`
-    reads from.  The dispatch functions read their args from this arg
-    pointer, not from the caller's RSP directly.  So the existing
-    call_string/call_double protocol is correct as-is.
+    On x86_64, uses the **universal pattern**: does NOT set
+    tsmat[0x34] = 0xFFFD before the call (setting this flag before the
+    call crashes functions that return numeric, like _bist_dir).
+    Instead, auto-detects the result type after the call from
+    tsmat[0x34]: if 0xFFFD, reads the GSO string; if 0, reads the
+    double value and returns str().
 
-    Pool-header check: tsmat[-0x94] == 0x2b IS satisfied because the
-    tsmat is allocated from Stata's pool allocator (the data buffer is
-    embedded in the pool allocation, not separately malloc'd).  The
-    data_buf[-0x94] confusion was caused by misreading the tsmat layout.
+    On ARM64, the original tsmat[0x34] = 0xFFFD pre-set is kept
+    because ARM64 dispatch functions expect the flag to be set
+    before the call for string returns.
     """
     if not _INITIALIZED:
         initialize()
@@ -668,24 +662,34 @@ def call_string(name: str, *args) -> Optional[str]:
     sp_before = _save_sp()
     _push_args(args)
 
-    # Set tsmat[0x34] = 0xFFFD (string return request) on the last arg.
-    # This tells the dispatch entry to take the string-return code path.
-    # The tsmat[-0x94] pool-header tag (0x2b) is already set by Stata's
-    # internal pool allocator (tsmat_alloc), so no pool-header patch needed.
-    # We do NOT set tsmat[0x36] = 2 because dispatch entries like
-    # _bist_varindex expect tsmat[0x36] == 0 (numeric arg flag) and
-    # error out with code 0xc1f otherwise.
-    if _PLATFORM in ("x86_64", "windows"):
+    # ARM64: set flag before call (ARM64 functions expect this)
+    # x86_64: do NOT set flag — use universal pattern (auto-detect)
+    if _PLATFORM == "arm64":
         sp = _save_sp()
         tsmat = ctypes.c_uint64.from_address(sp).value
         if tsmat:
-            # Set type field to request string return
             ctypes.c_uint16.from_address(tsmat + 0x34).value = 0xFFFD
 
+    # Call the dispatch function (no flag pre-set on x86_64)
     w0 = len(args) if args else 0
     fn = _get_fn(rt, None, ctypes.c_int)
     fn(w0)
-    return _pop_and_read_string(sp_before)
+
+    # Auto-detect result type from tsmat[0x34] after the call
+    sp = _save_sp()
+    tsmat = ctypes.c_uint64.from_address(sp).value
+    if tsmat:
+        result_type = ctypes.c_uint16.from_address(tsmat + 0x34).value
+        if result_type == 0xFFFD:
+            # String result — read GSO string
+            return _read_gso_string(sp_before)
+        # Numeric result — read double and convert to string
+        val = _pop_and_read_double(sp_before)
+        if val is not None:
+            return str(val)
+        return None
+    _restore_sp(sp_before)
+    return None
 
 
 def call_void(name: str, *args) -> None:
