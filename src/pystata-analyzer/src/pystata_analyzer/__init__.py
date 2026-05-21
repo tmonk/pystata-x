@@ -1,25 +1,55 @@
 """pystata-analyzer — Standalone Stata binary analysis framework.
 
-StataBinary is the main entry point for all analysis.  It loads an ELF
-or Mach-O Stata shared library, discovers the dispatch table, st_* name
-table, push functions, and provides methods for deep protocol analysis
-of individual dispatch functions.
+A comprehensive, living analysis framework with:
+- ``StataBinary`` — core binary analysis engine
+- ``Framework`` — unified orchestration pipeline
+- ``PatternRegistry`` — knowledge base of architectural patterns
+- ``Plugin`` — extensible plugin system with lifecycle hooks
+- ``ELFReader`` — pure-ctypes ELF section reader
+- CLI: ``python -m pystata_analyzer <path> [flags]``
 
-Quick start:
+Quick start::
 
-    from pystata_analyzer import StataBinary
-    ana = StataBinary("/path/to/libstata.so")
-    ana.analyze()
-    print(ana.report())
-    ana.analyze_dispatch_fn("_bist_nobs")
+    from pystata_analyzer import Framework
+    fw = Framework("/path/to/libstata.so", auto_analyze=True)
+    print(fw.report(format="markdown"))
+    fw.generate_report("output/")
 """
 
 from pystata_analyzer.elf import ELFReader
 from pystata_analyzer.binary import StataBinary
 from pystata_analyzer.helpers import HAS_CAPSTONE
+from pystata_analyzer.registry import PatternRegistry, PatternEntry, REGISTRY_VERSION
+from pystata_analyzer.plugin import (
+    Plugin,
+    analyze_hook,
+    report_hook,
+    BUILTIN_PLUGINS,
+    ErrorCodeMapper,
+    EntryPointDetector,
+    ProtocolClassifier,
+    PoolHeaderScanner,
+    ManifestManager,
+    DocstringExtractor,
+)
+from pystata_analyzer.framework import Framework
 
 __all__ = [
     "ELFReader",
     "StataBinary",
     "HAS_CAPSTONE",
+    "PatternRegistry",
+    "PatternEntry",
+    "REGISTRY_VERSION",
+    "Plugin",
+    "analyze_hook",
+    "report_hook",
+    "BUILTIN_PLUGINS",
+    "ErrorCodeMapper",
+    "EntryPointDetector",
+    "ProtocolClassifier",
+    "PoolHeaderScanner",
+    "ManifestManager",
+    "DocstringExtractor",
+    "Framework",
 ]
