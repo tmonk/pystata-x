@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pystata-analyzer"
+version = "0.1.0"
+description = "Standalone Stata binary analysis framework — ELF/Mach-O loader, dispatch-table scanner, protocol analyzer, and live engine interaction"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "capstone>=6.0.0a5",
+]
+
+[project.optional-dependencies]
+live = [
+    "pystata-x",
+]
+
+[project.urls]
+Homepage = "https://github.com/tom-doerr/pystata-x"
+
+[tool.setuptools.packages.find]
+where = ["src"]
