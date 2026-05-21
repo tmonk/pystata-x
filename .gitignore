@@ -30,3 +30,4 @@ stata*-linux/
 stata19-linux/manifests/
 *_history.json
 src/pystata_x/sfi/manifests/
+manifests/

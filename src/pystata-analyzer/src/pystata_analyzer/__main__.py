@@ -189,11 +189,18 @@ def cmd_health(b: StataBinary) -> None:
 # ═════════════════════════════════════════════════════════════════════
 
 def _load_framework(path: str, args: Any) -> Framework:
-    """Load Framework with plugins from CLI args."""
+    """Load Framework with plugins from CLI args.
+
+    *args* may be None (when called from REPL), in which case
+    defaults are used.
+    """
     plugin_names = []
-    if args.plugin:
-        plugin_names = [n.strip() for n in args.plugin.split(",") if n.strip()]
-    # Map names to plugin classes
+    plugin_dir_ = None
+    if args is not None:
+        if hasattr(args, 'plugin') and args.plugin:
+            plugin_names = [n.strip() for n in args.plugin.split(",") if n.strip()]
+        if hasattr(args, 'plugin_dir') and args.plugin_dir:
+            plugin_dir_ = args.plugin_dir
     from pystata_analyzer.plugin import BUILTIN_PLUGINS as _BP, Plugin
     plugin_instances = []
     for pname in plugin_names:
@@ -206,7 +213,7 @@ def _load_framework(path: str, args: Any) -> Framework:
         path,
         auto_cache=True,
         plugins=plugin_instances,
-        plugin_dir=args.plugin_dir,
+        plugin_dir=plugin_dir_,
     )
 
 
@@ -306,46 +313,351 @@ def cmd_diff(path: str, args: Any) -> int:
     return 0
 
 
-def cmd_interactive(path: str, args: Any) -> int:
-    """Interactive REPL mode."""
+def cmd_classify(path: str, args: Any) -> int:
+    """Run automated classification of unclassified functions."""
     fw = _load_framework(path, args)
     fw.analyze_all()
+    result = fw.classify_unclassified(threshold=args.classify_threshold)
+    print(f"Classification complete:")
+    print(f"  Total unclassified: {result['total_unclassified']}")
+    print(f"  Auto-registered: {result['auto_registered']}")
+    if result['needs_review']:
+        print(f"  Needs review ({len(result['needs_review'])}):")
+        for nr in result['needs_review'][:20]:
+            print(f"    {nr['name']:35s} confidence={nr['confidence']:.2f} "
+                  f"→ {nr.get('inferred_protocol', '?')}")
+            for r in nr.get('reasoning', [])[:3]:
+                print(f"      - {r}")
+    print(f"  Remaining unclassified: {result['remaining_unclassified']}")
+    if result['needs_review']:
+        print(f"\nRun with --classify-threshold 0.5 to auto-classify more functions.")
+    return 0
+
+
+def cmd_plugin_reload(path: str, args: Any) -> int:
+    """Force hot-reload of plugins from plugin-dir."""
+    fw = _load_framework(path, args)
+    fw.analyze_all()
+    updated = fw.reload_plugins()
+    if updated:
+        print(f"[framework] Reloaded plugins: {', '.join(updated)}")
+    else:
+        print("[framework] No new plugins discovered.")
+    print(f"[framework] Active plugins: {len(fw.plugins)}")
+    return 0
+
+
+def cmd_plugin_add(path: str, args: Any) -> int:
+    """Add a built-in plugin by name at runtime."""
+    from pystata_analyzer.plugin import BUILTIN_PLUGINS as _BP
+    cls = _BP.get(args.plugin_add)
+    if cls is None:
+        print(f"Error: unknown plugin {args.plugin_add!r}. "
+              f"Available: {', '.join(_BP)}", file=sys.stderr)
+        return 1
+    fw = _load_framework(path, args)
+    if not fw._analyzed:
+        fw.analyze_all()
+    try:
+        fw.register_plugin(cls())
+        print(f"[framework] Plugin {args.plugin_add!r} registered.")
+        print(f"[framework] Active plugins: {len(fw.plugins)}")
+        for p in fw.plugins:
+            print(f"  {p.name}: {p.description}")
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_interactive(path: str, args: Any) -> int:
+    """Interactive TUI/REPL mode.
+
+    Uses ``prompt_toolkit`` for a rich terminal UI with tab-completion,
+    syntax highlighting, paging, search, and command history.  Falls back
+    to a basic readline loop if prompt_toolkit is not installed.
+    """
+    fw = _load_framework(path, args)
+    fw.analyze_all()
+
     print(f"[framework] Interactive mode. Binary: {path}")
     print(f"[framework] {fw.binary.dispatch_count} dispatch entries, "
           f"{len(fw.binary.symbols)} symbols")
-    print("[framework] Commands: report, catalog, protocol <name>, "
-          "entries <name>, docs, diff <other>, help, quit")
+    print(f"[framework] Type 'help' for commands, 'quit' to exit")
+
+    try:
+        _repl_prompt_toolkit(fw, args)
+    except ImportError:
+        _repl_readline(fw)
+    return 0
+
+
+def _repl_readline(fw: Framework) -> None:
+    """Basic readline REPL (fallback when prompt_toolkit unavailable)."""
     import shlex
+    commands = {
+        "report": "Show full analysis report",
+        "catalog": "List all dispatch functions",
+        "protocol <name>": "Show protocol analysis for a function",
+        "entries <name>": "Show entry points for a function",
+        "disasm <name>": "Disassemble a function",
+        "search <pattern>": "Search functions by name/pattern",
+        "classify": "Run automated classification workflow",
+        "docs": "Generate documentation to .interactive_docs/",
+        "export <name>": "Export function doc to JSON",
+        "diff <other>": "Compare with another binary",
+        "plugins": "List loaded plugins",
+        "help": "Show this help",
+        "quit": "Exit",
+    }
+    print("Commands:", ", ".join(sorted(commands.keys())))
     while True:
         try:
             line = input("analyze> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        if not line or line == "quit" or line == "exit":
+        if not line or line in ("quit", "exit"):
             break
         try:
             parts = shlex.split(line)
             cmd = parts[0]
-            if cmd == "report":
-                print(fw.report(format="markdown"))
-            elif cmd == "catalog":
-                cmd_catalog(fw.binary)
-            elif cmd == "protocol" and len(parts) > 1:
-                cmd_full_protocol(fw.binary, parts[1])
-            elif cmd == "entries" and len(parts) > 1:
-                cmd_entry_points(fw.binary, parts[1])
-            elif cmd == "docs":
-                fw.generate_report(".interactive_docs")
-                print("[framework] Docs written to .interactive_docs/")
-            elif cmd == "help":
-                print("Commands: report, catalog, protocol <name>, "
-                      "entries <name>, docs, diff <other>, quit")
-            else:
-                print(f"Unknown command: {cmd}")
+            _execute_repl_command(fw, cmd, parts[1:])
         except Exception as e:
             print(f"Error: {e}")
-    return 0
+
+
+def _repl_prompt_toolkit(fw: Framework, args: Any) -> None:
+    """Rich TUI REPL using prompt_toolkit."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.formatted_text import HTML
+    import shlex
+    import os
+
+    # ── Custom completer ──
+    class AnalyzerCompleter(Completer):
+        def __init__(self, fw):
+            self.fw = fw
+            self.commands = [
+                "report", "catalog", "protocol", "entries",
+                "disasm", "search", "classify", "docs",
+                "export", "diff", "plugins", "registry", "help", "quit",
+            ]
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            words = text.split()
+            if not words:
+                return
+            # First word: complete command
+            if len(words) == 1:
+                for cmd in self.commands:
+                    if cmd.startswith(words[0]):
+                        yield Completion(cmd, start_position=-len(words[0]))
+            # Second word (function name): complete from symbols
+            elif len(words) >= 2 and words[0] in (
+                    "protocol", "entries", "disasm", "export"):
+                prefix = words[-1].lower()
+                for sym in sorted(self.fw.binary.symbols):
+                    if sym.startswith("_bist_") and prefix in sym.lower():
+                        yield Completion(
+                            sym, start_position=-len(prefix))
+
+    # ── History ──
+    history_path = os.path.expanduser("~/.pystata-analyzer-history")
+    history = FileHistory(history_path)
+
+    # ── Style ──
+    style = Style.from_dict({
+        "prompt": "ansicyan bold",
+        "error": "ansired",
+        "success": "ansigreen",
+    })
+
+    # ── Session ──
+    session = PromptSession(
+        history=history,
+        completer=AnalyzerCompleter(fw),
+        style=style,
+    )
+
+    # Command dispatch table
+    commands = {
+        "report": "Show full analysis report",
+        "catalog": "List all dispatch functions",
+        "protocol <name>": "Show protocol analysis for a function",
+        "entries <name>": "Show entry points for a function",
+        "disasm <name>": "Disassemble a function",
+        "search <pattern>": "Search functions by name or regex pattern",
+        "classify": "Run automated classification of unclassified functions",
+        "docs": "Generate full documentation to .interactive_docs/",
+        "export <name>": "Export function analysis as JSON",
+        "diff <other>": "Compare with another binary",
+        "plugins": "List loaded plugins",
+        "registry": "Show registry stats",
+        "help": "Show categorized help",
+        "quit": "Exit the TUI",
+    }
+
+    # Grouped help
+    help_categories = {
+        "Analysis": ["report", "catalog", "protocol", "entries",
+                     "disasm", "search"],
+        "Classification": ["classify"],
+        "Documentation": ["docs", "export"],
+        "Comparison": ["diff"],
+        "Plugins": ["plugins"],
+        "Registry": ["registry"],
+        "General": ["help", "quit"],
+    }
+
+    while True:
+        try:
+            text = session.prompt(
+                HTML("<prompt>analyze></prompt> "),
+            )
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        line = text.strip()
+        if not line or line in ("quit", "exit"):
+            break
+
+        try:
+            parts = shlex.split(line)
+            cmd = parts[0]
+            if cmd == "help":
+                for category, cmd_list in help_categories.items():
+                    print(f"\n  {category}:")
+                    for c in cmd_list:
+                        desc = commands.get(c, "")
+                        print(f"    {c:25s} {desc}")
+                print()
+            else:
+                _execute_repl_command(fw, cmd, parts[1:])
+        except Exception as e:
+            print(f"Error: {e}")
+
+
+def _execute_repl_command(fw: Framework, cmd: str,
+                          args: list[str]) -> None:
+    """Execute a single REPL command."""
+    import json
+    if cmd == "report":
+        print(fw.report(format="markdown"))
+    elif cmd == "catalog":
+        print(f"{'Function':30s} {'Idx':5s} {'Type':20s} {'Push':6s} {'Ent':4s} {'Err':5s} {'PushC':5s}")
+        print("=" * 77)
+        for name in sorted(fw.binary.symbols):
+            if not name.startswith("_bist_") or name == "_bist_store":
+                continue
+            r = fw.analyze_function(name)
+            di = str(r.get("dispatch_index", "?"))
+            pt = (r.get("protocol_type", "?") or "?")[:20]
+            ps = "YES" if r.get("uses_push_stack") else "no"
+            nc = str(len(r.get("entry_candidates", [])))
+            ec = str(len(r.get("error_codes", []) or r.get("error_codes_found", [])))
+            pc = str(len(r.get("push_calls", [])))
+            print(f"{name:30s} {di:5s} {pt:20s} {ps:6s} {nc:4s} {ec:5s} {pc:5s}")
+    elif cmd == "protocol" and len(args) >= 1:
+        name = args[0]
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        proto = fw.binary.analyze_full_protocol(name)
+        print(json.dumps(proto, indent=2, default=str))
+    elif cmd == "entries" and len(args) >= 1:
+        name = args[0]
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        eps = fw.binary.trace_entry_points(name)
+        print(json.dumps(eps, indent=2, default=str))
+    elif cmd == "disasm" and len(args) >= 1:
+        name = args[0]
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = fw.binary.symbols.get(name)
+        if vaddr:
+            print(f"Disassembly of {name} at 0x{vaddr:x}:")
+            blocks = fw.binary.disassemble_basic_blocks(vaddr, max_size=512)
+            for i, block in enumerate(blocks):
+                start = block.get("start_vaddr", 0)
+                end = block.get("end_vaddr", 0)
+                bt = block.get("branch_target")
+                ft = block.get("fallthrough")
+                insns = block.get("instructions", [])
+                print(f"; Block {i}: 0x{start:x}–0x{end:x} ({len(insns)} insns)")
+                if bt:
+                    print(f";   Branch → 0x{bt:x}")
+                if ft:
+                    print(f";   Fallthrough → 0x{ft:x}")
+                for insn in insns:
+                    op = f"{insn['mnemonic']} {insn['op_str']}"
+                    print(f"  0x{insn['vaddr']:x}: {op}")
+                print()
+        else:
+            print(f"Function {name} not found")
+    elif cmd == "search" and len(args) >= 1:
+        import re
+        pattern = args[0]
+        pat = re.compile(pattern, re.IGNORECASE)
+        found = 0
+        for name in sorted(fw.binary.symbols):
+            if pat.search(name):
+                vaddr = fw.binary.symbols[name]
+                print(f"  {name:30s} vaddr=0x{vaddr:x}")
+                found += 1
+        print(f"\n{found} matches for {pattern!r}")
+    elif cmd == "classify":
+        result = fw.classify_unclassified(
+            threshold=getattr(args, "classify_threshold", 0.8))
+        print(f"Classification complete:")
+        print(f"  Total unclassified: {result['total_unclassified']}")
+        print(f"  Auto-registered: {result['auto_registered']}")
+        if result['needs_review']:
+            print(f"  Needs review ({len(result['needs_review'])}):")
+            for nr in result['needs_review'][:10]:
+                print(f"    {nr['name']:30s} "
+                      f"confidence={nr['confidence']:.2f} "
+                      f"→ {nr.get('inferred_protocol', '?')}")
+        print(f"  Remaining unclassified: {result['remaining_unclassified']}")
+    elif cmd == "docs":
+        fw.generate_report(".interactive_docs")
+        print("[framework] Docs written to .interactive_docs/")
+    elif cmd == "export" and len(args) >= 1:
+        name = args[0]
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        functions = fw._last_report.get("functions", {})
+        result = functions.get(name)
+        if result:
+            import json
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(f"Function {name} not found in report")
+    elif cmd == "diff" and len(args) >= 1:
+        other_path = args[0]
+        try:
+            other_fw = _load_framework(other_path, None)
+            other_fw.analyze_all()
+            diff_result = fw.diff(other_fw)
+            print(json.dumps(diff_result, indent=2, default=str))
+        except Exception as e:
+            print(f"Error comparing with {other_path}: {e}")
+    elif cmd == "plugins":
+        for p in fw.plugins:
+            print(f"  {p.name:30s} v{p.version} — {p.description}")
+    elif cmd == "registry":
+        stats = fw.registry.stats()
+        print(f"Registry: {stats['total']} total "
+              f"(hardcoded={stats['hardcoded']}, "
+              f"auto={stats['auto_detected']}, "
+              f"user={stats['user_added']})")
+    else:
+        print(f"Unknown command: {cmd}. Type 'help' for available commands.")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -410,6 +722,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Interactive REPL mode")
     parser.add_argument("--output", type=str, default=".",
                         help="Output directory for generated docs")
+    parser.add_argument("--classify", action="store_true",
+                        help="Run automated classification of unclassified functions")
+    parser.add_argument("--classify-threshold", type=float, default=0.8,
+                        help="Confidence threshold for auto-classification (0.0-1.0, default 0.8)")
+    parser.add_argument("--plugin-reload", action="store_true",
+                        help="Force hot-reload of plugins from plugin-dir")
+    parser.add_argument("--plugin-add", type=str, metavar="NAME",
+                        help="Add a built-in plugin by name at runtime")
 
     args = parser.parse_args(argv)
 
@@ -430,8 +750,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_generate_docs(args.path, args)
     if args.diff:
         return cmd_diff(args.path, args)
+    if args.classify:
+        return cmd_classify(args.path, args)
     if args.interactive:
         return cmd_interactive(args.path, args)
+    if args.plugin_reload:
+        return cmd_plugin_reload(args.path, args)
+    if args.plugin_add:
+        return cmd_plugin_add(args.path, args)
 
     # Legacy commands
     try:
