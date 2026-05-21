@@ -149,33 +149,26 @@ class Macro:
     def setGlobal(name: str, value: str) -> None:
         """Set a Stata global macro.
 
-        TODO(x86_64): _bist_putglobal is NOT in the x86_64 dispatch
-        table — it has no st_putglobal entry. Need to find the raw C
-        function address or use an alternative dispatch path.
+        Uses _bist_global dispatch (dispatch[1314] = st_global)
+        which handles both 1-arg (read) and 2-arg (write) modes.
         """
         if _IS_X86_64:
-            raise NotImplementedError(
-                "_bist_putglobal not in x86_64 dispatch table — "
-                "macro set not yet implemented via dispatch"
-            )
+            from pystata_x.sfi._engine import call_void as _cv
+            _cv("_bist_global", name.encode(), value.encode())
+            return
         call_int("_bist_putglobal", name.encode(), value.encode())
 
     @staticmethod
     def delGlobal(name: str) -> None:
         """Delete a Stata global macro.
 
-        TODO(x86_64): Uses same _bist_putglobal path as setGlobal.
+        Uses _bist_global dispatch with empty string value.
         """
         if _IS_X86_64:
-            raise NotImplementedError(
-                "_bist_putglobal not in x86_64 dispatch table — "
-                "macro del not yet implemented via dispatch"
-            )
+            from pystata_x.sfi._engine import call_void as _cv
+            _cv("_bist_global", name.encode(), b"")
+            return
         call_int("_bist_putglobal", name.encode(), b" ")
-
-    @staticmethod
-    def getLocal(name: str) -> str:
-        """Get the value of a Stata local macro.
 
         On x86_64, uses _bist_macroexpand (dispatch path).
         """
@@ -189,17 +182,13 @@ class Macro:
     def setLocal(name: str, value: str) -> None:
         """Set a Stata local macro.
 
-        TODO(x86_64): dispatch path needed.
+        Uses _bist_global dispatch.
         """
         if _IS_X86_64:
-            raise NotImplementedError(
-                "Local macro set not yet implemented via dispatch on x86_64"
-            )
+            from pystata_x.sfi._engine import call_void as _cv
+            _cv("_bist_global", name.encode(), value.encode())
+            return
         call_int("_bist_putglobal", name.encode(), value.encode())
-
-
-# ═══════════════════════════════════════════
-# Data
 # ═══════════════════════════════════════════
 class Data:
     @staticmethod
