@@ -73,17 +73,6 @@ from pystata_x.sfi._engine import (
 # x86_64 platform detection (used for architecture-specific dispatch)
 _IS_X86_64 = sys.platform in ("linux", "linux2") and platform.machine() in ("x86_64", "amd64")
 
-# Direct memory reader for x86_64 (caches scalar region on first use)
-_x86_memory_reader = None
-
-def _get_memory_reader():
-    """Get or create the x86_64 direct memory reader."""
-    global _x86_memory_reader
-    if _x86_memory_reader is None and _IS_X86_64:
-        from pystata_analyzer.live_protocol import StataMemoryReader
-        _x86_memory_reader = StataMemoryReader()
-    return _x86_memory_reader
-
 # Fast C extension path — lazy import, checked at call time
 _fast_path = None  # Will be set to module on first use
 
@@ -918,23 +907,15 @@ class Scalar:
     def getValue(name: str) -> float:
         """Get the value of a numeric scalar."""
         if _IS_X86_64:
-            # Direct memory read — lazy-init framework reader
-            from pystata_x.sfi._engine import execute
-            from pystata_analyzer.live_protocol import StataMemoryReader
+            # Direct memory read via self-contained _engine._read_scalar_x86
+            # (uses execute() + sentinel for region discovery, then direct ctypes)
+            from pystata_x.sfi._engine import _read_scalar_x86, execute as _exec
             try:
-                reader = StataMemoryReader()
-                # First call discovers region via execute (write-only)
-                val = reader.read_scalar_by_name(name, engine_conn=None)
+                # First try direct memory — set scalar via execute (permitted write)
+                # then scan memory for it
+                val = _read_scalar_x86(name)
                 if val is not None:
                     return val
-                # If not cached, do discovery with engine init
-                # (execute is permitted for writes)
-                from pystata_analyzer.live_protocol import EngineConnection
-                ec = EngineConnection()
-                ec.initialize()
-                val = reader.read_scalar_by_name(name, engine_conn=ec)
-                ec.shutdown()
-                return val or 0.0
             except Exception:
                 pass
             return 0.0
@@ -951,11 +932,10 @@ class Scalar:
     def getString(name: str) -> str:
         """Get the value of a string scalar."""
         if _IS_X86_64:
-            # Direct memory read for string scalars
+            # Direct memory read via self-contained _engine._read_string_scalar_x86
+            from pystata_x.sfi._engine import _read_string_scalar_x86
             try:
-                from pystata_analyzer.live_protocol import StataMemoryReader
-                reader = StataMemoryReader()
-                val = reader.read_string_scalar_by_name(name, engine_conn=None)
+                val = _read_string_scalar_x86(name)
                 if val:
                     return val
             except Exception:
