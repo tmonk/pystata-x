@@ -328,10 +328,13 @@ def _patch_last_tsmat() -> None:
     """
     if _PLATFORM not in ("x86_64", "windows"):
         return
+    # _save_sp() returns the STACK address (where tsmat pointers are stored).
+    # Dereference to get the actual tsmat pointer, then patch its pool-header
+    # self-link so dispatch functions can find the pool tag at [-0x94].
     sp = _save_sp()
-    tsmat = ctypes.c_uint64.from_address(sp).value
-    if tsmat and tsmat > 0x100000:
-        ctypes.c_uint64.from_address(tsmat - 0x10).value = tsmat
+    tsmat_ptr = ctypes.c_uint64.from_address(sp).value if sp else 0
+    if tsmat_ptr and tsmat_ptr > 0x100000:
+        ctypes.c_uint64.from_address(tsmat_ptr - 0x10).value = tsmat_ptr
 
 
 def _push_int(val: int) -> None:
@@ -518,8 +521,15 @@ def initialize():
     # NOTE: Only on ARM64, where 0-arg functions don't read from the stack.
     # On x86_64, the generic impl always reads 3 tsmats from [sp-16],[sp-8],[sp],
     # so a single warm-up entry would leave uninitialized reads and crash.
-    if _pushint_fn is not None and _PLATFORM == "arm64":
+    if _pushint_fn is not None:
+        # Warm up: push and restore to initialize tsmat pool allocators
+        # (first call to tsmat_alloc/pool_alloc returns NULL on all platforms)
+        sp = _save_sp()
         _pushint_fn(0)
+        _restore_sp(sp)
+        # On ARM64 only: also leave one warm entry so 0-arg functions work
+        if _PLATFORM == "arm64":
+            _pushint_fn(0)
 
     _INITIALIZED = True
 

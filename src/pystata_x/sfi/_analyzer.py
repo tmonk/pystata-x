@@ -1484,6 +1484,307 @@ class StataBinary:
             })
         return results
 
+    # ── Extended protocol analysis ─────────────────────────────────
+
+    def trace_entry_points(self, name: str) -> list[dict]:
+        """Find ALL entry points within a dispatch function.
+
+        Some dispatch functions (like _bist_data at dispatch[87]) have
+        MULTIPLE entry points: one for 2-arg reads, another for 3-arg
+        writes, etc.  Each entry has a distinct prologue pattern.
+
+        Scans up to 256 bytes after the main vaddr looking for:
+        - `sub rsp, N` (after a push sequence or alone)
+        - Distinct register save patterns
+        - Known multi-entry signatures from _bist_data pattern
+
+        Returns list of {"vaddr", "prologue_offset", "prologue_type",
+        "arg_count_hint", "description"}.
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = self.symbols.get(name)
+        if not vaddr:
+            return []
+
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+
+        elf = self._elf
+        text_raw = elf.text_raw
+        text_vaddr = elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return []
+
+        # Scan up to 256 bytes for alternative entry points
+        chunk = text_raw[off:min(off + 256, len(text_raw))]
+        entries = []
+
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return [{"vaddr": vaddr, "error": "disasm failed"}]
+
+        # The main entry at vaddr is always entry 0
+        entries.append({
+            "vaddr": vaddr,
+            "offset": 0,
+            "type": "primary",
+            "description": "Main dispatch entry",
+        })
+
+        # Scan for alternative prologues
+        i = 0
+        while i < len(insns):
+            insn = insns[i]
+            # Look for patterns that start a new entry point:
+            # 1. `sub rsp, N` where N >= 8 (stack frame allocation)
+            # 2. Sequence of `push rXX` (register saves)
+            # 3. Known patterns from _bist_data
+
+            offset = insn.address - vaddr
+
+            # Skip the first entry (vaddr) since we already have it
+            if offset == 0:
+                i += 1
+                continue
+
+            # Pattern: `push r15` or any `push rXX` followed by `push` chain
+            if insn.mnemonic == "push" and offset >= 8:
+                # Check if this starts a multi-push prologue
+                push_count = 0
+                j = i
+                while j < len(insns) and insns[j].mnemonic == "push":
+                    push_count += 1
+                    j += 1
+                # After pushes, check for sub rsp
+                if j < len(insns) and insns[j].mnemonic in ("sub", "mov") and "rsp" in insns[j].op_str:
+                    entries.append({
+                        "vaddr": insn.address,
+                        "offset": offset,
+                        "type": "save_push",
+                        "push_count": push_count,
+                        "description": f"{push_count}-push prologue entry",
+                    })
+                    i = j
+                    continue
+
+            # Pattern: standalone `sub rsp, N` (not preceded by push chain)
+            if insn.mnemonic == "sub" and "rsp" in insn.op_str:
+                if offset >= 4:  # At least 4 bytes from main entry
+                    # Check not already part of an identified sequence
+                    prev = insns[i-1] if i > 0 else None
+                    if not prev or prev.mnemonic != "push":
+                        entries.append({
+                            "vaddr": insn.address,
+                            "offset": offset,
+                            "type": "direct_sub_rsp",
+                            "description": f"Direct frame at +{offset}",
+                        })
+
+            # Pattern: `lea rax/rXX, [rip + ...]` followed by `mov [rax], ...`
+            # (similar to the thunk pattern at 0x826494)
+            if insn.mnemonic == "lea" and "rip" in insn.op_str:
+                if i + 2 < len(insns):
+                    n1, n2 = insns[i+1], insns[i+2]
+                    if (n1.mnemonic == "lea" and "rip" in n1.op_str
+                            and n2.mnemonic == "mov"
+                            and "qword ptr" in n2.op_str
+                            and "[rax]" in n2.op_str):
+                        entries.append({
+                            "vaddr": insn.address,
+                            "offset": offset,
+                            "type": "thunk_lea_mov",
+                            "description": f"Thunk-style entry at +{offset} (sets up SP_global)",
+                        })
+                        i += 2
+                        i += 1
+                        continue
+
+            i += 1
+
+        return entries
+
+    def trace_error_codes(self, vaddr: int, max_size: int = 2048) -> list[dict]:
+        """Extract all error codes set by a function.
+
+        Scans from *vaddr* for instructions that write an error code to
+        the Stata error global:
+            mov dword ptr [rip + disp], error_code
+            mov dword ptr [rax], error_code    (where rax was loaded via lea)
+
+        Returns list of {"vaddr", "error_code", "instruction", "context"}
+        where context shows up to 3 preceding instructions for guard conditions.
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+
+        elf = self._elf
+        text_raw = elf.text_raw
+        text_vaddr = elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return []
+
+        chunk = text_raw[off:min(off + max_size, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return []
+
+        results = []
+        guard_buffer = []
+
+        for insn in insns:
+            op = f"{insn.mnemonic} {insn.op_str}"
+
+            # Check if this instruction sets an error code
+            # Pattern: mov dword ptr [...] , 0xNNNN
+            is_error_set = False
+            error_val = None
+
+            if insn.mnemonic == "mov" and "dword ptr" in op:
+                parts = op.split(",")
+                if len(parts) == 2:
+                    val_str = parts[-1].strip()
+                    try:
+                        if val_str.startswith("0x"):
+                            val = int(val_str, 16)
+                            if 0x100 <= val <= 0xFFFF:
+                                is_error_set = True
+                                error_val = val
+                    except ValueError:
+                        pass
+
+            if is_error_set:
+                results.append({
+                    "vaddr": insn.address,
+                    "error_code": error_val,
+                    "instruction": op,
+                    "guard_context": list(guard_buffer[-3:]),
+                })
+
+            guard_buffer.append(op)
+            if len(guard_buffer) > 6:
+                guard_buffer.pop(0)
+
+        return results
+
+    def analyze_full_protocol(self, name: str) -> dict:
+        """Complete protocol analysis for a dispatch function.
+
+        Combines:
+        - Entry point discovery (trace_entry_points)
+        - Error code extraction (trace_error_codes)
+        - Argument register tracking from ARG_PTR reads
+        - Protocol type inference
+
+        Returns dict with:
+        - name, vaddr, dispatch_index
+        - entry_points: list of entry points
+        - error_codes: list of (error, context)
+        - protocol_type: "read", "write", "read_write", "void", "string_return", "unknown"
+        - arg_count_read, arg_count_write: inferred arg counts
+        - notes: important observations
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = self.symbols.get(name)
+        if not vaddr:
+            return {"name": name, "error": "symbol not found"}
+
+        result = {
+            "name": name,
+            "vaddr": vaddr,
+            "dispatch_index": None,
+        }
+
+        # Find dispatch index
+        for i, dv in enumerate(self.dispatch_entries):
+            if dv == vaddr:
+                result["dispatch_index"] = i
+                break
+
+        # Entry points
+        result["entry_points"] = self.trace_entry_points(name)
+
+        # Full disassembly to understand args
+        if HAS_CAPSTONE and self._elf:
+            full = self._follow_thunk(vaddr, max_depth=2)
+            result["disassembly_size"] = len(full)
+
+            # Track ARG_PTR reads (lea rax, [rip + 0x500C6A0])
+            arg_ptr_reads = []
+            for level, addr, mnem, op_str in full:
+                if "0x500c6a0" in op_str.lower() or "500c6a0" in op_str.lower():
+                    arg_ptr_reads.append({"vaddr": addr, "level": level, "context": op_str})
+            result["arg_ptr_reads"] = arg_ptr_reads
+
+            # Track SP_global writes
+            sp_global_writes = []
+            for level, addr, mnem, op_str in full:
+                if "0x500c638" in op_str.lower() or "500c638" in op_str.lower():
+                    sp_global_writes.append({"vaddr": addr, "level": level, "context": op_str})
+            result["sp_global_writes"] = sp_global_writes
+
+            # Track push_str calls
+            pushstr_calls = []
+            for level, addr, mnem, op_str in full:
+                if mnem == "call" and "0x" in op_str:
+                    try:
+                        t = int(op_str.split("0x")[1], 16)
+                        push_fn = self.push_fns.get("pushstr") or self.push_fns.get("_pushstr")
+                        if push_fn and abs(t - push_fn) < 5:
+                            pushstr_calls.append({"vaddr": addr, "level": level})
+                    except (ValueError, IndexError):
+                        pass
+            result["pushstr_calls"] = pushstr_calls
+
+            # Error codes within function body
+            result["error_codes"] = self.trace_error_codes(vaddr, max_size=2048)
+
+        # Protocol inference
+        # A function that reads from ARG_PTR uses push+stack protocol
+        if result.get("arg_ptr_reads"):
+            # Determine if it's read-only, write-only, or combined
+            # by checking arg count branch (cmp edi, N / je)
+            has_edi_check = any(
+                "cmp edi" in str(i) or "edi" in str(i).split(",")[0].strip()
+                for _, _, mnem, op_str in full[:30]
+            )
+            has_pushstr = len(result.get("pushstr_calls", [])) > 0
+
+            if has_edi_check:
+                # Multiple code paths (read vs write)
+                for _, addr, mnem, op_str in full[:30]:
+                    if "cmp edi, 2" in op_str:
+                        result["protocol_type"] = "read_write"
+                        result["arg_count_read"] = 2
+                        break
+                    elif "cmp edi, 3" in op_str:
+                        if "arg_count_read" not in result:
+                            result["arg_count_read"] = 2
+                        result["protocol_type"] = "read_write"
+                        break
+            elif has_pushstr:
+                result["protocol_type"] = "string_return"
+            else:
+                result["protocol_type"] = "unknown"
+
+        else:
+            result["protocol_type"] = "no_stack_args"
+
+        # Clean up large disassembly from result
+        if "disassembly_size" in result:
+            pass  # Keep as summary metric
+
+        return result
+
     @staticmethod
     def diff_manifests(a: dict, b: dict) -> dict:
         """Compare two manifests and report differences.
