@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.2.0 (2026-05-21)
+
+### Chores
+
+- **gitignore**: Ignore local stata-fast build artifacts
+  ([`6743657`](https://github.com/tmonk/pystata-x/commit/67436571474c1399278e4f22b0dadf35e77e2a35))
+
+### Features
+
+- **stata-fast**: Add C source and build files
+  ([`18b3e98`](https://github.com/tmonk/pystata-x/commit/18b3e98a51bcfc72eb3fd9a3ad831dedbf15d5c8))
+
+
 ## v0.1.3 (2026-05-19)
 
 ### Continuous Integration
