@@ -1676,112 +1676,180 @@ class StataBinary:
         return results
 
     def analyze_full_protocol(self, name: str) -> dict:
-        """Complete protocol analysis for a dispatch function.
+        """Complete protocol analysis for a dispatch function on x86_64.
 
-        Combines:
-        - Entry point discovery (trace_entry_points)
-        - Error code extraction (trace_error_codes)
-        - Argument register tracking from ARG_PTR reads
-        - Protocol type inference
+        Analyzes the function's binary to determine:
+        - Whether it uses push+stack (reads from ARG_PTR at 0x500C6A0)
+        - Alternative entry points (multi-entry like _bist_data)
+        - Arg count branching (cmp edi, N)
+        - Error codes and their locations
+        - Whether it calls _pushstr (string return)
+        - Overall protocol type
 
-        Returns dict with:
-        - name, vaddr, dispatch_index
-        - entry_points: list of entry points
-        - error_codes: list of (error, context)
-        - protocol_type: "read", "write", "read_write", "void", "string_return", "unknown"
-        - arg_count_read, arg_count_write: inferred arg counts
-        - notes: important observations
+        Applies engine-level overrides:
+        - _bist_store → _bist_data (combined dispatch[87])
         """
         if not name.startswith("_bist_"):
             name = f"_bist_{name}"
-        vaddr = self.symbols.get(name)
+
+        # Engine-level override: _bist_store → _bist_data
+        effective_name = name
+        if name == "_bist_store":
+            effective_name = "_bist_data"
+
+        vaddr = self.symbols.get(effective_name)
         if not vaddr:
-            return {"name": name, "error": "symbol not found"}
+            if effective_name != name:
+                vaddr = self.symbols.get(name)
+            if not vaddr:
+                return {"name": name, "error": "symbol not found"}
 
         result = {
             "name": name,
+            "effective_name": effective_name if effective_name != name else None,
             "vaddr": vaddr,
             "dispatch_index": None,
         }
 
-        # Find dispatch index
         for i, dv in enumerate(self.dispatch_entries):
             if dv == vaddr:
                 result["dispatch_index"] = i
                 break
 
-        # Entry points
-        result["entry_points"] = self.trace_entry_points(name)
+        if not HAS_CAPSTONE or not self._elf:
+            return result
 
-        # Full disassembly to understand args
-        if HAS_CAPSTONE and self._elf:
-            full = self._follow_thunk(vaddr, max_depth=2)
-            result["disassembly_size"] = len(full)
+        elf = self._elf
+        text_raw = elf.text_raw
+        text_vaddr = elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
 
-            # Track ARG_PTR reads (lea rax, [rip + 0x500C6A0])
-            arg_ptr_reads = []
-            for level, addr, mnem, op_str in full:
-                if "0x500c6a0" in op_str.lower() or "500c6a0" in op_str.lower():
-                    arg_ptr_reads.append({"vaddr": addr, "level": level, "context": op_str})
-            result["arg_ptr_reads"] = arg_ptr_reads
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return result
 
-            # Track SP_global writes
-            sp_global_writes = []
-            for level, addr, mnem, op_str in full:
-                if "0x500c638" in op_str.lower() or "500c638" in op_str.lower():
-                    sp_global_writes.append({"vaddr": addr, "level": level, "context": op_str})
-            result["sp_global_writes"] = sp_global_writes
+        ARG_PTR = 0x500C6A0
+        SP_GLOBAL = 0x500C638
+        PUSHSTR = (self.push_fns.get("pushstr") or
+                   self.push_fns.get("_pushstr") or 0)
 
-            # Track push_str calls
-            pushstr_calls = []
-            for level, addr, mnem, op_str in full:
-                if mnem == "call" and "0x" in op_str:
+        # Scan first 4096 bytes for patterns
+        chunk = text_raw[off:min(off + 4096, len(text_raw))]
+        arg_ptr_reads = []
+        sp_global_access = []
+        pushstr_calls = []
+        edi_checks = []
+        entry_candidates = []
+
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return result
+
+        push_seq_start = None
+        push_count = 0
+
+        for insn in insns:
+            addr = insn.address
+            op = f"{insn.mnemonic} {insn.op_str}"
+            offs = addr - vaddr
+
+            # ── RIP-relative target resolution ──
+            if "rip" in insn.op_str:
+                # Extract displacement from op_str: [rip + 0xABCD] or [rip - 0xABCD]
+                import re
+                m = re.search(r'\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]', insn.op_str)
+                if m:
+                    sign = 1 if m.group(1) == '+' else -1
+                    disp = int(m.group(2), 16) * sign
+                    target = addr + insn.size + disp
+
+                    if target == ARG_PTR:
+                        arg_ptr_reads.append({"vaddr": addr, "offset": offs, "op": op})
+                    elif target == SP_GLOBAL:
+                        sp_global_access.append({"vaddr": addr, "offset": offs,
+                                                  "is_write": "mov" in insn.mnemonic and "qword ptr [" in op,
+                                                  "op": op})
+
+            # ── _pushstr calls ──
+            if insn.mnemonic == "call" and PUSHSTR:
+                if "0x" in insn.op_str:
                     try:
-                        t = int(op_str.split("0x")[1], 16)
-                        push_fn = self.push_fns.get("pushstr") or self.push_fns.get("_pushstr")
-                        if push_fn and abs(t - push_fn) < 5:
-                            pushstr_calls.append({"vaddr": addr, "level": level})
+                        t = int(insn.op_str.split("0x")[1], 16)
+                        if abs(t - PUSHSTR) < 5:
+                            pushstr_calls.append({"vaddr": addr, "offset": offs})
                     except (ValueError, IndexError):
                         pass
-            result["pushstr_calls"] = pushstr_calls
 
-            # Error codes within function body
-            result["error_codes"] = self.trace_error_codes(vaddr, max_size=2048)
+            # ── EDI arg count checks ──
+            if insn.mnemonic == "cmp" and "edi" in insn.op_str:
+                for tok in insn.op_str.split(","):
+                    tok = tok.strip()
+                    try:
+                        val = int(tok, 0)
+                        if 0 <= val <= 10:
+                            edi_checks.append({"vaddr": addr, "checks": val, "op": op})
+                    except ValueError:
+                        pass
 
-        # Protocol inference
-        # A function that reads from ARG_PTR uses push+stack protocol
-        if result.get("arg_ptr_reads"):
-            # Determine if it's read-only, write-only, or combined
-            # by checking arg count branch (cmp edi, N / je)
-            has_edi_check = any(
-                "cmp edi" in str(i) or "edi" in str(i).split(",")[0].strip()
-                for _, _, mnem, op_str in full[:30]
-            )
-            has_pushstr = len(result.get("pushstr_calls", [])) > 0
-
-            if has_edi_check:
-                # Multiple code paths (read vs write)
-                for _, addr, mnem, op_str in full[:30]:
-                    if "cmp edi, 2" in op_str:
-                        result["protocol_type"] = "read_write"
-                        result["arg_count_read"] = 2
-                        break
-                    elif "cmp edi, 3" in op_str:
-                        if "arg_count_read" not in result:
-                            result["arg_count_read"] = 2
-                        result["protocol_type"] = "read_write"
-                        break
-            elif has_pushstr:
-                result["protocol_type"] = "string_return"
+            # ── Entry point detection ──
+            if insn.mnemonic == "push":
+                if push_count == 0:
+                    push_seq_start = addr
+                push_count += 1
             else:
-                result["protocol_type"] = "unknown"
+                if push_count >= 3 and push_seq_start and push_seq_start != vaddr:
+                    entry_candidates.append({
+                        "vaddr": push_seq_start, "offset": push_seq_start - vaddr,
+                        "type": "push_prologue", "push_count": push_count,
+                    })
+                push_count = 0
+                push_seq_start = None
 
-        else:
+                if insn.mnemonic == "sub" and "rsp" in insn.op_str and offs >= 8:
+                    entry_candidates.append({
+                        "vaddr": addr, "offset": offs, "type": "frame_entry",
+                    })
+
+        result["arg_ptr_reads"] = arg_ptr_reads
+        result["sp_global_access"] = sp_global_access
+        result["pushstr_calls"] = pushstr_calls
+        result["edi_checks"] = edi_checks
+        result["entry_candidates"] = entry_candidates
+
+        # ── Protocol inference ──
+        uses_stack = len(arg_ptr_reads) > 0
+        has_multi_entry = len(entry_candidates) > 0
+        has_edi = len(edi_checks) > 0
+        calls_ps = len(pushstr_calls) > 0
+
+        if not uses_stack:
             result["protocol_type"] = "no_stack_args"
+            result["note"] = "No ARG_PTR read — uses internal global"
+        elif has_edi and has_multi_entry:
+            result["protocol_type"] = "read_write"
+            for ec in edi_checks:
+                v = ec["checks"]
+                if v == 2: result["read_arg_count"] = 2
+                elif v == 3: result["write_arg_count"] = 3
+                elif v == 4: result["write_arg_count"] = 4
+            result.setdefault("read_arg_count", 2)
+            result["note"] = "Combined read/write (multi-entry)"
+        elif has_edi:
+            result["protocol_type"] = "branching"
+            for ec in edi_checks:
+                v = ec["checks"]
+                if v == 1: result["read_arg_count"] = 1
+                elif v == 2: result["read_arg_count"] = 2
+        elif calls_ps:
+            result["protocol_type"] = "string_return"
+        else:
+            result["protocol_type"] = "push_stack_call"
 
-        # Clean up large disassembly from result
-        if "disassembly_size" in result:
-            pass  # Keep as summary metric
+        result["uses_push_stack"] = uses_stack
+
+        # ── Error codes ──
+        result["error_codes"] = self.trace_error_codes(vaddr, max_size=4096)
 
         return result
 
