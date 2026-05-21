@@ -376,7 +376,7 @@ class Framework:
 
         # Dispatch behavior classification
         try:
-            cls = self.binary.classify_dispatch_behavior(name)
+            cls = self.binary.auto_test_call_convention(name)
             if cls:
                 result["behavior"] = cls
         except Exception:
