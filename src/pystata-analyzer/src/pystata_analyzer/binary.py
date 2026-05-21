@@ -1440,9 +1440,15 @@ class StataBinary:
             return result
 
         # Get entry points
-        entry_points = self._follow_thunk(vaddr, max_depth=2)
-        if not entry_points:
-            entry_points = [vaddr]
+        entries_raw = self._follow_thunk(vaddr, max_depth=2)
+        entry_points = [vaddr]
+        if entries_raw:
+            for ep in entries_raw:
+                if isinstance(ep, tuple) and len(ep) >= 2 and isinstance(ep[1], int):
+                    entry_points.append(ep[1])
+        # Dedupe preserving order
+        seen = set()
+        entry_points = [x for x in entry_points if not (x in seen or seen.add(x))]
 
         result["entry_points"] = [
             {"vaddr": ep, "offset": ep - vaddr}
@@ -1450,9 +1456,7 @@ class StataBinary:
         ]
 
         # Try each entry point
-        for ep_addr in entry_points[:3]:  # Limit to first 3
-            offsets = [ep_addr - vaddr]
-
+        for ep_addr in entry_points[:2]:  # Limit to first 2
             # Also try with offsets 0x00 (first entry), 0xAA (second entry)
             for target_vaddr in [vaddr, vaddr + 0xAA]:
                 for arg_combo in self._generate_arg_combos():
