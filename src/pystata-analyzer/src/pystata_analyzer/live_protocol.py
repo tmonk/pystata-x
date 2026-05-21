@@ -1968,3 +1968,58 @@ class StataMemoryReader:
                 pass
             addr += 1
         return ""
+
+    def find_value_in_stata(self, name: str, value_type: str = "int32",
+                              engine_conn=None) -> dict:
+        """Find a named Stata value by scanning all libstata memory."""
+        import ctypes
+        result = {}
+        try:
+            maps = open("/proc/self/maps").read()
+        except (IOError, OSError):
+            return result
+        for line in maps.split("\n"):
+            parts = line.split()
+            if len(parts) < 5 or "libstata" not in line:
+                continue
+            if parts[1] not in ("r--p", "r-xp", "rw-p"):
+                continue
+            r = parts[0].split("-")
+            start, end = int(r[0], 16), int(r[1], 16)
+            size = end - start
+            if size < 4096 or size > 100 * 1024 * 1024:
+                continue
+            for chunk_start in range(start, end, 16384):
+                chunk_end = min(chunk_start + 16384, end)
+                try:
+                    buf = (ctypes.c_char * (chunk_end - chunk_start)).from_address(chunk_start)
+                    for off in range(chunk_end - chunk_start - len(name)):
+                        if buf[off:off+len(name)] == name.encode():
+                            abs_addr = chunk_start + off
+                            result["name_address"] = abs_addr
+                            result["in_section"] = parts[1]
+                            for value_off in range(0, 256, 4):
+                                try:
+                                    val_addr = abs_addr + value_off
+                                    if value_type == "double":
+                                        val = ctypes.c_double.from_address(val_addr).value
+                                    else:
+                                        val = ctypes.c_int32.from_address(val_addr).value
+                                    result["value_address"] = val_addr
+                                    result["value"] = val
+                                    result["value_offset"] = value_off
+                                    result["value_type"] = value_type
+                                    return result
+                                except Exception:
+                                    continue
+                            return result
+                except Exception:
+                    continue
+        return result
+
+    def read_c_value(self, name: str, engine_conn=None):
+        """Read a Stata c() system value from memory."""
+        info = self.find_value_in_stata(name, "int32", engine_conn)
+        if info.get("value_address"):
+            return info["value"]
+        return None

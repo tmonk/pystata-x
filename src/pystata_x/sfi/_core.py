@@ -526,18 +526,8 @@ class Data:
     def getMaxVars() -> int:
         """Get the maximum variables (Stata SE/MP default)."""
         if _IS_X86_64:
-            # Use engine execute for system queries (not data access)
-            from pystata_x.sfi._engine import execute
-            out, rc = execute("display c(maxvar)")
-            if rc == 0:
-                for line in out.split("\n"):
-                    line = line.strip()
-                    if line and not line.startswith("."):
-                        try:
-                            return int(line)
-                        except (ValueError, TypeError):
-                            pass
-        return 32767
+            # Hardcoded default for Stata SE/MP (no output buffer)
+            return 32767
 
     @staticmethod
     def isAlias(varno: int) -> bool:
@@ -618,25 +608,15 @@ class Data:
 
     @staticmethod
     def getFormattedValue(varno: int, obs: int, bValueLabel: bool = False) -> str:
-        """Get a cell's formatted display value (pure Python, or display fallback on x86_64)."""
+        """Get a cell's formatted display value."""
         if _IS_X86_64:
-            # Use engine execute for formatting (not data access — format display)
-            from pystata_x.sfi._engine import _read_var_name_x86, execute
-            try:
-                name = _read_var_name_x86(varno)
-                if name:
-                    fmt = Data.getVarFormat(varno)
-                    if fmt:
-                        out, rc = execute(f"display {fmt} {name}[{obs + 1}]")
-                    else:
-                        out, rc = execute(f"display {name}[{obs + 1}]")
-                    if rc == 0:
-                        for line in out.split("\n"):
-                            s = line.strip()
-                            if s and not s.startswith(".") and not s.startswith("r("):
-                                return s
-            except Exception:
-                pass
+            # Format the value in Python using format string from _engine
+            from pystata_x.sfi._engine import call_double
+            val = call_double("_bist_data", obs + 1, varno + 1)
+            if val is None:
+                return ""
+            return _format_stata_value(val, varno)
+        if bValueLabel:
                 pass
         fmt = Data.getVarFormat(varno)
         t = Data.getVarType(varno)
