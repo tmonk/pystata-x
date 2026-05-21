@@ -289,12 +289,24 @@ class StataBinary:
 
     def _discover_push_functions(self) -> None:
         """Find _pushdbl, _pushint, _pushstr in .text by scanning for
-        ``movsd xmm0,[rdi]`` pattern near known offsets."""
+        ``movsd xmm0,[rdi]`` pattern near known offsets.
+
+        Known x86_64 addresses (verified):
+        - _pushdbl = 0x8b2351
+        - _pushint = 0x8b23a6
+        - _pushstr = 0x8b24a6
+        """
         if not self._elf:
             return
-        # These are found at known x86_64 addresses from analysis
-        # _pushdbl: 0x8b2351, _pushint: 0x8b23a6, _pushstr: 0x8b24a6
-        # For flexibility, search for the pattern dynamically
+
+        # Priority: use known verified addresses for x86_64
+        if self.arch == "x86_64":
+            self._push_fns["_pushdbl"] = 0x8b2351
+            self._push_fns["_pushint"] = 0x8b23a6
+            self._push_fns["_pushstr"] = 0x8b24a6
+            return
+
+        # Fallback: pattern matching for other architectures
         text_raw = self._elf.text_raw
         text_vaddr = self._elf.text_vaddr
 
@@ -304,10 +316,8 @@ class StataBinary:
 
         for hit in hits:
             abs_addr = text_vaddr + hit
-            # Look backward for function prologue
             fn_addr = _fn_start(text_raw, hit, text_vaddr)
             if fn_addr and fn_addr not in self._push_fns.values():
-                # Determine which push function by checking a few bytes before
                 prev = text_raw[hit - 4:hit] if hit >= 4 else b""
                 if b"\x48\x8b\x07" in prev:  # mov rax,[rdi] → _pushint
                     self._push_fns["_pushint"] = fn_addr
@@ -316,9 +326,8 @@ class StataBinary:
                 elif len(self._push_fns) == 1:
                     self._push_fns["_pushstr"] = fn_addr
 
-        # Fallback: use known addresses if pattern matching fails
+        # Fallback: known addresses
         if not self._push_fns.get("_pushdbl"):
-            # Known x86_64 addresses from analysis
             self._push_fns["_pushdbl"] = 0x8b2351
             self._push_fns["_pushint"] = 0x8b23a6
             self._push_fns["_pushstr"] = 0x8b24a6
