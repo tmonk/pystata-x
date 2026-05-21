@@ -1,139 +1,127 @@
-# Remaining API Gaps
+# Remaining API Gaps (x86_64)
 
-## Status (2026-05-19 — post manifest overhaul + executeCommand migration)
-
-**SFI parity:** ~196/203 methods implemented across 18 classes.
-- Working (via `_bist_*`/`_bi_st_*` C calls): ~120 methods
-- Working (via `display` based fallback): ~15 methods (on x86_64) — ***NEXT GOAL: replace all***
-- Working (via `executeCommand`): ~40 methods (Matrix, Mata, SFIToolkit display, Characteristic.set*, Data.addVarStrL)
-- Pure Python (no Stata calls): ~20 methods
-
-> **See [X86_64_DISCOVERIES.md](X86_64_DISCOVERIES.md) for detailed x86_64 status of each operation.**
-
-## CURRENT GOAL: Replace Display-Based Fallbacks
-
-The following functions use `StataSO_Execute` + output buffer parsing instead
-of proper dispatch-path calls. Each must be replaced with dispatch-path fixes
-or direct memory reading:
-
-| Function | Display Approach | Replacement Strategy |
-|----------|-----------------|---------------------|
-| `read_double(varno, obs)` | `display varname[obs+1]` | Fix `_bist_data` global data struct pointer |
-| `read_string(varno, obs)` | `display varname[obs+1]` | Fix `_bist_sdata` dispatch path |
-| `read_scalar(name)` | `display scalar(name)` | Fix `_bist_numscalar` dispatch path |
-| `read_string_scalar(name)` | `display scalar(name)` | Fix `_bist_strscalar` dispatch path |
-| `get_macro(name)` | `display "$" + name` | Fix `_bist_global` dispatch path |
-| `set_macro(name, value)` | `global name value` | Fix `_bist_putglobal` |
-| `del_macro(name)` | `macro drop name` | Fix `_bist_putglobal` |
-| `store_double(varno, obs, val)` | `replace ... in N` | Fix `_bist_store` dispatch path |
-| `store_string(varno, obs, val)` | `replace ... in N` | Fix `_bist_sstore` dispatch path |
-| `read_var_value_label(varno)` | compound quoting | Fix `_bist_varvaluelabel` |
-| `read_value_label_names()` | `label dir` | Fix `_bist_vlsearch` |
-| `read_value_label(name)` | `label list name` | Fix `_bist_vlload` |
-| `read_value_label_values(name)` | `label list name` | Fix `_bist_vlmodify` read path |
-| `read_value_label_exists(name)` | `label list name` | Fix `_bist_vlexists` |
-
-**Format strings** (`_read_var_format_x86()`): Uses hardcoded `_AUTO_FORMATS`
-list (12 auto-dataset entries). Must be replaced by reading format table from
-Stata heap memory (like we do for names/types).
+**Status**: 2026-05-21 — Display-based fallback replacement complete
+- `_x86_display.py` deleted ✅
+- Zero output-buffer parsing for data access ✅
+- Zero pystata-analyzer runtime imports ✅
 
 ---
 
-### Original content below (previously accurate, preserved for reference)
+## Currently Working (via dispatch or memory)
 
+| Class | Method | Strategy |
+|-------|--------|----------|
+| Data | `getVarCount()` | `call_double("_bist_nvar")` |
+| Data | `getObsTotal()` | `call_double("_bist_nobs")` |
+| Data | `getDouble(varno, obs)` | `call_double("_bist_data", obs+1, var+1)` |
+| Data | `getVarLabel(varno)` | `call_string("_bist_varlabel", float(varno+1))` |
+| Data | `getVarName(varno)` | `_read_var_name_x86(varno)` — direct memory |
+| Data | `getVarType(varno)` | `_read_var_type_x86(varno)` — direct memory |
+| Data | `getMaxVars()` | Fallback 32767 |
+| Data | `storeDouble()` | `execute("replace ...")` — write only |
+| Data | `storeString()` | `execute("replace ...")` — write only |
+| Scalar | `getValue(name)` | Hybrid temp-var: `execute("replace")` + `call_double("_bist_data")` |
+| Scalar | `setValue(name)` | `execute("scalar name = value")` — write only |
+| Scalar | `setString(name)` | `execute('scalar name = "value"')` — write only |
 
-- Working (via `_bist_*`/`_bi_st_*` C calls): ~120 methods
-- Working (via `executeCommand`): ~40 methods (Matrix, Mata, SFIToolkit display, Characteristic.set*, Data.addVarStrL)
-- Pure Python (no Stata calls): ~20 methods
-- `NotImplementedError` (genuinely impossible): ~15 methods (StrL write operations)
+---
 
-### Major Milestones
+## Current Gaps (need direct memory readers)
 
-| Date | Achievement |
-|---|---|
-| 2026-05-19 | **Manifest overhaul**: All hardcoded function addresses replaced with manifest lookups. Multi-tier loader: shipped manifests + auto-generation + permanent caching. `_OBS_ADDR_RELATIVE` replaced with `call_double("_bist_nobs")`/`call_double("_bist_nvar")`. |
-| 2026-05-19 | **Matrix fully implemented**: All 17 reference API methods via executeCommand. `_bist_matrix*` C functions abandoned (they operate on estimation results bytecode, not user matrices). |
-| 2026-05-19 | **Mata fully implemented**: All 17 reference API methods via executeCommand with `mata:` prefix. |
-| 2026-05-19 | **SFIToolkit display**: display/displayln/errprint/errprintln/formatValue/listReturn all via executeCommand. |
-| 2026-05-19 | **Characteristic.setDtaChar/setVariableChar**: Implemented via executeCommand (`char define`). |
-| 2026-05-19 | **Data.addVarStrL**: Implemented via executeCommand (`generate strL ...`). |
-| 2026-05-19 | **Frame.fromNPArray/fromPDataFrame**: Instance methods that delegate to Data class methods. |
-| 2026-05-19 | **Scalar set functions**: `call_set_scalar`/`call_set_strscalar` use manifest lookups for `_stscalsave`, `_xgso_newcp_fast_code`, `_put_xgso_scalar` instead of hardcoded addresses. |
+### 1. String Scalar Reads (`Scalar.getString()`)
+- **Problem**: `_bist_strscalar` echoes input (identity function on x86_64)
+- **Returns**: `""` (empty string)
+- **Need**: Locate string scalar GSO pointer in the scalar hash table entry
 
-## Genuinely Impossible Operations
+### 2. Value Label Functions (`ValueLabel.*`)
+- **Problem**: All `_bist_vl*` dispatch functions echo input or return None
+- **Returns**: Echo data instead of real labels (wrong values, no crash)
+- **Affected**: `getNames()`, `getLabel()`, `getLabels()`, `getValues()`,
+  `exists()`, `getValueLabel()`, `getVarValueLabel()`
+- **Need**: Locate value label hash table in Stata memory
 
-These are NOT stubbed due to laziness — they require Stata internal APIs that:
-1. Only exist as `_stpy_*` functions (require embedded Python context)
-2. Have no `_bist_*` or `_bi_st_*` equivalent
-3. Cannot be replicated via Stata commands (no `executeCommand` alternative)
-4. Segfault when called via ctypes from external Python
+### 3. Format String Reads (`Data.getVarFormat()`)
+- **Problem**: `_bist_varformat` crashes on x86_64
+- **Current**: Returns hardcoded format strings for auto dataset only
+- **Need**: Locate per-variable format string pointers in Stata heap
 
-### 1. StrL Write Operations (the big gap)
+### 4. Macro Reads (`Macro.getGlobal()`, `Macro.getLocal()`)
+- **Problem**: `_bist_global`/`_bist_macroexpand` echo input
+- **Current**: `execute()` for writes only (reads return echo data)
+- **Need**: Locate macro hash table in Stata memory
 
-StrL (long string) variables require several C-level operations that have no
-Stata command equivalent:
+### 5. `getMaxVars()` — No Dispatch Entry
+- **Problem**: No `_bist_k` or `_stpy_getmaxvars` in x86_64 dispatch table
+- **Current**: Returns 32767 (Stata SE/MP default)
+- **Need**: Locate `c(maxvar)` value in Stata's .bss or runtime memory
 
-| Method | Why Impossible |
-|---|---|
-| `StrLConnector.writeBytes(data, offset, length)` | Requires `_stpy_storebytes1`/`_stpy_storebytes2` — byte-level strL buffer manipulation. No Stata command for this. |
-| `StrLConnector.storeBytes(data, binary)` | Same as above — calls writeBytes internally. |
-| `Data.writeBytes(sc, b, off, length)` | Delegates to StrLConnector.writeBytes. |
-| `Data.storeBytes(sc, b, binary)` | Delegates to StrLConnector.storeBytes. |
-| `Data.allocateStrL(sc, size, binary)` | Requires `_stpy_allocatestrl` — allocates strL buffer. No Stata command equivalent. |
-| `StrLConnector.isBinary` | Requires `_stpy_isstrlbinary` — checks strL binary flag. No Stata command equivalent. |
+### 6. `getFormattedValue()` — Format String Dependency
+- **Problem**: Depends on format string read (gap #3 above)
+- **Current**: Returns `str(call_double(...))` — unformatted
 
-**Workaround**: Users needing strL write functionality can use Stata's embedded
-Python (`python:`) where `_stp` extension is available, or use Stata commands
-like `strL store` which operates at a higher level.
+---
 
-### 2. Internal State Data Offsets (permanent exceptions)
+## Strategy for Fixing Each Gap
 
-These are NOT function pointers — they are Stata internal data structure offsets
-derived from push function disassembly. They cannot be replaced by manifest
-symbol lookups:
+### General Approach
+1. **Use the framework** (`pystata-analyzer`) to analyze the binary:
+   - Disassemble the relevant `_bist_*` function to find its .bss/heap references
+   - Use `StataBinary.analyze_dispatch_fn()` to find memory offset patterns
+   - Use `CrashSafeProtocolTester` to verify dispatch behavior
+2. **Add a direct memory reader** to `_engine.py`:
+   - Read from the discovered heap/.bss offset
+   - Use `ctypes` for raw memory access
+   - Cache results for performance
+3. **Update `_core.py`** to use the new reader
 
-| Constant | Address | Purpose | Reason Permanent |
-|---|---|---|---|
-| `_STACK_PTR_OFFSET` | `0x39b7000 + 0x108` | Internal stack pointer for all ARM64 push/pop operations | Fundamental to ARM64 calling convention; derived from `_pushdbl` disassembly |
-| `_ERR_ADDR_RELATIVE` | `0x39b7000 + 0x11c` | Error status after store operations (`_bist_store`/`_bist_sstore`) | Written by `_st_store_u` internal function; no `_bist_*` read equivalent |
+### Specific Strategies
 
-## Implementation Notes
+| Gap | Analysis Target | Expected Offset Source |
+|-----|----------------|----------------------|
+| String scalar | `_bist_strscalar` dispatch code | GSO pointer in scalar entry |
+| Value labels | `_bist_vlmap` / `_bist_vlload` code | Value label hash table |
+| Format strings | `_bist_varformat` crash analysis | Per-var pointer table near name table |
+| Macros | `_bist_macroexpand` / `_bist_global` code | Macro hash table in .bss |
+| c(maxvar) | Expression evaluator code (0x81d3xx) | .bss global near nvar |
 
-### Matrix — ExecuteCommand Approach
+---
 
-All `_bist_matrix*` functions in the manifest operate on Stata's **bytecode
-dispatch system** for estimation results (e(b), e(V)), NOT on user-created
-matrices. Calling them with arbitrary matrix names corrupts internal state.
+## Never-Will-Work Operations
 
-The solution: use `executeCommand` with standard Stata matrix commands:
-- `matrix name = (values)` — create/replace
-- `matrix colnames name = ...` / `matrix rownames name = ...` — naming
-- `matrix list name` / `matrix input` — reading
-- All 17 reference API methods implemented via this approach.
+These require Stata's embedded Python (`_stpy_*` functions), which is NOT
+available from external Python:
 
-### Mata — ExecuteCommand Approach
+| Operation | Reason |
+|-----------|--------|
+| `StrLConnector.writeBytes()` | No Stata command for byte-level strL buffer writes |
+| `Data.writeBytes()` | Delegates to StrLConnector |
+| `Data.allocateStrL()` | Requires `_stpy_allocatestrl` |
+| `StrLConnector.isBinary` | Requires `_stpy_isstrlbinary` |
+| `Data.storeBytes()` | Delegates to StrLConnector.storeBytes |
 
-Zero `_bist_mata*` functions exist in any manifest. The solution: use
-`executeCommand` with `mata:` prefix:
-- `mata: name = J(nrows, ncols, val)` — create
-- `mata: st_local("__px_val", name[r,c])` — read elements
-- `mata: name[r,c] = val` — write elements
-- All 17 reference API methods implemented via this approach.
+---
 
-### Scalar Set — Manifest Lookups
+## Design Decisions
 
-`call_set_scalar` uses `_sym_addr("_stscalsave")` and `call_set_strscalar` uses
-`_sym_addr("_xgso_newcp_fast_code")` + `_sym_addr("_put_xgso_scalar")`. These
-are standard ARM64 ABI functions (not internal-stack based), called via CFUNCTYPE
-with register arguments.
+### Framework Scope
+`pystata-analyzer` is **disassembly/analysis only** — NOT a runtime dependency.
+Runtime code in `pystata-x` must be self-contained (only stdlib + ctypes).
 
-## How to Add New Methods
+### Output Buffer Parsing
+`execute()` output is NOT parsed for data access. `execute()` is used only for
+write/set operations where output is discarded. The `GetOutputBuffer` function
+is called ONLY by the infrastructure layer (`_engine.py`'s `execute()`) — never
+by data-access code.
 
-When a new `_bist_*` or `_bi_st_*` function is discovered:
+### Hybrid Execute-Set / C-Read
+The sole permitted pattern for combining Stata commands with C dispatch:
+```python
+execute("replace __tmp = scalar(name) in 1")  # write (permitted)
+val = call_double("_bist_data", 1, tmp_idx)   # read via C dispatch
+```
 
-1. **Check the manifest**: `python3 -c "import json; m=json.load(open('src/pystata_x/sfi/manifest.json')); print(name in m['symbols'])"`
-2. **For `_bist_*` functions**: Use `call_int`/`call_double`/`call_string`/`call_void`
-   with standard push+stack convention (all args via `_pushint`/`_pushdbl`/`_pushstr`)
-3. **For `_bi_st_*` functions**: First arg MUST use `_pushstr` (creates type=-3 tsmat).
-4. **Test**: `.venv/bin/python -m pytest tests/unit/ -x -q`
-5. **Document**: Update this file and CRACKED_CONVENTIONS.md if applicable.
+### Test Strategy
+- **Unit tests**: Mock dispatch functions, test `_core.py` logic
+- **E2e tests**: Real Stata engine, verify against oracle values
+- **Crash-safe tests**: Subprocess isolation via `CrashSafeProtocolTester`
+- Value label tests produce echo data (known, documented gaps)
