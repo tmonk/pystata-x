@@ -29,6 +29,9 @@ Usage:
     print(ana.report())
 """
 
+# Re-export core classes from pystata-analyzer standalone package
+from pystata_analyzer import StataBinary, ELFReader, HAS_CAPSTONE
+
 import ctypes
 import hashlib
 import json
