@@ -1367,42 +1367,50 @@ class CrashSafeProtocolTester:
             else:
                 args_encoded.append(repr(a))
 
+        import json
         lib_path = self._stata_lib_path or "/usr/local/stata19/libstata-se.so"
-        args_json = json.dumps(args_encoded)
-        fn_json = json.dumps(fn_name)
+        # Write args to a temp JSON file to avoid quoting issues
+        args_file = "/tmp/__px_args_" + fn_name.replace("_", "") + ".json"
+        with open(args_file, "w") as af:
+            json.dump(args_encoded, af)
 
-        script = f'''
-import sys, json, ctypes
-sys.path.insert(0, "/pystata-x/src")
-
-# Recover args from JSON
-args_encoded = json.loads(''' + args_json + ''')
-args = []
-for a in args_encoded:
-    if isinstance(a, dict) and "__bytes__" in a:
-        args.append(bytes.fromhex(a["__bytes__"]))
-    else:
-        args.append(a)
-
-try:
-    from pystata_analyzer.live_protocol import EngineConnection, ProtocolAutoTester
-    ec = EngineConnection()
-    ec.initialize()
-    ec.execute("sysuse auto, clear")
-    ec.execute("scalar mynum = 42.5")
-    ec.execute("global mymacro HelloWorld")
-    
-    tester = ProtocolAutoTester(ec)
-    result = tester.universal_call(''' + fn_json + ''', *args)
-    result["_status"] = "ok"
-    # Ensure value is serializable
-    if isinstance(result.get("value"), bytes):
-        result["value"] = result["value"].decode(errors="replace")
-    print(json.dumps(result))
-except Exception as e:
-    import traceback
-    print(json.dumps({{"_status": "exception", "_error": str(e), "_traceback": traceback.format_exc()}}))
-'''
+        lines = [
+            "import sys, json, ctypes, os",
+            "sys.path.insert(0, '/pystata-x/src')",
+            "",
+            f"# Read args from {args_file}",
+            f"with open({json.dumps(args_file)}) as af:",
+            "    args_encoded = json.load(af)",
+            "args = []",
+            "for a in args_encoded:",
+            "    if isinstance(a, dict) and '__bytes__' in a:",
+            "        args.append(bytes.fromhex(a['__bytes__']))",
+            "    else:",
+            "        args.append(a)",
+            "",
+            "try:",
+            "    from pystata_analyzer.live_protocol import EngineConnection, ProtocolAutoTester",
+            "    ec = EngineConnection()",
+            "    ec.initialize()",
+            "    ec.execute('sysuse auto, clear')",
+            "    ec.execute('scalar mynum = 42.5')",
+            "    ec.execute('global mymacro HelloWorld')",
+            "",
+            f"    tester = ProtocolAutoTester(ec)",
+            f"    result = tester.universal_call({json.dumps(fn_name)}, *args)",
+            "    result['_status'] = 'ok'",
+            "    if isinstance(result.get('value'), bytes):",
+            "        result['value'] = result['value'].decode(errors='replace')",
+            "    # Clean up temp file",
+            f"    try: os.unlink({json.dumps(args_file)})",
+            "    except OSError: pass",
+            "    print(json.dumps(result))",
+            "except Exception as e:",
+            "    import traceback",
+            "    tb = traceback.format_exc()",
+            "    print(json.dumps({'_status': 'exception', '_error': str(e), '_traceback': tb}))",
+        ]
+        script = "\n".join(lines)
         return script
 
     def universal_call_safe(self, fn_name: str, *args,
