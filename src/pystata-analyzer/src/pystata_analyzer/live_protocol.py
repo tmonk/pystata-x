@@ -92,22 +92,20 @@ class EngineConnection:
 
         try:
             # Import and initialize the real engine
-            from pystata_x.sfi._engine import (
-                initialize as _eng_init,
-                _BASE, _LIB, _STACK_PTR_OFFSET,
-                _ERR_ADDR_RELATIVE, _SYMS, _MANIFEST,
-                execute as _eng_exec,
-            )
-            _eng_init()
-            self._base = _BASE
-            self._lib = _LIB
-            self._engine = _eng_exec
-            self._STACK_PTR_OFFSET = _STACK_PTR_OFFSET
-            self._ERR_ADDR_RELATIVE = _ERR_ADDR_RELATIVE
-            self._syms = dict(_SYMS)
-            self._manifest = dict(_MANIFEST)
+            # Import the module, not individual names, so we can
+            # read updated globals after _eng_init() modifies them.
+            import pystata_x.sfi._engine as _eng_mod
+
+            _eng_mod.initialize()
+            self._base = _eng_mod._BASE
+            self._lib = _eng_mod._LIB
+            self._engine = _eng_mod.execute
+            self._STACK_PTR_OFFSET = _eng_mod._STACK_PTR_OFFSET
+            self._ERR_ADDR_RELATIVE = _eng_mod._ERR_ADDR_RELATIVE
+            self._syms = dict(_eng_mod._SYMS)
+            self._manifest = dict(_eng_mod._MANIFEST)
             result["steps"].append({"action": "engine_init", "status": "ok",
-                                    "base": f"0x{_BASE:x}"})
+                                    "base": f"0x{self._base:x}"})
         except Exception as e:
             result["status"] = "error"
             result["reason"] = f"Engine init failed: {e}"
