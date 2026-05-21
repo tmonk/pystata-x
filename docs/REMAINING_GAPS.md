@@ -4,6 +4,45 @@
 
 **SFI parity:** ~196/203 methods implemented across 18 classes.
 - Working (via `_bist_*`/`_bi_st_*` C calls): ~120 methods
+- Working (via `display` based fallback): ~15 methods (on x86_64) — ***NEXT GOAL: replace all***
+- Working (via `executeCommand`): ~40 methods (Matrix, Mata, SFIToolkit display, Characteristic.set*, Data.addVarStrL)
+- Pure Python (no Stata calls): ~20 methods
+
+> **See [X86_64_DISCOVERIES.md](X86_64_DISCOVERIES.md) for detailed x86_64 status of each operation.**
+
+## CURRENT GOAL: Replace Display-Based Fallbacks
+
+The following functions use `StataSO_Execute` + output buffer parsing instead
+of proper dispatch-path calls. Each must be replaced with dispatch-path fixes
+or direct memory reading:
+
+| Function | Display Approach | Replacement Strategy |
+|----------|-----------------|---------------------|
+| `read_double(varno, obs)` | `display varname[obs+1]` | Fix `_bist_data` global data struct pointer |
+| `read_string(varno, obs)` | `display varname[obs+1]` | Fix `_bist_sdata` dispatch path |
+| `read_scalar(name)` | `display scalar(name)` | Fix `_bist_numscalar` dispatch path |
+| `read_string_scalar(name)` | `display scalar(name)` | Fix `_bist_strscalar` dispatch path |
+| `get_macro(name)` | `display "$" + name` | Fix `_bist_global` dispatch path |
+| `set_macro(name, value)` | `global name value` | Fix `_bist_putglobal` |
+| `del_macro(name)` | `macro drop name` | Fix `_bist_putglobal` |
+| `store_double(varno, obs, val)` | `replace ... in N` | Fix `_bist_store` dispatch path |
+| `store_string(varno, obs, val)` | `replace ... in N` | Fix `_bist_sstore` dispatch path |
+| `read_var_value_label(varno)` | compound quoting | Fix `_bist_varvaluelabel` |
+| `read_value_label_names()` | `label dir` | Fix `_bist_vlsearch` |
+| `read_value_label(name)` | `label list name` | Fix `_bist_vlload` |
+| `read_value_label_values(name)` | `label list name` | Fix `_bist_vlmodify` read path |
+| `read_value_label_exists(name)` | `label list name` | Fix `_bist_vlexists` |
+
+**Format strings** (`_read_var_format_x86()`): Uses hardcoded `_AUTO_FORMATS`
+list (12 auto-dataset entries). Must be replaced by reading format table from
+Stata heap memory (like we do for names/types).
+
+---
+
+### Original content below (previously accurate, preserved for reference)
+
+
+- Working (via `_bist_*`/`_bi_st_*` C calls): ~120 methods
 - Working (via `executeCommand`): ~40 methods (Matrix, Mata, SFIToolkit display, Characteristic.set*, Data.addVarStrL)
 - Pure Python (no Stata calls): ~20 methods
 - `NotImplementedError` (genuinely impossible): ~15 methods (StrL write operations)
