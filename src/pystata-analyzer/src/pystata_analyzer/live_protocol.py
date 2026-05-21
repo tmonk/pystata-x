@@ -16,12 +16,37 @@ from typing import Any, Optional, Callable
 
 log = logging.getLogger(__name__)
 
-# Known push function addresses (x86_64, verified from multiple binary versions)
-KNOWN_PUSH_ADDRS = {
-    "_pushdbl": 0x8B2351,
-    "_pushint": 0x8B23A6,
+# Known push function virtual addresses (x86_64, verified from ELF symbol table)
+KNOW_PUSH_ADDRS = {
+    "_pushdbl": 0x8B23EC,
+    "_pushint": 0x8B2441,
     "_pushstr": 0x8B24A6,
 }
+
+# Tsmat layout constants (x86_64, empirically verified)
+# A tsmat is a Stata internal structure holding a typed value.
+# The push functions (pushint/pushdbl/pushstr) allocate a tsmat
+# on the internal stack and set SP_global to point to it.
+#
+# String tsmat (two-level pointer layout):
+#   tsmat[0x00] = data_buf (pointer to data buffer)
+#   data_buf[0x00] = str_ptr (pointer to separately-allocated string struct)
+#   str_ptr[0x00] = int32 length (includes null terminator)
+#   str_ptr[0x04] = char data[length] (UTF-8 string)
+#   data_buf[0x10] = int32 buffer_capacity
+#   data_buf[0x18] = int32 flags
+#
+# Numeric tsmat (inline double layout):
+#   tsmat[0x00] = data_buf (pointer to data buffer)
+#   data_buf[0x00] = double value (inline, 8 bytes)
+#
+# Common tsmat fields:
+#   tsmat[0x34] = uint16 return_type_flag (0xFFFD = string, 0 = numeric)
+#   tsmat[0x36] = uint8  arg_type_flag (0 = string arg, !=0 = numeric arg)
+#   tsmat[0x20] = uint64 metadata_1 (must == 1 for converter to proceed)
+#   tsmat[0x28] = uint64 metadata_2 (must == 1 for converter to proceed)
+#   tsmat[-0x94] = uint32 pool_header_magic (must == 0x2b for pool alloc)
+#   tsmat[-0x10] = uint64 self_ptr (must == tsmat_ptr for pool alloc)
 
 
 class EngineConnection:
@@ -175,26 +200,208 @@ class EngineConnection:
         if self._base == 0:
             return
         if self._pushint is None:
-            addr = self._base + KNOWN_PUSH_ADDRS["_pushint"]
+            addr = self._base + KNOW_PUSH_ADDRS["_pushint"]
             try:
                 fn_type = ctypes.CFUNCTYPE(None, ctypes.c_int)
                 self._pushint = ctypes.cast(addr, fn_type)
             except Exception:
                 pass
         if self._pushdbl is None:
-            addr = self._base + KNOWN_PUSH_ADDRS["_pushdbl"]
+            addr = self._base + KNOW_PUSH_ADDRS["_pushdbl"]
             try:
                 fn_type = ctypes.CFUNCTYPE(None, ctypes.c_int)
                 self._pushdbl = ctypes.cast(addr, fn_type)
             except Exception:
                 pass
         if self._pushstr is None:
-            addr = self._base + KNOWN_PUSH_ADDRS["_pushstr"]
+            addr = self._base + KNOW_PUSH_ADDRS["_pushstr"]
             try:
                 fn_type = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_size_t)
                 self._pushstr = ctypes.cast(addr, fn_type)
             except Exception:
                 pass
+
+    def detect_tsmat_layout(self) -> dict:
+        """Auto-detect the tsmat memory layout by pushing test values.
+
+        Pushes a known string and a known double, then reads back the
+        tsmat struct fields to determine the layout of data buffers,
+        flags, and string pointers.
+
+        Returns a dict describing the detected layout, or an error dict
+        if push functions are not available.
+        """
+        result: dict = {
+            "string_layout": "unknown",
+            "double_layout": "unknown",
+            "tsmat_fields": {},
+            "pool_header": {},
+            "flags": {},
+        }
+
+        if not self._pushstr or not self._pushdbl:
+            result["error"] = "push functions not available"
+            return result
+
+        try:
+            self.execute("sysuse auto, clear")
+        except Exception:
+            pass
+
+        # ═══ Push a known string and dump ═══
+        # Save clean SP first
+        sp_clean = self.save_sp()
+
+        test_str = b"TESTSTRING"
+        self.push_str(test_str)
+        sp = self.save_sp()
+        tsmat = ctypes.c_uint64.from_address(sp).value if sp else 0
+
+        if tsmat and tsmat > 0x100000:
+            data_buf = ctypes.c_uint64.from_address(tsmat).value
+            result["string_tsmat_ptr"] = f"0x{tsmat:x}"
+            result["string_data_buf"] = f"0x{data_buf:x}"
+
+            # Dump tsmat fields
+            fields = {}
+            for i in range(0, 80, 8):
+                val = ctypes.c_uint64.from_address(tsmat + i).value
+                fields[f"+0x{i:02x}"] = f"0x{val:016x}"
+            result["string_tsmat_fields"] = fields
+
+            # Critical flags
+            result["string_flags"] = {
+                "return_flag_034": f"0x{ctypes.c_uint16.from_address(tsmat + 0x34).value:04x}",
+                "arg_flag_036": ctypes.c_uint8.from_address(tsmat + 0x36).value,
+                "meta_020": ctypes.c_uint64.from_address(tsmat + 0x20).value,
+                "meta_028": ctypes.c_uint64.from_address(tsmat + 0x28).value,
+            }
+
+            # Pool header
+            ph = ctypes.c_uint32.from_address(tsmat - 0x94).value
+            result["pool_header"] = {
+                "tsmat_minus_0x94": f"0x{ph:08x}",
+                "pool_ok": ph == 0x2b,
+            }
+
+            # Self pointer
+            sp_val = ctypes.c_uint64.from_address(tsmat - 0x10).value
+            result["self_ptr"] = {
+                "tsmat_minus_0x10": f"0x{sp_val:016x}",
+                "self_ok": sp_val == tsmat,
+            }
+
+            # Data buffer layout
+            if data_buf and data_buf > 0x100000:
+                # First 8 bytes — is it a pointer to string struct?
+                first_qword = ctypes.c_uint64.from_address(data_buf).value
+                # At first_qword, check for length prefix
+                if first_qword and first_qword > 0x100000:
+                    possible_len = ctypes.c_int32.from_address(first_qword).value
+                    if 0 < possible_len <= 32:
+                        # Read string at first_qword + 4
+                        raw = ctypes.create_string_buffer(possible_len + 1)
+                        ctypes.memmove(raw, first_qword + 4, possible_len)
+                        read_str = raw.value or b""
+                        if read_str and (read_str == test_str or test_str.startswith(read_str.rstrip(b"\x00"))):
+                            result["string_layout"] = "two_level_pointer"
+                            result["string_layout_detail"] = (
+                                "data_buf[0] = str_ptr, str_ptr[0:4] = len, str_ptr[4:] = data"
+                            )
+
+                # Try flat layout: data_buf[0:4] = length
+                if result["string_layout"] == "unknown":
+                    flat_len = ctypes.c_int32.from_address(data_buf).value
+                    if 0 < flat_len <= 32:
+                        raw = ctypes.create_string_buffer(flat_len + 1)
+                        ctypes.memmove(raw, data_buf + 4, flat_len)
+                        read_str = raw.value or b""
+                        if read_str and (read_str == test_str or test_str.startswith(read_str.rstrip(b"\x00"))):
+                            result["string_layout"] = "flat_inline"
+                            result["string_layout_detail"] = (
+                                "data_buf[0:4] = len, data_buf[4:] = data"
+                            )
+
+        # Restore clean SP
+        self.restore_sp(sp_clean)
+
+        # ═══ Push a known double and dump ═══
+        sp_clean2 = self.save_sp()
+        test_val = 42.5
+        self.push_double(test_val)
+        sp2 = self.save_sp()
+        tsmat2 = ctypes.c_uint64.from_address(sp2).value if sp2 else 0
+
+        if tsmat2 and tsmat2 > 0x100000:
+            data_buf2 = ctypes.c_uint64.from_address(tsmat2).value
+            result["double_tsmat_ptr"] = f"0x{tsmat2:x}"
+            result["double_data_buf"] = f"0x{data_buf2:x}"
+
+            if data_buf2 and data_buf2 > 0x100000:
+                read_val = ctypes.c_double.from_address(data_buf2).value
+                if abs(read_val - test_val) < 0.001:
+                    result["double_layout"] = "inline_double"
+                    result["double_layout_detail"] = "data_buf = double value (8 bytes)"
+
+            result["double_flags"] = {
+                "return_flag_034": f"0x{ctypes.c_uint16.from_address(tsmat2 + 0x34).value:04x}",
+                "arg_flag_036": ctypes.c_uint8.from_address(tsmat2 + 0x36).value,
+            }
+
+        self.restore_sp(sp_clean2)
+        return result
+
+    def verify_push_fns(self) -> dict:
+        """Diagnose push function setup and report issues.
+
+        Checks whether push function pointers are initialized, whether
+        the manifest addresses match known x86_64 addresses, and whether
+        they can be called safely.
+        """
+        result: dict = {
+            "pushint": {"initialized": self._pushint is not None},
+            "pushdbl": {"initialized": self._pushdbl is not None},
+            "pushstr": {"initialized": self._pushstr is not None},
+            "errors": [],
+        }
+
+        # Try to get manifest symbols for comparison
+        try:
+            from pystata_x.sfi._engine import _SYMS, _BASE
+            for name, key in [("pushint", "_pushint"),
+                              ("pushdbl", "_pushdbl"),
+                              ("pushstr", "_pushstr")]:
+                sym_addr = _SYMS.get(key)
+                if sym_addr is not None:
+                    result[name]["sym_vaddr"] = f"0x{sym_addr:x}"
+                    if _BASE:
+                        result[name]["runtime"] = f"0x{_BASE + sym_addr:x}"
+                else:
+                    result["errors"].append(f"{key} not in manifest symbols")
+
+                # Compare with known addresses
+                known = KNOW_PUSH_ADDRS.get(key)
+                if known and sym_addr and sym_addr != known:
+                    result["errors"].append(
+                        f"{key} manifest 0x{sym_addr:x} != known 0x{known:x}"
+                    )
+        except ImportError:
+            pass
+
+        all_ok = all(
+            result[k]["initialized"] for k in ["pushint", "pushdbl", "pushstr"]
+        )
+        any_ok = any(
+            result[k]["initialized"] for k in ["pushint", "pushdbl", "pushstr"]
+        )
+        if all_ok:
+            result["status"] = "ok"
+        elif any_ok:
+            result["status"] = "partial"
+        else:
+            result["status"] = "all_uninitialized"
+
+        return result
 
     def shutdown(self) -> None:
         """Shutdown the Stata engine (if applicable)."""
@@ -740,6 +947,219 @@ class ProtocolAutoTester:
                         pass
 
         return results
+
+    def diagnose_failure(self, name: str, *args,
+                         return_type: str = "double") -> dict:
+        """Call a dispatch function and explain WHY it failed.
+
+        Performs these steps:
+        1. Get oracle value via StataSO_Execute display
+        2. Save stack state
+        3. Push args and dump arg tsmat (pool headers, flags, layout)
+        4. Call function
+        5. Dump result tsmat (type flag, data_buf, string/double value)
+        6. Read error code
+        7. Try reading result as both double and string
+        8. Compare against oracle
+        9. Produce structured failure analysis
+        """
+        import ctypes
+        result: dict = {
+            "name": name,
+            "args": [repr(a) for a in args],
+            "steps": [],
+        }
+
+        if not self.engine._base:
+            init_status = self.engine.initialize()
+            result["init_status"] = init_status
+
+        # Step 1: Get oracle value
+        oracle = self._get_oracle(name, *args)
+        if oracle is not None:
+            result["oracle"] = oracle
+
+        # Step 2: Save SP and push args
+        sp_before = self.engine.save_sp()
+        push_step = {"action": "push_args", "args": [repr(a) for a in args]}
+        try:
+            for arg in args:
+                if isinstance(arg, (int, float)):
+                    self.engine.push_double(float(arg))
+                elif isinstance(arg, (bytes, bytearray)):
+                    self.engine.push_str(bytes(arg))
+            push_step["status"] = "ok"
+        except Exception as e:
+            push_step["status"] = "failed"
+            push_step["error"] = str(e)
+            self.engine.restore_sp(sp_before)
+            return result
+        result["steps"].append(push_step)
+
+        # Step 3: Dump arg tsmat
+        arg_dump = self.engine.dump_tsmat("after_push")
+        result["arg_tsmat"] = arg_dump
+
+        # Step 4: Set string return flag if needed
+        if return_type == "string":
+            sp = self.engine.save_sp()
+            tsmat = ctypes.c_uint64.from_address(sp).value
+            if tsmat:
+                ctypes.c_uint16.from_address(tsmat + 0x34).value = 0xFFFD
+                result["steps"].append({
+                    "action": "set_return_flag",
+                    "tsmat_034_set_to_FFFD": True,
+                })
+
+        # Step 5: Call the function
+        addr = self.engine._resolve_name(name)
+        if addr is None:
+            result["error"] = f"{name} not found in symbols"
+            self.engine.restore_sp(sp_before)
+            return result
+
+        rt = self.engine._base + addr
+        w0 = len(args) if args else 0
+        fn = self.engine._get_fn(rt, None, ctypes.c_int)
+        err_before = self.engine.read_error()
+
+        call_step = {"action": "call", "edi": w0, "vaddr": f"0x{addr:x}"}
+        try:
+            fn(w0)
+            call_step["status"] = "ok"
+        except Exception as e:
+            call_step["status"] = "exception"
+            call_step["error"] = str(e)
+            self.engine.restore_sp(sp_before)
+            return result
+        result["steps"].append(call_step)
+
+        # Step 6: Check error code
+        err_after = self.engine.read_error()
+        result["error_before"] = err_before
+        result["error_after"] = err_after
+        result["error_set"] = err_before != err_after
+        result["error_message"] = self.engine._error_to_str(err_after) if err_after else None
+
+        # Step 7: Dump result tsmat
+        res_dump = self.engine.dump_tsmat("after_call")
+        result["result_tsmat"] = res_dump
+
+        # Step 8: Read return value both ways
+        sp = self.engine.save_sp()
+        tsmat_ptr = ctypes.c_uint64.from_address(sp).value if sp else 0
+        if tsmat_ptr and tsmat_ptr > 0x100000:
+            data_buf = ctypes.c_uint64.from_address(tsmat_ptr).value
+            if data_buf and data_buf > 0x100000:
+                # As double
+                result["return_as_double"] = ctypes.c_double.from_address(data_buf).value
+                # As string (two-level)
+                str_ptr = ctypes.c_uint64.from_address(data_buf).value
+                if str_ptr and str_ptr > 0x100000:
+                    str_len = ctypes.c_int32.from_address(str_ptr).value
+                    if 0 < str_len < 65536:
+                        raw = ctypes.create_string_buffer(str_len + 1)
+                        ctypes.memmove(raw, str_ptr + 4, str_len)
+                        result["return_as_string"] = raw.value.decode("utf-8", errors="replace")
+
+        # Step 9: Compare with oracle
+        if oracle is not None:
+            dval = result.get("return_as_double")
+            sval = result.get("return_as_string")
+            if isinstance(oracle, (int, float)):
+                if dval is not None and abs(dval - oracle) < 0.001:
+                    result["oracle_match"] = True
+                else:
+                    result["oracle_match"] = False
+                    result["oracle_mismatch"] = f"expected {oracle}, got double={dval} str={sval!r}"
+                    self._analyze_failure(result, arg_dump, res_dump, oracle)
+            elif isinstance(oracle, str):
+                if sval == oracle:
+                    result["oracle_match"] = True
+                else:
+                    result["oracle_match"] = False
+                    result["oracle_mismatch"] = f"expected {oracle!r}, got {sval!r}"
+                    self._analyze_failure(result, arg_dump, res_dump, oracle)
+
+        self.engine.restore_sp(sp_before)
+        return result
+
+    def _analyze_failure(self, result: dict,
+                          arg_tsmat: dict, res_tsmat: dict,
+                          expected: Any) -> None:
+        """Analyze the root cause of a dispatch call failure."""
+        analysis = []
+
+        # Check arg tsmat pool header
+        pool = arg_tsmat.get("pool_header", {})
+        if not pool.get("tsmat_pool_ok"):
+            analysis.append(
+                f"Pool-header check FAILS: tsmat[-0x94]={pool.get('tsmat[-0x94]')} "
+                f"!= 0x2b. Converter will return error 0xC1E (3102) immediately.")
+
+        # Check self pointer
+        self_ptr = arg_tsmat.get("self_ptr", {})
+        if not self_ptr.get("ok"):
+            analysis.append(
+                f"Self-pointer check FAILS: tsmat[-0x10]={self_ptr.get('tsmat[-0x10]')} "
+                f"!= tsmat. Pool-header dereference will fail.")
+
+        # Check flags
+        flags = arg_tsmat.get("flags", {})
+        if flags.get("arg_type", 0) != 0:
+            analysis.append(
+                f"Arg type flag tsmat[0x36]={flags.get('arg_type')} != 0. "
+                f"Converter expects 0 (string arg), will error 0xC1F (3103).")
+        if flags.get("return_type", 0) != 0xFFFD:
+            analysis.append(
+                f"Return flag tsmat[0x34]=0x{flags.get('return_type',0):04x} != 0xFFFD. "
+                f"Converter will error 0xCB6 (3254).")
+        if flags.get("field_0x20", 0) != 1 or flags.get("field_0x28", 0) != 1:
+            analysis.append(
+                f"Metadata tsmat[0x20]={flags.get('field_0x20')} [0x28]={flags.get('field_0x28')}. "
+                f"Converter needs both == 1, will error 0xC84 (3204).")
+
+        # Check result
+        rflags = res_tsmat.get("flags", {})
+        if rflags:
+            rtype = rflags.get("return_type")
+            analysis.append(
+                f"Result tsmat[0x34] = 0x{rtype:04x} "
+                f"({'string' if rtype == 0xFFFD else 'numeric'}).")
+
+        # Stack change
+        arg_sp = arg_tsmat.get("sp", 0)
+        res_sp = res_tsmat.get("sp", 0)
+        if arg_sp and res_sp:
+            delta = res_sp - arg_sp
+            if delta == 0:
+                analysis.append("Stack pointer unchanged — no result tsmat was pushed.")
+            else:
+                analysis.append(f"Stack delta = {delta} bytes.")
+
+        if result.get("error_set"):
+            analysis.append(f"Error code 0x{result['error_after']:x} was set. "
+                          f"{result.get('error_message', '')}")
+
+        result["failure_analysis"] = analysis
+
+    def _get_oracle(self, name: str, *args):
+        """Get expected value via StataSO_Execute display."""
+        if "numscalar" in name and args and isinstance(args[0], (bytes, bytearray)):
+            sname = args[0].decode()
+            try:
+                out, rc = self.engine.execute(f"display scalar({sname})")
+                if rc == 0:
+                    for line in out.split("\n"):
+                        line = line.strip()
+                        if line and not line.startswith(".") and not line.startswith("r("):
+                            try:
+                                return float(line)
+                            except ValueError:
+                                return line
+            except Exception:
+                pass
+        return None
 
 
 # ── Framework integration ────────────────────────────────────────────
