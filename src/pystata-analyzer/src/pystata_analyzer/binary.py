@@ -10,6 +10,7 @@ Takes an ELF path, loads sections via ELFReader, and provides:
 
 import hashlib
 import json
+import logging
 import os
 import re
 import struct
