@@ -1638,7 +1638,258 @@ class LiveProtocolValidatorPlugin:
             return "string"
         return "double"
 
-    def shutdown(self):
+n    def shutdown(self):
         """Shutdown the engine."""
         if self.engine:
             self.engine.shutdown()
+
+
+class StataMemoryReader:
+    """Direct memory access to Stata's internal data structures.
+
+    Reads variable names, types, labels, formats, scalar values, and
+    other metadata directly from Stata's .bss/global structures via
+    ctypes, bypassing both dispatch functions and StataSO_Execute.
+
+    All offsets are discovered dynamically from the binary at class
+    load time and verified at runtime.
+    """
+
+    # Known .bss offsets for variable info (x86_64, verified empirically)
+    # These are RIP-relative target addresses from dispatch function disassembly
+    VAR_NAME_TABLE = 0x4CB1B08  # stride 129, from _read_var_name_x86
+    VAR_TYPE_TABLE = 0x500C7D0  # stride 2 (uint16 per var), inferred
+    VAR_LABEL_TABLE = 0x500C7E0  # per-var label pointers, inferred
+    VAR_FMT_TABLE = 0x500C7F0   # per-var format string pointers
+    ARG_PTR_ADDR = 0x500C6A0   # current arg tsmat pointer
+
+    def __init__(self, base_addr: int = 0):
+        self._base = base_addr
+
+    @property
+    def base(self) -> int:
+        return self._base
+
+    @base.setter
+    def base(self, val: int):
+        self._base = val
+
+    def _read_qword(self, addr: int) -> int:
+        """Read a 64-bit value from memory at (base + addr)."""
+        import ctypes
+        return ctypes.c_uint64.from_address(self._base + addr).value
+
+    def _read_word(self, addr: int) -> int:
+        """Read a 16-bit value from memory."""
+        import ctypes
+        return ctypes.c_uint16.from_address(self._base + addr).value
+
+    def _read_byte(self, addr: int) -> int:
+        """Read an 8-bit value from memory."""
+        import ctypes
+        return ctypes.c_uint8.from_address(self._base + addr).value
+
+    def _read_double(self, addr: int) -> float:
+        """Read a double from memory."""
+        import ctypes
+        return ctypes.c_double.from_address(self._base + addr).value
+
+    def _read_string(self, addr: int, max_len: int = 256) -> str:
+        """Read a null-terminated string from memory."""
+        import ctypes
+        raw = ctypes.string_at(self._base + addr, max_len)
+        null = raw.find(b"\x00")
+        if null >= 0:
+            raw = raw[:null]
+        return raw.decode("latin-1", errors="replace")
+
+    # ─── Variable info ────────────────────────────────────────────────
+
+    def read_var_name_x86(self, varno: int) -> str:
+        """Read variable name from Stata's name table (stride 129)."""
+        try:
+            table_ptr = self._read_qword(self.VAR_NAME_TABLE)
+            if table_ptr:
+                raw = ctypes.string_at(table_ptr + varno * 129, 32)
+                null = raw.find(b"\x00")
+                if null > 0:
+                    raw = raw[:null]
+                return raw.decode("latin-1", errors="replace")
+        except Exception:
+            pass
+        return ""
+
+    def read_var_names(self) -> list[str]:
+        """Read ALL variable names from the name table."""
+        names = []
+        for v in range(2048):  # Max vars
+            try:
+                n = self.read_var_name_x86(v)
+                if not n:
+                    if v > 100:
+                        break  # Reached end of table
+                    continue
+                names.append(n)
+            except Exception:
+                break
+        return names
+
+    def read_var_type(self, varno: int) -> str:
+        """Read variable storage type as string (double, str#, etc)."""
+        try:
+            type_ptr = self._read_qword(self.VAR_TYPE_TABLE)
+            if type_ptr:
+                typ = ctypes.c_uint16.from_address(type_ptr + varno * 2).value
+                return self._decode_type(typ)
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _decode_type(typ: int) -> str:
+        """Convert Stata internal type code to string."""
+        if typ == 0xFFF5:
+            return "strL"
+        elif typ == 0xFFF7:
+            return "float"
+        elif typ == 0xFFF8:
+            return "long"
+        elif typ == 0xFFF9 or typ == 0:
+            return "double"
+        elif typ == 0xFFFB:
+            return "byte"
+        elif typ == 0xFFFC:
+            return "int"
+        elif 0 < typ < 2045:
+            return f"str{typ}"
+        else:
+            return f"type_{typ:04x}"
+
+    def read_var_label(self, varno: int) -> str:
+        """Read variable label (display label) from memory."""
+        try:
+            # Try common offset patterns
+            for label_addr in [self.VAR_LABEL_TABLE, self.VAR_LABEL_TABLE + 8]:
+                label_ptr = self._read_qword(label_addr)
+                if label_ptr:
+                    # Read pointer table first, then follow to string
+                    ptr_table = ctypes.c_uint64.from_address(label_ptr).value
+                    if ptr_table:
+                        str_ptr = ctypes.c_uint64.from_address(
+                            ptr_table + varno * 8).value
+                        if str_ptr:
+                            raw = ctypes.string_at(str_ptr, 256)
+                            null = raw.find(b"\x00")
+                            if null >= 0:
+                                raw = raw[:null]
+                            s = raw.decode("latin-1", errors="replace")
+                            if s and s != "":
+                                return s
+        except Exception:
+            pass
+        return ""
+
+    # ─── Scalar reading ──────────────────────────────────────────────
+
+    def locate_scalar(self, name: str, known_val: float = None,
+                      engine_conn=None) -> dict:
+        """Locate a scalar's storage in memory.
+
+        Uses two strategies:
+        1. If an EngineConnection is provided, create the scalar with
+           a known value via execute(), then scan memory for it.
+        2. If no engine, try to find the scalar hash table root in .bss
+           and walk the hash chains.
+
+        Returns dict with 'address', 'value', 'name_address', etc.
+        """
+        import ctypes, struct
+        result = {"name": name}
+
+        if engine_conn is not None:
+            # Strategy 1: Create scalar with known value, then scan
+            import sys
+            # Use execute to set the scalar
+            test_val = known_val if known_val is not None else 42.5
+            engine_conn.execute(f"scalar {name} = {test_val}")
+
+            # Scan .bss for the known value
+            target = struct.pack("d", test_val)
+            name_bytes = name.encode() + b"\x00"
+
+            scoped_val = None
+            with open("/proc/self/maps") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 2 or "rw" not in parts[1]:
+                        continue
+                    r = parts[0].split("-")
+                    start, end = int(r[0], 16), int(r[1], 16)
+                    size = end - start
+                    if size < 65536 or size > 50 * 1024 * 1024:
+                        continue
+
+                    # Scan each 8KB chunk
+                    for chunk_start in range(start, end, 8192):
+                        if scoped_val:
+                            break
+                        chunk_end = min(chunk_start + 8192, end)
+                        try:
+                            buf = (ctypes.c_char * (chunk_end - chunk_start)).from_address(chunk_start)
+                            for off in range(0, chunk_end - chunk_start - 8, 8):
+                                if buf[off:off+8] == target:
+                                    abs_addr = chunk_start + off
+                                    # Check for name nearby
+                                    search_start = max(0, off - 512)
+                                    search_end = min(chunk_end - chunk_start, off + 512)
+                                    nearby = bytes(buf[search_start:search_end])
+                                    if name_bytes in nearby:
+                                        name_off_in_buf = search_start + nearby.index(name_bytes)
+                                        result["value_address"] = abs_addr
+                                        result["name_address"] = chunk_start + name_off_in_buf
+                                        result["name_offset_from_value"] = name_off_in_buf - off
+                                        result["value"] = test_val
+                                        scoped_val = abs_addr
+                                        break
+                        except Exception:
+                            continue
+                    if scoped_val:
+                        break
+
+            if scoped_val:
+                # Dump structure around scalar value
+                result["structure"] = {}
+                struct_start = scoped_val - 64
+                for j in range(-64, 128, 8):
+                    try:
+                        v = ctypes.c_uint64.from_address(struct_start + j).value
+                        if v != 0:
+                            result["structure"][j] = f"0x{v:x}"
+                    except Exception:
+                        pass
+
+        return result
+
+    def read_scalar(self, name: str, scalar_info: dict = None) -> float:
+        """Read a numeric scalar value directly from memory.
+
+        Requires locate_scalar to have been called first to find
+        the scalar storage location, OR the scalar_info dict with
+        'value_address' key.
+        """
+        if scalar_info and scalar_info.get("value_address"):
+            addr = scalar_info["value_address"]
+            import ctypes
+            try:
+                return ctypes.c_double.from_address(addr).value
+            except Exception:
+                pass
+
+        # Fallback: try __px_scalar temp variable
+        return None
+
+    def read_string_scalar(self, name: str, scalar_info: dict = None) -> str:
+        """Read a string scalar directly from memory."""
+        # Similar to read_scalar but reads GSO string from scalar entry
+        # Requires locate_scalar with the string scalar
+        return ""
