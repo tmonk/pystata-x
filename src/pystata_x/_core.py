@@ -162,15 +162,20 @@ def _read_graph_names() -> list[str] | None:
 
     Returns a list of graph names, or None if tracking is unavailable.
     """
-    # x86_64: use _x86_display.get_macro instead of official sfi.Macro
+    # x86_64: use _engine.execute for graph name query (not data access)
     import sys, platform
     if sys.platform in ("linux", "linux2") and platform.machine() in ("x86_64", "amd64"):
         try:
-            from pystata_x.sfi._x86_display import get_macro, clear_cache
-            raw = get_macro("r(list)")
-            clear_cache()
-            if raw and raw.strip():
-                return raw.split()
+            from pystata_x.sfi._engine import execute
+            out, rc = execute("quietly graph dir, memory")
+            if rc == 0 and out:
+                names = []
+                for line in out.split("\n"):
+                    s = line.strip()
+                    if s and not s.startswith(".") and not s.startswith("r("):
+                        names.append(s)
+                if names:
+                    return names
             return []
         except Exception:
             return None
