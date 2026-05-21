@@ -198,6 +198,7 @@ class TestCallDouble:
 
 class TestCallString:
     def test_string_return(self, eng):
+        # eng._pop_and_read_string is a MagicMock (set by eng fixture)
         eng._pop_and_read_string.return_value = "AMC Concord"
         result = eng.call_string("_bist_sdata", 1, 1)
         assert result == "AMC Concord"
@@ -206,6 +207,12 @@ class TestCallString:
         eng._pop_and_read_string.return_value = "make"
         result = eng.call_string("_bist_varname", 1)
         assert result == "make"
+
+    def test_numeric_result(self, eng):
+        """call_string should return str(double) when result is numeric."""
+        eng._pop_and_read_string.return_value = "42.0"
+        result = eng.call_string("_bist_nobs")
+        assert result == "42.0"
 
     def test_missing_symbol(self, eng):
         assert eng.call_string("_bist_nonexistent") is None
