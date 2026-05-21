@@ -1005,7 +1005,383 @@ class StataBinary:
 
         result["uses_push_stack"] = uses_stack
         result["error_codes"] = self.trace_error_codes(vaddr, max_size=4096)
+
+        # Run full push-call trace (all types) to augment protocol detection
+        all_push_calls = self.trace_all_push_calls(vaddr, max_size=4096)
+        if all_push_calls:
+            result["push_calls"] = all_push_calls
+            push_types = {p.get("push_function", "") for p in all_push_calls}
+            if "_pushstr" in push_types and result["protocol_type"] == "push_stack_call":
+                result["protocol_type"] = "string_return"
+
+        # Run pool-header check detection
+        pool_checks = self.trace_pool_checks(vaddr, max_size=4096)
+        if pool_checks:
+            result["pool_checks"] = pool_checks
+
         return result
+
+    def trace_calling_convention(self, name: str) -> dict:
+        """Determine the exact calling convention for a dispatch function.
+
+        Analyzes entry points, edi checks, push call types, and register
+        flow to infer:
+        - Number and types of arguments
+        - Return type (double, string, void, int)
+        - Which entry point handles which argument count
+        - Whether the function uses SP-resetting or push+stack protocol
+
+        Returns
+        -------
+        dict with keys:
+            - ``name``: function name
+            - ``vaddr``: virtual address
+            - ``inferred_args``: list of (type, description) tuples
+            - ``return_type``: "double", "string", "int", or "void"
+            - ``protocol``: "push+stack", "sp_reset", or "internal_global"
+            - ``entry_points``: each entry with arg_count and description
+            - ``confidence``: 0.0–1.0
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+
+        effective = name
+        if name == "_bist_store":
+            effective = "_bist_data"
+
+        vaddr = self._symbols.get(effective)
+        if not vaddr:
+            vaddr = self._symbols.get(name)
+        if not vaddr:
+            return {"name": name, "error": "symbol not found"}
+
+        result = {
+            "name": name,
+            "vaddr": vaddr,
+            "inferred_args": [],
+            "return_type": "unknown",
+            "protocol": "unknown",
+            "entry_points": [],
+            "confidence": 0.0,
+        }
+
+        if not HAS_CAPSTONE or not self._elf:
+            return result
+
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return result
+
+        # Scan a wider range (8KB) to catch push calls and edi checks
+        scan_start = max(0, off - 4096)
+        chunk = text_raw[scan_start:min(scan_start + 12288, len(text_raw))]
+        scan_base = vaddr - (off - scan_start)
+
+        try:
+            insns = list(md.disasm(chunk, scan_base))
+        except Exception:
+            return result
+
+        # Collect evidence
+        edi_checks: list[dict] = []
+        push_call_targets: list[tuple[int, str]] = []  # (vaddr, push_type)
+        has_sp_reset = False
+        has_arg_ptr = False
+        entry_sequences: list[dict] = []
+
+        push_count = 0
+        push_seq_start = None
+
+        push_map: dict[int, str] = {}
+        for pname, paddr in self._push_fns.items():
+            push_map[paddr] = pname
+
+        for insn in insns:
+            addr = insn.address
+            op = f"{insn.mnemonic} {insn.op_str}"
+
+            # RIP-relative ARG_PTR read / SP_global write
+            if "rip" in insn.op_str:
+                m = re.search(r"\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]", insn.op_str)
+                if m:
+                    sign = 1 if m.group(1) == "+" else -1
+                    disp = int(m.group(2), 16) * sign
+                    target = addr + insn.size + disp
+                    if target == ARG_PTR_ADDR:
+                        has_arg_ptr = True
+                    elif target == SP_GLOBAL_ADDR and "mov" in insn.mnemonic:
+                        has_sp_reset = True
+
+            # Push function call detection (all types)
+            if insn.mnemonic == "call" and "0x" in insn.op_str:
+                try:
+                    target = int(insn.op_str.split("0x")[1], 16)
+                    for paddr, pname in push_map.items():
+                        if abs(target - paddr) < 20:
+                            push_call_targets.append((addr, pname))
+                            break
+                except ValueError:
+                    pass
+
+            # EDI arg count checks
+            if insn.mnemonic == "cmp" and "edi" in insn.op_str:
+                for tok in insn.op_str.split(","):
+                    tok = tok.strip()
+                    try:
+                        val = int(tok, 0)
+                        if 0 <= val <= 10:
+                            edi_checks.append({"vaddr": addr, "checks": val, "op": op})
+                    except ValueError:
+                        pass
+
+            # Push prologue detection (entry points)
+            if insn.mnemonic == "push":
+                if push_count == 0:
+                    push_seq_start = addr
+                push_count += 1
+            else:
+                if push_count >= 2 and push_seq_start and push_seq_start != vaddr:
+                    entry_sequences.append({
+                        "vaddr": push_seq_start,
+                        "push_count": push_count,
+                        "type": "push_prologue",
+                    })
+                push_count = 0
+                push_seq_start = None
+
+        # Infer protocol type
+        if has_sp_reset and not has_arg_ptr and not push_call_targets:
+            result["protocol"] = "sp_reset"
+            result["return_type"] = "int"
+            result["inferred_args"] = []
+            result["entry_points"] = entry_sequences
+            result["confidence"] = 0.9
+        elif has_arg_ptr or push_call_targets:
+            result["protocol"] = "push+stack"
+            # Infer args from push call pattern
+            push_type_names = [t for _, t in push_call_targets]
+            str_count = sum(1 for t in push_type_names if "_pushstr" in t)
+            dbl_count = sum(1 for t in push_type_names if "_pushdbl" in t or "_pushint" in t)
+            if str_count > 0:
+                result["inferred_args"] = [
+                    ("string", "scalar name or macro name (first arg is string)"),
+                ]
+                result["return_type"] = "string"
+            elif dbl_count > 0:
+                result["inferred_args"] = [
+                    ("double", "numeric value or index"),
+                ]
+                result["return_type"] = "double"
+
+            # Edi checks tell us the arg count variants
+            if edi_checks:
+                for ec in edi_checks:
+                    result["entry_points"].append({
+                        "vaddr": ec["vaddr"],
+                        "arg_count": ec["checks"],
+                        "description": f"edi=={ec['checks']} at 0x{ec['vaddr']:x}",
+                    })
+            result["confidence"] = 0.7
+        else:
+            result["protocol"] = "internal_global"
+            result["confidence"] = 0.3
+
+        return result
+
+    def validate_protocol(self, name: str) -> dict:
+        """Validate the push+stack protocol setup for a dispatch function.
+
+        Checks:
+        - Pool-header magic (``data_ptr[-0x94] == 0x2b``)
+        - ARG_PTR self-pointer (``[-0x10] == tsmat_ptr``)
+        - String return flag (``tsmat[0x34] == 0xFFFD`` for string returns)
+        - SP_global reset pattern
+
+        Returns
+        -------
+        dict with:
+        - ``valid``: bool (all checks pass)
+        - ``checks``: list of check results
+        - ``pool_header_ok``: bool
+        - ``self_ptr_ok``: bool
+        - ``string_flag_ok``: bool or None
+        - ``sp_reset_ok``: bool
+        """
+        if not name.startswith("_bist_"):
+            name = f"_bist_{name}"
+        vaddr = self._symbols.get(name)
+        if not vaddr:
+            return {"valid": False, "error": "symbol not found"}
+
+        if not HAS_CAPSTONE or not self._elf:
+            return {"valid": False, "error": "capstone not available"}
+
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return {"valid": False, "error": "not in .text"}
+
+        chunk = text_raw[off:min(off + 4096, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return {"valid": False, "error": "disassembly failed"}
+
+        checks: list[dict] = []
+        pool_header_ok = False
+        self_ptr_ok = False
+        string_flag_ok: Optional[bool] = None
+        sp_reset_ok = False
+
+        for insn in insns:
+            addr = insn.address
+            op = f"{insn.mnemonic} {insn.op_str}"
+
+            # Pool-header check: cmp dword ptr [rax-0x94], 0x2b
+            if insn.mnemonic == "cmp" and "-0x94" in insn.op_str and "0x2b" in insn.op_str:
+                pool_header_ok = True
+                checks.append({"vaddr": addr, "type": "pool_header", "pass": True,
+                              "detail": "pool-header check for 0x2b magic found"})
+
+            # Self-pointer patch: mov [rax-0x10], rax or similar
+            if insn.mnemonic == "mov" and "-0x10" in insn.op_str:
+                self_ptr_ok = True
+                checks.append({"vaddr": addr, "type": "self_ptr", "pass": True,
+                              "detail": "tsmat self-pointer at [-0x10]"})
+
+            # String return flag: cmp [rax+0x34], -3 (0xFFFD)
+            if insn.mnemonic == "cmp" and "+0x34" in insn.op_str and "-3" in insn.op_str.split(",")[1:]:
+                string_flag_ok = True
+                checks.append({"vaddr": addr, "type": "string_flag", "pass": True,
+                              "detail": "string return flag tsmat[0x34] == 0xFFFD"})
+
+            # SP_global reset: mov [global], rdx or similar
+            if "rip" in insn.op_str:
+                m = re.search(r"\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]", insn.op_str)
+                if m:
+                    sign = 1 if m.group(1) == "+" else -1
+                    disp = int(m.group(2), 16) * sign
+                    target = addr + insn.size + disp
+                    if target == SP_GLOBAL_ADDR and "mov" in insn.mnemonic:
+                        sp_reset_ok = True
+                        checks.append({"vaddr": addr, "type": "sp_reset", "pass": True,
+                                      "detail": "SP_global address loaded"})
+
+        return {
+            "valid": pool_header_ok and sp_reset_ok,
+            "checks": checks,
+            "pool_header_ok": pool_header_ok,
+            "self_ptr_ok": self_ptr_ok,
+            "string_flag_ok": string_flag_ok,
+            "sp_reset_ok": sp_reset_ok,
+        }
+
+    def register_flow_trace(self, vaddr: int, max_size: int = 4096) -> dict:
+        """Trace register values through a function to understand data flow.
+
+        Follows assignments to key registers (rax, rbx, rcx, rdx, rsi,
+        rdi, r8, r9, r10, r11, r12, r13, r14, r15) and tracks:
+        - Constant assignments (mov eax, 0)
+        - Memory reads that load from computed addresses
+        - Calls whose results flow into registers
+        - Conditional branches based on register values
+
+        Returns
+        -------
+        dict with:
+        - ``entry_vaddr``: starting address
+        - ``register_states``: list of (vaddr, reg, value/description)
+        - ``interesting_flows``: descriptions of important data flows
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return {"entry_vaddr": vaddr, "register_states": [], "interesting_flows": []}
+
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return {"entry_vaddr": vaddr, "register_states": [], "interesting_flows": []}
+
+        chunk = text_raw[off:min(off + max_size, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return {"entry_vaddr": vaddr, "register_states": [], "interesting_flows": []}
+
+        register_states: list[dict] = []
+        interesting_flows: list[str] = []
+
+        # Track register assignments
+        regs = {
+            "rax": None, "rbx": None, "rcx": None, "rdx": None,
+            "rsi": None, "rdi": None,
+            "r8": None, "r9": None, "r10": None, "r11": None,
+            "r12": None, "r13": None, "r14": None, "r15": None,
+            "eax": None, "ebx": None, "ecx": None, "edx": None,
+            "esi": None, "edi": None,
+        }
+
+        for insn in insns:
+            mnem = insn.mnemonic
+            op = insn.op_str
+            addr = insn.address
+
+            # Track constant assignments: mov reg, const
+            if mnem in ("mov", "movzx", "movsxd") and "," in op:
+                parts = op.split(",", 1)
+                dst = parts[0].strip()
+                src = parts[1].strip()
+                if dst in regs:
+                    try:
+                        val = int(src, 0)
+                        regs[dst] = val
+                        if val <= 0xFFFF:  # Skip large addresses
+                            register_states.append({
+                                "vaddr": addr, "reg": dst, "value": val
+                            })
+                    except ValueError:
+                        if "qword ptr" in src or "dword ptr" in src:
+                            regs[dst] = "*" + src
+                            register_states.append({
+                                "vaddr": addr, "reg": dst, "value": f"load({src})"
+                            })
+                        else:
+                            regs[dst] = f"{mnem}({src})"
+
+            # Track comparisons that matter for argument flow
+            if mnem == "cmp" and "edi" in op:
+                for tok in op.split(","):
+                    tok = tok.strip()
+                    try:
+                        val = int(tok, 0)
+                        interesting_flows.append(
+                            f"0x{addr:x}: arg count check — edi == {val}")
+                    except ValueError:
+                        pass
+
+            # Track test/compare with error codes
+            if mnem == "cmp" and "0x" in op:
+                for tok in op.split(","):
+                    tok = tok.strip()
+                    try:
+                        val = int(tok, 0)
+                        if 0xC00 <= val <= 0xD00:  # Stata error code range
+                            interesting_flows.append(
+                                f"0x{addr:x}: error code check — 0x{val:x}")
+                    except ValueError:
+                        pass
+
+        return {
+            "entry_vaddr": vaddr,
+            "register_states": register_states,
+            "interesting_flows": interesting_flows,
+        }
 
     def live_test_protocol(self, name: str,
                            call_fn: Optional[callable] = None

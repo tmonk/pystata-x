@@ -347,6 +347,33 @@ class Framework:
             except Exception:
                 pass
 
+        # Calling convention (new meta-analysis)
+        if result.get("vaddr"):
+            try:
+                cc = self.binary.trace_calling_convention(name)
+                if cc and cc.get("confidence", 0) >= 0.3:
+                    result["calling_convention"] = cc
+            except Exception:
+                pass
+
+        # Protocol validation
+        if result.get("vaddr"):
+            try:
+                pv = self.binary.validate_protocol(name)
+                if pv:
+                    result["protocol_validation"] = pv
+            except Exception:
+                pass
+
+        # Register flow trace
+        if result.get("vaddr"):
+            try:
+                rf = self.binary.register_flow_trace(result["vaddr"])
+                if rf:
+                    result["register_flow"] = rf
+            except Exception:
+                pass
+
         # Run plugin analysis hooks
         for plugin in self._plugins:
             try:
