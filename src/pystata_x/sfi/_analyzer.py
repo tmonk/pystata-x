@@ -1733,8 +1733,10 @@ class StataBinary:
         PUSHSTR = (self.push_fns.get("pushstr") or
                    self.push_fns.get("_pushstr") or 0)
 
-        # Scan first 4096 bytes for patterns
-        chunk = text_raw[off:min(off + 4096, len(text_raw))]
+        # Scan first 8192 bytes for patterns (implementation may be before thunk)
+        scan_start = max(0, off - 2048)  # Include some backward range
+        chunk = text_raw[scan_start:min(scan_start + 8192, len(text_raw))]
+        scan_base = vaddr - (off - scan_start)  # absolute base address
         arg_ptr_reads = []
         sp_global_access = []
         pushstr_calls = []
@@ -1742,7 +1744,7 @@ class StataBinary:
         entry_candidates = []
 
         try:
-            insns = list(md.disasm(chunk, vaddr))
+            insns = list(md.disasm(chunk, scan_base))
         except Exception:
             return result
 
