@@ -28,12 +28,106 @@ from pystata_analyzer.helpers import (
 class StataBinary:
     """Core analysis engine for a Stata shared library binary.
 
+    Loads an ELF (or Mach-O) shared library, discovers the dispatch table,
+    st_* name table, push functions, and provides methods for deep protocol
+    analysis of individual dispatch functions.
+
     Usage::
 
         b = StataBinary("/path/to/libstata.so")
         b.analyze()                     # runs all discovery
         print(b.report())               # text summary
-        b._discover_dispatch_table()    # run individually if needed
+
+    Architecture
+    ------------
+    Stata's x86_64 binary uses a triple-layer dispatch architecture:
+
+    **1. Dispatch table** (1686 entries on x86_64 at ``0x440aac0``)
+      Each entry is either a direct implementation or a ``jmp`` thunk
+      that routes to the real implementation.  Entries are indexed
+      sequentially (0-1685) and are discovered via ``.rela.dyn`` relocations
+      against ``_bist_*`` symbols.
+
+    **2. st_* name table** (118 entries)
+      A ``.data``-resident array mapping function names (``st_nobs``,
+      ``st_data``, ``st_global``, etc.) to their dispatch indices.
+      The ``_bist_*`` name convention is formed by replacing ``st_`` with
+      ``_bist_`` (e.g. ``st_nobs`` → ``_bist_nobs``).
+
+    **3. Push functions** (``_pushdbl``, ``_pushint``, ``_pushstr``)
+      These allocate tsmat structs on Stata's internal stack and update
+      ARG_PTR.  They are the PRIMARY mechanism for passing arguments to
+      dispatch functions.
+
+    Memory model
+    ------------
+    - **ARG_PTR** (``0x500C6A0``, A.K.A. ``_STACK_PTR_OFFSET``):
+      Push functions store tsmat pointers here and advance by 8 bytes per
+      push.  ``_save_sp()`` reads the current value to locate arguments.
+      Most dispatch implementations index backward from ARG_PTR to find
+      their arguments.
+
+    - **SP_global** (``0x500C638``):
+      Some dispatch thunks (SP-resetting protocol) write a data-descriptor
+      address here.  The implementation function reads from a global C
+      struct instead of from push+stack.  Used by ``_bist_nobs``,
+      ``_bist_nvar``, and similar 0-arg/1-arg scalar-return functions.
+
+    - **tsmat structure** (temporary Stata matrix):
+      Each tsmat is a pool-allocated struct with data EMBEDDED at offset 0
+      (a ``double`` value or a GSO string pointer).  There is no separate
+      data buffer.  Pool-header detection uses the sentinel:
+      ``tsmat[-0x94] == 0x2b`` (checked by ``_check_pool_header``).
+      After allocation via ``pool_alloc``, the self-pointer at
+      ``tsmat[-0x10]`` must be fixed (``_patch_last_tsmat()``) because
+      it points to the pool free-list, not the tsmat itself.
+
+    Protocol patterns
+    -----------------
+    **Standard push+stack** (``_bist_data``, ``_bist_global``, etc.)
+      Arguments are pushed via ``_push_double`` / ``_push_int`` /
+      ``_push_str`` which allocates tsmat structs and updates ARG_PTR.
+      The implementation reads from these tsmat structs by indexing
+      backward from ARG_PTR.  This is the PRIMARY protocol for all
+      data-access functions.
+
+    **SP-resetting** (``_bist_nobs``, ``_bist_nvar``, etc.)
+      The dispatch thunk writes a descriptor address into SP_global
+      (``0x500C638``) and the implementation reads from a global struct.
+      No push function calls are needed.  Always 0-arg or 1-arg scalar
+      return.
+
+    **Internal-global** (``_bist_store`` write path, ``_bist_sdata``)
+      The implementation reads from a global struct that the thunk sets
+      up from Stata internals, not from ARG_PTR.  These are write-side
+      functions where the caller has already gone through a type-checking
+      thunk.
+
+    **String-return** (``_bist_macroexpand``, ``_bist_dir``)
+      Similar to push+stack but the return value is a GSO string pointer
+      stored in a tsmat, read via ``call_string()``.
+
+    Multi-entry dispatch
+    --------------------
+    Some dispatch indices share a single implementation with multiple
+    entry points.  For example, dispatch[87] serves BOTH ``_bist_data``
+    (read) and ``_bist_store`` (write) on x86_64.  Three sub-entry
+    points exist:
+
+    - ``0x826494`` — 2-arg read (esi=0)
+    - ``0x8264b8`` — 2-arg read (esi=1, alternative path)
+    - ``0x8264dc`` — 3-arg/4-arg write (6-push prologue)
+
+    Edge cases
+    ----------
+    - ``_bist_putglobal`` has **NO dispatch entry** on x86_64.  Macro
+      writes require a fundamentally different approach (e.g.
+      ``StataSO_Execute``, which is forbidden for data access).
+    - ``_bist_global`` handles single-arg reads only via push+stack.
+      Its write path (edi != 1) reads from a global struct set up by
+      the thunk, not from ARG_PTR.
+    - ``_bist_macroexpand`` works for reading macros.  It's the only
+      reliable dispatch-path method for string values.
     """
 
     def __init__(self, path: str):
@@ -158,9 +252,79 @@ class StataBinary:
             json.dump(manifest, f, indent=2)
         return output_path
 
-    def cache_health(self) -> dict:
-        """Check cache freshness against current binary."""
-        return {"sha256": self.sha256, "analyzed": self._analyzed}
+    @classmethod
+    def from_cache(cls, path: str, cache_dir: Optional[str] = None,
+                   min_version: int = 0) -> Optional["StataBinary"]:
+        """Load from cache if available and not stale.
+
+        Parameters
+        ----------
+        path : str
+            Path to the Stata shared library.
+        cache_dir : str or None
+            Directory containing cached manifests.  Default: ``./manifests/``.
+        min_version : int
+            Minimum manifest version accepted.  Manifests with a lower
+            version are treated as stale and ignored (default ``0`` = any).
+
+        Returns
+        -------
+        StataBinary or None
+            Populated instance if a valid, non-stale cache exists.
+        """
+        obj = cls(path)
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(__file__), "manifests")
+        prefix = f"manifest-{obj.sha256[:16]}.json"
+        cache_path = os.path.join(cache_dir, prefix)
+        if not os.path.exists(cache_path):
+            return None
+        with open(cache_path) as f:
+            mdata = json.load(f)
+        if mdata.get("manifest_version", 0) < min_version:
+            return None  # stale
+        # Populate from cache
+        obj._dispatch_vaddr = mdata.get("dispatch_vaddr", 0)
+        obj._dispatch_count = mdata.get("dispatch_count", 0)
+        obj._symbols = mdata.get("symbols", {})
+        do = mdata.get("data_offsets", {}) or {}
+        obj._stack_ptr_vaddr = do.get("stack_ptr_delta", 0) or obj._stack_ptr_vaddr
+        obj._err_addr_vaddr = do.get("err_addr_delta", 0) or obj._err_addr_vaddr
+        obj._push_fns = mdata.get("push_fns", {}) or obj._push_fns
+        obj._st_entries = []  # not cached; re-discover if needed
+        obj._analyzed = True
+        return obj
+
+    def cache_health(self, cache_dir: Optional[str] = None) -> list[dict]:
+        """Report health of all cached manifests.
+
+        Scans *cache_dir* for ``manifest-*.json`` files and returns a
+        list of dicts with ``filename``, ``manifest_version``, and
+        ``sha256`` for each.
+        """
+        if not self._analyzed and self._elf is None:
+            # Not yet analyzed — just return a basic check
+            return [{"sha256": self.sha256, "analyzed": False}]
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(__file__), "manifests")
+        results = []
+        if not os.path.isdir(cache_dir):
+            return results
+        for fname in sorted(os.listdir(cache_dir)):
+            if not fname.startswith("manifest-") or not fname.endswith(".json"):
+                continue
+            path = os.path.join(cache_dir, fname)
+            try:
+                with open(path) as f:
+                    mdata = json.load(f)
+                results.append({
+                    "filename": fname,
+                    "manifest_version": mdata.get("manifest_version", 0),
+                    "sha256": mdata.get("sha256", "")[:16],
+                })
+            except (json.JSONDecodeError, OSError):
+                results.append({"filename": fname, "error": True})
+        return results
 
     # ═══════════════════════════════════════════════════════════════
     # Discovery
@@ -841,6 +1005,69 @@ class StataBinary:
 
         result["uses_push_stack"] = uses_stack
         result["error_codes"] = self.trace_error_codes(vaddr, max_size=4096)
+        return result
+
+    def live_test_protocol(self, name: str,
+                           call_fn: Optional[callable] = None
+                           ) -> dict:
+        """Verify inferred protocol by calling the function live.
+
+        Parameters
+        ----------
+        name : str
+            Dispatch function name (e.g. ``"_bist_nobs"``).
+        call_fn : callable or None
+            A ``callable(name, *args)`` that invokes the dispatch function
+            via a running Stata engine and returns ``(rc, result)``.
+            If *None*, the method returns the protocol inference only.
+
+        Returns
+        -------
+        dict
+            ``{"inferred": ..., "live": ...}`` with the static protocol
+            inference and, if *call_fn* was provided, the live test result.
+
+        Example
+        -------
+        >>> from pystata_x.sfi._engine import StataEngine
+        >>> eng = StataEngine()
+        >>> b.live_test_protocol("_bist_nobs", call_fn=eng.call)
+        {"inferred": {"protocol_type": "no_stack_args", ...},
+         "live": {"rc": 0, "result": 74}}
+
+        Architecture note
+        -----------------
+        Dispatch functions follow one of three protocol patterns:
+
+        **Standard push+stack** (``_bist_data``, ``_bist_global``, etc.)
+          Arguments are pushed via ``_push_double`` / ``_push_int`` /
+          ``_push_str`` which allocate tsmat structs on the engine's
+          internal stack and update ARG_PTR (``0x500C6A0``).  The
+          dispatch implementation reads from these tsmat structs by
+          indexing backward from ARG_PTR.  This is the PRIMARY protocol
+          for all data-access functions.
+
+        **SP-resetting** (``_bist_nobs``, ``_bist_nvar``, etc.)
+          The dispatch thunk writes a descriptor address into SP_global
+          (``0x500C638``) and the implementation reads data from a
+          global C struct, not from push+stack.  No push function calls
+          are needed.  These are always 0-arg or 1-arg functions that
+          return a simple scalar.
+
+        **Internal-global** (``_bist_store`` write path)
+          The implementation reads from a global struct that the thunk
+          sets up from Stata internals, not from ARG_PTR.  These are
+          typically write-side functions where the caller is expected
+          to have gone through a type-checking dispatch thunk first.
+        """
+        proto = self.analyze_full_protocol(name)
+        result = {"inferred": proto, "live": None}
+        if call_fn is not None:
+            try:
+                rc, live_result = call_fn(name)
+                result["live"] = {"rc": rc, "result": live_result}
+            except Exception as e:
+                result["live"] = {"error": str(e)}
         return result
 
     # ═══════════════════════════════════════════════════════════════

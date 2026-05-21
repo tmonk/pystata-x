@@ -20,5 +20,8 @@ live = [
 [project.urls]
 Homepage = "https://github.com/tom-doerr/pystata-x"
 
+[project.scripts]
+pystata-analyzer = "pystata_analyzer.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

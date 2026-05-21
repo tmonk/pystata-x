@@ -26,6 +26,9 @@ dependencies = [
     "capstone>=6.0.0a5",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src", "src/pystata-analyzer/src"]
+
 [project.urls]
 Homepage = "https://github.com/tmonk/pystata-x"
 Repository = "https://github.com/tmonk/pystata-x"
