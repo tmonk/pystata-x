@@ -1071,6 +1071,202 @@ class StataBinary:
         return result
 
     # ═══════════════════════════════════════════════════════════════
+    #  Enhanced analysis methods for rich doc generation
+    # ═══════════════════════════════════════════════════════════════
+
+    def trace_all_push_calls(self, vaddr: int, max_size: int = 4096
+                             ) -> list[dict]:
+        """Find all calls to push functions (_pushdbl/_pushint/_pushstr)
+        within a function body.  Returns list with vaddr, target, and
+        inferred push type."""
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return []
+        chunk = text_raw[off:min(off + max_size, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return []
+
+        # Build address to name map for push functions
+        push_map: dict[int, str] = {}
+        for pname, paddr in self._push_fns.items():
+            push_map[paddr] = pname
+
+        results = []
+        for insn in insns:
+            if insn.mnemonic == "call" and "0x" in insn.op_str:
+                try:
+                    target = int(insn.op_str.split("0x")[1], 16)
+                    for paddr, pname in push_map.items():
+                        if abs(target - paddr) < 20:
+                            results.append({
+                                "vaddr": insn.address,
+                                "target_vaddr": target,
+                                "push_function": pname,
+                                "offset": insn.address - vaddr,
+                            })
+                            break
+                except ValueError:
+                    pass
+        return results
+
+    def disassemble_basic_blocks(self, vaddr: int, max_size: int = 2048
+                                 ) -> list[dict]:
+        """Disassemble and organize into basic blocks.
+
+        Each block has: start_vaddr, instructions (list of dicts),
+        branch_target, fallthrough, and outgoing edges.
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return []
+        chunk = text_raw[off:min(off + max_size, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return []
+
+        if not insns:
+            return []
+
+        TERMINAL = {"jmp", "ret", "call", "int3", "hlt"}
+        COND_JUMPS = {"je", "jne", "jg", "jge", "jl", "jle",
+                      "ja", "jae", "jb", "jbe",
+                      "jz", "jnz", "js", "jns", "jnp", "jp",
+                      "jo", "jno", "jrcxz", "loop", "loope",
+                      "loopne"}
+
+        blocks: list[dict] = []
+        current_block: dict = {
+            "start_vaddr": insns[0].address,
+            "instructions": [],
+            "branch_target": None,
+            "fallthrough": None,
+        }
+        for insn in insns:
+            cur = {
+                "vaddr": insn.address,
+                "mnemonic": insn.mnemonic,
+                "op_str": insn.op_str,
+                "bytes": insn.bytes.hex(),
+            }
+            # Check if this instruction is a branch target (gap since prev)
+            if current_block["instructions"]:
+                prev_addr = current_block["instructions"][-1]["vaddr"]
+                if insn.address > prev_addr + 15:
+                    # Gap — start new block
+                    blocks.append(current_block)
+                    current_block = {
+                        "start_vaddr": insn.address,
+                        "instructions": [],
+                        "branch_target": None,
+                        "fallthrough": None,
+                    }
+
+            current_block["instructions"].append(cur)
+            current_block["end_vaddr"] = insn.address
+
+            if insn.mnemonic in COND_JUMPS:
+                # Extract target
+                try:
+                    for part in insn.op_str.split(","):
+                        if "0x" in part:
+                            t = int(part.split("0x")[1], 16)
+                            current_block["branch_target"] = t
+                            next_addr = insn.address + insn.size
+                            current_block["fallthrough"] = next_addr
+                            break
+                except ValueError:
+                    pass
+                blocks.append(current_block)
+                current_block = {
+                    "start_vaddr": insn.address + insn.size,
+                    "instructions": [],
+                    "branch_target": None,
+                    "fallthrough": None,
+                }
+            elif insn.mnemonic in TERMINAL:
+                if insn.mnemonic == "jmp":
+                    try:
+                        if "0x" in insn.op_str:
+                            t = int(insn.op_str.split("0x")[1], 16)
+                            current_block["branch_target"] = t
+                    except ValueError:
+                        pass
+                blocks.append(current_block)
+                current_block = {
+                    "start_vaddr": insn.address + insn.size,
+                    "instructions": [],
+                    "branch_target": None,
+                    "fallthrough": None,
+                }
+
+        # Flush last block if non-empty
+        if current_block["instructions"]:
+            blocks.append(current_block)
+
+        return blocks
+
+    def trace_pool_checks(self, vaddr: int, max_size: int = 4096) -> list[dict]:
+        """Find pool-header check sites (tsmat[-0x94] comparisons)
+        within a function body."""
+        if not HAS_CAPSTONE or not self._elf:
+            return []
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return []
+        chunk = text_raw[off:min(off + max_size, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return []
+
+        results = []
+        for insn in insns:
+            op = f"{insn.mnemonic} {insn.op_str}"
+            if "- 0x94" in op or "- 148" in op:
+                results.append({
+                    "vaddr": insn.address,
+                    "instruction": op,
+                    "offset": insn.address - vaddr,
+                })
+        return results
+
+    def get_function_size(self, vaddr: int, max_scan: int = 4096) -> int:
+        """Estimate function size by scanning for 'ret' instruction."""
+        if not HAS_CAPSTONE or not self._elf:
+            return 0
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return 0
+        chunk = text_raw[off:min(off + max_scan, len(text_raw))]
+        try:
+            insns = list(md.disasm(chunk, vaddr))
+        except Exception:
+            return 0
+        for insn in insns:
+            if insn.mnemonic == "ret":
+                return (insn.address + insn.size) - vaddr
+        return min(max_scan, len(chunk))
+
+    # ═══════════════════════════════════════════════════════════════
     # Manifest
     # ═══════════════════════════════════════════════════════════════
 
