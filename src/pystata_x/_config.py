@@ -117,13 +117,17 @@ def _get_executable_path() -> str:
     return sys.executable
 
 
+def _is_arm_arch() -> bool:
+    """Return True when running on an ARM-family machine."""
+    machine = platform.machine().lower()
+    return machine.startswith("arm") or machine.startswith("aarch64")
+
+
 def _init_stata(splash: bool) -> int:
     """Call StataSO_Main to bootstrap the Stata engine.
 
     Uses NO ``-pyexec`` flag — we access Stata data through direct
     ``_bist_*`` C function calls, not through Stata's embedded Python.
-    This avoids Python-version compatibility issues (ast.FrameError
-    was removed in Python 3.14) and startup overhead.
     """
     stlib.StataSO_Main.restype = c_int
     stlib.StataSO_Main.argtypes = (c_int, POINTER(c_char_p))
@@ -167,10 +171,15 @@ def init(
         Enable streaming output (legacy behaviour).  Off by default;
         direct buffer drain after execution is much faster.
     """
-    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash
+    global stinitialized, stlib, stlibpath, sthome, stedition, stsplash, stversion
 
     if stinitialized:
         return
+
+    if not _is_arm_arch():
+        raise NotImplementedError(
+            "This upstream merge path supports only the ARM native runtime."
+        )
 
     if st_path is None:
         st_path = _get_st_home()

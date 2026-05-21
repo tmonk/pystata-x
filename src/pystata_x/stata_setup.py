@@ -54,4 +54,4 @@ def config(path: str, edition: str, splash: bool = True) -> None:
     # Inject our zero-overhead sfi module so 'from sfi import Macro, Data'
     # works without Stata's proprietary utilities/sfi module.
     from pystata_x import sfi as _px_sfi
-    sys.modules['sfi'] = _px_sfi
+    sys.modules["sfi"] = _px_sfi
