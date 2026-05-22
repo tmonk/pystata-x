@@ -1,4 +1,4 @@
-"""Find actual data buffer by searching for known values."""
+"""Verify the data+0x5d8 value isn't a false positive and find real data buffer."""
 import ctypes
 import struct
 
@@ -23,86 +23,180 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
     if name == '.data':
         data_rva = struct.unpack('<I', sh[12:16])[0]
         data_vsize = struct.unpack('<I', sh[8:12])[0]
-        raw_size = struct.unpack('<I', sh[16:20])[0]
         break
 data_ptr = handle + data_rva
-print('data_rva:', hex(data_rva), 'vsize:', data_vsize, 'raw:', raw_size)
 
-def find_double_in_range(start_off, size, target_val):
-    """Find a double value within a memory range."""
+def find_double(target_val):
+    """Search full data section for a double, return offset or None."""
     s_bytes = struct.pack('<d', target_val)
-    for cs in range(0, size, 256*1024):
-        cur = min(256*1024, size - cs)
+    for cs in range(0, data_vsize, 256*1024):
+        cur = min(256*1024, data_vsize - cs)
         try:
             buf = (ctypes.c_char * cur)()
-            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + start_off + cs), cur)
+            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + cs), cur)
         except:
             continue
         idx = bytes(buf).find(s_bytes)
         if idx >= 0:
-            return start_off + cs + idx
+            return cs + idx
     return None
 
-# Load auto
+# Read what's at data+0x5D8
+print('=== Reading around data+0x5d8 ===')
+buf = (ctypes.c_double * 50)()
+try:
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + 0x5D8 - 200), 400)
+except:
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + 0x5D8), 8)
+    print('  0x5d8: %.0f' % buf[0])
+else:
+    for k in range(50):
+        if buf[k] != 0:
+            print('  [%+d] %.0f' % (0x5D8 - 200 + k*8, buf[k]))
+
+# Load auto and check specific known values
+print('\n=== After loading auto ===')
 dll.StataSO_Execute(b'sysuse auto, clear')
 nv_buf = (ctypes.c_int * 1)()
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
 print('nvar:', nv_buf[0])
 
-# Search for price[1]=4099 in the FULL committed data section
-print('\nSearching for price[1]=4099 in full .data...')
-# First find the committed pages (not virtual memory that's uncommitted)
-# On Windows, committed pages are the ones we can read. Try the raw file size first.
-result = find_double_in_range(0, min(raw_size, data_vsize), 4099.0)
-if result is not None:
-    print('  Found at data+%x' % result)
+# Check all 12 values for obs[1]
+check_vals = [(1, 4099.0), (2, 22.0), (3, 3.0), (4, 2.5), (5, 11.0), 
+              (6, 2930.0), (7, 186.0), (8, 40.0), (9, 157.0), 
+              (10, 3.58), (11, 0.0), (12, None)]  # var 12 is make (string)
+
+for var, expected in check_vals:
+    if expected is None:
+        continue
+    off = find_double(expected)
+    print('  var%d (%.1f): at data+%x' % (var, expected, off if off else 0))
+    if off:
+        # Check if the next observation in the same variable is nearby
+        # If column-major: next obs is at current + 8
+        # If row-major: next obs is at current + nvar*8
+        row_major_next = data_ptr + off + nv_buf[0] * 8
+        col_major_next = data_ptr + off + 1 * 8
+        try:
+            buf_next = (ctypes.c_double * 2)()
+            ctypes.memmove(buf_next, ctypes.c_void_p(row_major_next), 16)
+            if buf_next[0] != 0:
+                print('    row-major next obs: %.0f' % buf_next[0])
+            ctypes.memmove(buf_next, ctypes.c_void_p(col_major_next), 16)
+            if buf_next[0] != 0:
+                print('    col-major next obs: %.0f' % buf_next[0])
+        except:
+            pass
+
+# Check: maybe the values for obs[1] are stored together 
+# (all 11 numeric vars' obs 1 values are adjacent)
+print('\n=== Check proximity: are all obs[0] values adjacent? ===')
+off_price = find_double(4099.0)
+off_mpg = find_double(22.0)
+off_rep78 = find_double(3.0)
+if off_price and off_mpg and off_rep78:
+    print('  price at data+%x' % off_price)
+    print('  mpg at data+%x' % off_mpg)
+    print('  rep78 at data+%x' % off_rep78)
+    print('  delta price-mpg: %d' % (off_mpg - off_price))
+    print('  delta mpg-rep78: %d' % (off_rep78 - off_mpg))
+    
+    # If row-major with 11 numeric vars: stride = 11*8 = 88
+    # mpg should be at price + 8 (adjacent, col-major)
+    # or at price + 88 (row-major, next row)
+    print('  Expected adj (col-major): %d' % (off_price + 8))
+    print('  Expected row-major: %d' % (off_price + 88))
+
+# If most values are NOT in .data, they must be heap.
+# Try a different approach: create a UNIQUE value and find it in memory
+print('\n=== Creating unique value for heap search ===')
+import random
+unique_val = 123456.789
+dll.StataSO_Execute(b'clear')
+dll.StataSO_Execute(b'set obs 1000')
+dll.StataSO_Execute(b'gen double __px = ' + str(unique_val).encode())
+
+# Search .data first
+s_bytes = struct.pack('<d', unique_val)
+in_data = find_double(unique_val)
+if in_data:
+    print('  Unique value IN .data at +%x' % in_data)
 else:
-    print('  Not in raw-size range. Trying full virtual size...')
-    result = find_double_in_range(0, data_vsize, 4099.0)
-    if result is not None:
-        print('  Found at data+%x' % result)
-    else:
-        print('  Not in .data section at all! Data buffer is on heap.')
-
-# Also search for mpg[1]=22 and rep78[1]=3
-for label, val in [('mpg[1]', 22.0), ('rep78[1]', 3.0), ('weight[1]', 2930.0), ('length[1]', 186.0)]:
-    off = find_double_in_range(0, min(raw_size, data_vsize), val)
-    if off is None:
-        off = find_double_in_range(0, data_vsize, val)
-    print('  %s=%.0f at %s' % (label, val, 'data+%x' % off if off else 'NOT FOUND'))
-
-if result:
-    # Read around the found value to understand data layout
-    print('\n=== Buffer layout around price[1] ===')
-    nearby = (ctypes.c_double * 50)()
-    base = result - 200
-    if base < 0: base = 0
-    try:
-        ctypes.memmove(nearby, ctypes.c_void_p(data_ptr + base), 400)
-    except:
-        nearby = (ctypes.c_double * 50)()
-        ctypes.memmove(nearby, ctypes.c_void_p(data_ptr + result - 100), 400)
-        base = result - 100
-    for k in range(50):
-        if nearby[k] != 0:
-            print('  [%+d] %.0f' % (base + k*8 - result, nearby[k]))
-
-# If NOT in .data, try other sections
-if result is None:
-    print('\n=== Data buffer is NOT in .data. Searching other sections... ===')
-    # Try reading beyond raw_size but within committed virtual memory
-    # Windows may have committed more pages
-    print('Searching extended .data region (vsize=%d)...' % data_vsize)
-    for _, val in [('', 4099.0), ('', 22.0), ('', 2930.0), ('', 3.0)]:
-        s_bytes = struct.pack('<d', val)
-        for cs in range(0, data_vsize, 1024*1024):
-            cur = min(1024*1024, data_vsize - cs)
-            try:
-                buf = (ctypes.c_char * cur)()
-                ctypes.memmove(buf, ctypes.c_void_p(data_ptr + cs), cur)
-            except:
+    print('  Unique value NOT in .data (must be on heap)')
+    
+    # Search full process memory via VirtualQuery
+    MEM_COMMIT = 0x1000
+    MEM_PRIVATE = 0x20000
+    kernel32 = ctypes.windll.kernel32
+    
+    import ctypes.wintypes as w
+    class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [("BaseAddress", ctypes.c_void_p),
+                    ("AllocationBase", ctypes.c_void_p),
+                    ("AllocationProtect", ctypes.c_ulong),
+                    ("RegionSize", ctypes.c_size_t),
+                    ("State", ctypes.c_ulong),
+                    ("Protect", ctypes.c_ulong),
+                    ("Type", ctypes.c_ulong)]
+    
+    mbi = MEMORY_BASIC_INFORMATION()
+    mbi_size = ctypes.sizeof(MEMORY_BASIC_INFORMATION)
+    VirtualQuery = kernel32.VirtualQuery
+    VirtualQuery.restype = ctypes.c_size_t
+    VirtualQuery.argtypes = [ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t]
+    
+    print('\n  Searching process heap memory...')
+    addr = ctypes.c_void_p(0x10000)  # Start from low address
+    found = False
+    while addr.value < 0x7FFFFFFF0000:
+        res = VirtualQuery(addr, ctypes.byref(mbi), mbi_size)
+        if res == 0:
+            break
+        if (mbi.State & MEM_COMMIT and 
+            mbi.Type == MEM_PRIVATE and
+            mbi.Protect == 0x04):  # PAGE_READWRITE
+            # Skip DLL region
+            if handle <= mbi.BaseAddress < handle + 0x04000000:
+                addr = ctypes.c_void_p(mbi.BaseAddress + mbi.RegionSize)
                 continue
-            if s_bytes in bytes(buf):
-                print('  Found %.0f at data+%x' % (val, cs + bytes(buf).find(s_bytes)))
+            # This is a committed, private, read-write region (heap)
+            # Search for our value
+            try:
+                buf = (ctypes.c_char * min(mbi.RegionSize, 256*1024))()
+                ctypes.memmove(buf, ctypes.c_void_p(mbi.BaseAddress), min(mbi.RegionSize, 256*1024))
+                raw = bytes(buf)
+                if s_bytes in raw:
+                    idx = raw.find(s_bytes)
+                    print('  FOUND at %x (offset %d in region %x-%x)' 
+                          % (mbi.BaseAddress + idx, idx, mbi.BaseAddress, mbi.BaseAddress + mbi.RegionSize))
+                    # Now search .data for a pointer to this address
+                    buf_addr = mbi.BaseAddress + idx
+                    # Search first 4MB of .data for pointers to this area
+                    print('  Searching .data for pointers to %x...' % buf_addr)
+                    for cs in range(0, min(data_vsize, 4*1024*1024), 256*1024):
+                        cur = min(256*1024, data_vsize - cs)
+                        try:
+                            dbuf = (ctypes.c_char * cur)()
+                            ctypes.memmove(dbuf, ctypes.c_void_p(data_ptr + cs), cur)
+                        except:
+                            continue
+                        draw = bytes(dbuf)
+                        for j in range(0, len(draw) - 8, 8):
+                            val = struct.unpack('<Q', draw[j:j+8])[0]
+                            if abs(val - buf_addr) < 0x1000:  # Within 4KB
+                                print('    POINTER at .data+%x: %x (delta %+d)' 
+                                      % (cs + j, val, val - buf_addr))
+                    found = True
+                    break
+            except:
+                pass
+        if found:
+            break
+        addr = ctypes.c_void_p(mbi.BaseAddress + mbi.RegionSize)
+        if addr.value > 0x7FFFFFFF0000:
+            break
+    
+    if not found:
+        print('  Value not found in any private committed memory region')
 
 print('\nDone')
