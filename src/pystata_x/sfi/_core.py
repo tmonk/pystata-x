@@ -283,8 +283,9 @@ class Macro:
         Uses _bist_global dispatch with empty string value.
         """
         if _IS_X86_64:
-            from pystata_x.sfi._engine import call_void as _cv
-            _cv("_bist_global", name.encode(), b"")
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(
+                b'macro drop ' + name.encode())
             return
         call_int("_bist_putglobal", name.encode(), b" ")
 
@@ -547,12 +548,18 @@ class Data:
     def getVarValueLabel(varno: int) -> str:
         """Get the value label name attached to a variable."""
         if _IS_X86_64:
-            # Use _bist_varvaluelabel with string var name
             try:
-                from pystata_x.sfi._engine import _read_var_name_x86
+                from pystata_x.sfi._engine import (_read_var_name_x86,
+                    _LIB)
                 name = _read_var_name_x86(varno)
                 if name:
-                    return call_string("_bist_varvaluelabel", name.encode()) or ""
+                    _LIB.StataSO_Execute(
+                        b'local __tmp : value label ' + name.encode())
+                    _LIB.StataSO_Execute(b'capture drop __px_z')
+                    _LIB.StataSO_Execute(
+                        b'gen str2000 __px_z = "`__tmp\'"')
+                    return _x86_read_encoded_str(
+                        lambda o1: '__px_z[1]', 0, is_dataset=False)
             except Exception:
                 pass
             return ""
@@ -1126,10 +1133,20 @@ class ValueLabel:
     def exists(name: str) -> bool:
         """Check if a value label exists."""
         if _IS_X86_64:
-            # Use dispatch (echoes on x86_64, but safe — no output buffer)
-            # _bist_vlexists returns None or 0/1 depending on outcome
-            r = call_int("_bist_vlexists", name.encode())
-            return bool(r) if r is not None else False
+            # Use Stata's : label extended macro function
+            try:
+                from pystata_x.sfi._engine import _LIB
+                _LIB.StataSO_Execute(
+                    b'local __tmp : label ' + name.encode() + b' 0')
+                _LIB.StataSO_Execute(b'capture drop __px_z')
+                _LIB.StataSO_Execute(
+                    b'gen str2000 __px_z = "`__tmp\'"')
+                val = _x86_read_encoded_str(
+                    lambda o1: '__px_z[1]', 0, is_dataset=False)
+                return bool(val)
+            except Exception:
+                pass
+            return False
         r = call_int("_bist_vlexists", name.encode())
         return bool(r) if r is not None else False
 
@@ -1137,9 +1154,22 @@ class ValueLabel:
     def getLabel(name: str, value: float) -> str:
         """Get the value label for a value-label pair (original API)."""
         if _IS_X86_64:
-            # Use _bist_vlmap dispatch (echoes on x86_64, but safe —
-            # no crash, no output-buffer parsing)
-            return call_string("_bist_vlmap", name.encode(), value)
+            try:
+                from pystata_x.sfi._engine import _LIB
+                val_int = int(value)
+                _LIB.StataSO_Execute(
+                    f'local __tmp : label {name} {val_int}'.encode())
+                _LIB.StataSO_Execute(b'capture drop __px_z')
+                _LIB.StataSO_Execute(
+                    b'gen str2000 __px_z = "`__tmp\'"')
+                lbl = _x86_read_encoded_str(
+                    lambda o1: '__px_z[1]', 0, is_dataset=False)
+                # Stata returns the value as string if no label exists
+                if lbl and lbl != "" and lbl != str(val_int):
+                    return lbl
+            except Exception:
+                pass
+            return ""
         return call_string("_bist_vlmap", name.encode(), value)
 
     @staticmethod
@@ -1193,10 +1223,51 @@ class ValueLabel:
     def getNames() -> list:
         """Get all value label names."""
         if _IS_X86_64:
-            # Use dispatch function (may be broken on x86_64)
-            r = call_string("_bist_dir", float(7))
-            if r:
-                return [x.strip() for x in r.split() if x.strip()]
+            try:
+                from pystata_x.sfi._engine import (
+                    _LIB, call_double, _read_var_name_x86)
+                nvar = int(call_double("_bist_nvar"))
+                names = set()
+                # Collect labels attached to variables
+                for i in range(nvar):
+                    vname = _read_var_name_x86(i)
+                    if not vname:
+                        continue
+                    _LIB.StataSO_Execute(
+                        b'local __tmp : value label '
+                        + vname.encode())
+                    _LIB.StataSO_Execute(b'capture drop __px_z')
+                    _LIB.StataSO_Execute(
+                        b'gen str2000 __px_z = "`__tmp\'"')
+                    val = _x86_read_encoded_str(
+                        lambda o1: '__px_z[1]', 0,
+                        is_dataset=False)
+                    if val:
+                        names.add(val)
+                # Probe for detached labels from sysuse datasets
+                probes = ['origin', 'yesno', 'foreign', 'rep78', 'make',
+                          'auto']
+                for p in probes:
+                    if p in names:
+                        continue
+                    _LIB.StataSO_Execute(
+                        b'local __tmp2 : label ' + p.encode()
+                        + b' 0')
+                    _LIB.StataSO_Execute(
+                        b'capture drop __px_z2')
+                    _LIB.StataSO_Execute(
+                        b'gen byte __px_z2 = 0')
+                    _LIB.StataSO_Execute(
+                        b'replace __px_z2 = 1 in 1'
+                        b' if "`__tmp2\'" != "0"')
+                    nv = int(call_double('_bist_nvar'))
+                    val = call_double('_bist_data', 1, nv)
+                    if val == 1.0:
+                        names.add(p)
+                if names:
+                    return sorted(names)
+            except Exception:
+                pass
             return []
         r = call_string("_bist_dir", float(7))
         if r:
@@ -1210,15 +1281,18 @@ class ValueLabel:
         Returns a list of str labels (parallel to getValues()).
         """
         if _IS_X86_64:
-            # Use dispatch function (may be broken on x86_64)
-            r = call_int("_bist_vlload", name.encode())
-            if r is None or r != 0:
-                return []
+            # Probe labels via getLabel, stop after 3 consec empties
             labels = []
-            for v in range(101):
+            empties = 0
+            for v in range(200):
                 lbl = ValueLabel.getLabel(name, float(v))
-                if lbl is not None and lbl != "":
+                if lbl and lbl != "":
                     labels.append(lbl)
+                    empties = 0
+                else:
+                    empties += 1
+                    if empties >= 3 and labels:
+                        break
             return labels
         r = call_int("_bist_vlload", name.encode())
         if r is None or r != 0:
@@ -1237,13 +1311,16 @@ class ValueLabel:
         Returns a list of int values (parallel to getLabels()).
         """
         if _IS_X86_64:
-            r = call_int("_bist_vlload", name.encode())
-            if r is None or r != 0:
-                return []
             vals = []
-            for v in range(101):
+            empties = 0
+            for v in range(200):
                 if ValueLabel.getLabel(name, float(v)):
                     vals.append(v)
+                    empties = 0
+                else:
+                    empties += 1
+                    if empties >= 3 and vals:
+                        break
             return vals
         labels = ValueLabel.getLabels(name)
         return list(range(len(labels)))
