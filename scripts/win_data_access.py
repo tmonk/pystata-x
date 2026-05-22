@@ -1,5 +1,21 @@
-"""TEST: Does 0x922C00 store gen'd expression values correctly?
-Key question: does the scratch buffer at 0x922C00 work for expressions or just literals?"""
+"""BUILD COMPLETE WINDOWS SFI SOLUTION using scalar intermediate pattern.
+
+data_get(obs, var) pattern:
+1. scalar __px_val = varname[obs]
+2. gen double __px_t = __px_val  (writes scalar value to 0x922C00)
+3. Read double at 0x922C00
+4. drop __px_t
+
+For strings (var names, types, etc.):
+1. Store in local macro first
+2. Store macro value in a scalar (only for numeric) 
+3. For strings: use the encode-as-double approach with intermediate gen through scalar
+
+For var names specifically:
+1. local __px_name : variable 1
+2. gen str32 __px_s = "`__px_name'"  (creates string var, last variable)
+3. Write each char as a double via scalar
+"""
 import ctypes
 import struct
 
@@ -25,134 +41,117 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
         break
 data_ptr = handle + data_rva
 
+SCRATCH_OFF = 0x922C00
+
 def scratch():
     buf = (ctypes.c_double * 1)()
-    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + 0x922C00), 8)
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + SCRATCH_OFF), 8)
     return buf[0]
 
-def run(cmd):
-    rc = dll.StataSO_Execute(cmd.encode() if isinstance(cmd, str) else cmd)
-    return rc
+def execute(cmd):
+    if isinstance(cmd, str):
+        cmd = cmd.encode()
+    return dll.StataSO_Execute(cmd)
 
-# Test with auto dataset
-run('sysuse auto, clear')
+# Load auto
+execute('sysuse auto, clear')
 
-# Test 1: Literal
-print('=== Test 1: gen with literal ===')
-run('capture drop __px_t')
-run('gen double __px_t = 42')
-print('  Literal 42: %.0f' % scratch())
+# === TEST: BUILD COMPLETE DATA ACCESS ===
 
-# Test 2: Arithmetic expression (no bracket)
-print('\n=== Test 2: gen with arithmetic ===')
-run('capture drop __px_t')
-run('gen double __px_t = 1 + 2')
-print('  1+2: %.0f' % scratch())
+# Create reusable temp variable once
+execute('capture drop __px_t')
+execute('scalar __px_tmp = 0')
 
-# Test 3: Expression with strpos
-print('\n=== Test 3: gen with strpos ===')
-run('capture drop __px_t')
-run('gen double __px_t = strpos("abcdef", "c") + 1')
-print('  strpos("abcdef","c")+1: %.0f (expected 3)' % scratch())
+print('=== WINDOWS SFI DATA ACCESS TEST ===')
 
-# Test 4: Expression with bracket reference
-print('\n=== Test 4: gen with bracket reference ===')
-run('capture drop __px_t')
-run('gen double __px_t = price[1]')
-print('  price[1]: %.0f (expected 4099)' % scratch())
+# Test 1: data_get(obs, var) for numeric values
+def win_data_get(obs, var, varname=None):
+    """Read Stata data value on Windows.
+    
+    Pattern: scalar __px_tmp = varname[obs+1]; gen double __px_t = __px_tmp
+    Last gen'd var's obs 0 value is at .data+0x922C00.
+    """
+    if varname is None:
+        # Get varname via macro first
+        execute(f'local __px_vn : variable {var}')
+        varname = '`__px_vn\''  # Will expand to actual name
+    
+    # Store value in scalar
+    execute(f'scalar __px_tmp = {varname}[{obs}]')
+    # Write scalar to temp variable (goes to scratch buffer)
+    execute('capture drop __px_t')
+    execute('gen double __px_t = __px_tmp')
+    val = scratch()
+    return val
 
-# Test 5: Using scalar intermediate
-print('\n=== Test 5: gen via scalar intermediate ===')
-run('scalar __px_s = price[1]')
-print('  After scalar: scratch=%.0f' % scratch())
-run('capture drop __px_t')
-run('gen double __px_t = __px_s')
-print('  scalar __px_s -> gen: %.0f (expected 4099)' % scratch())
+# Test: read all obs of price
+print('\n--- data_get tests ---')
+for obs in [1, 2, 10, 74]:
+    val = win_data_get(obs, 1, 'price')
+    print(f'  price[{obs}] = {val:.0f}')
 
-# Test 6: Using local macro intermediate
-print('\n=== Test 6: gen via local macro ===')
-run('local __px_v = price[1]')
-run('capture drop __px_t')
-run('gen double __px_t = `__px_v\'')
-print('  local macro -> gen: %.0f (expected 4099)' % scratch())
+# Test: read various variables
+for var_idx, varname in enumerate(['price', 'mpg', 'rep78', 'weight', 'length', 'turn'], 1):
+    val = win_data_get(1, var_idx, varname)
+    print(f'  {varname}[1] = {val:.0f}')
 
-# Test 7: The actual encoding expression
-print('\n=== Test 7: gen with encoding expression ===')
-run('capture drop __px_t')
-# Encode "make[1]" first 6 chars
-src = 'make[1]'
-terms = []
-for i in range(6):
-    pos = i + 1
-    pow256 = 256 ** i
-    terms.append(f'cond(substr({src}, {pos}, 1) == "", 0, (strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr({src}, {pos}, 1)) + 31) * {pow256})')
-expr = ' + '.join(terms)
-run(f'gen double __px_t = {expr}')
-result = scratch()
-print(f'  Scratch: {result}')
-
-# Decode
-tmp = int(result)
-decoded = ''
-for i in range(6):
-    b = (tmp >> (i * 8)) & 0xFF
-    if b == 0:
-        break
-    decoded += chr(b)
-print(f'  Decoded: "{decoded}"')
-print(f'  Expected: "AMC Co" (for make[1]="AMC Concord")')
-
-# Test 8: Direct comparison - encode strpos vs actual value
-print('\n=== Test 8: Local macro + gen for values ===')
-run('capture drop __px_t')
-run('local __px_v : variable 1')  # Get var1 name
-# Store in a string var
-run('gen str32 __px_vn = "`__px_v\'"')
-print('  Stored var name in str32')
-# Now encode each char of __px_vn[1]
-run('capture drop __px_t')
-src = '__px_vn[1]'
-terms = []
-for i in range(6):
-    pos = i + 1
-    pow256 = 256 ** i
-    terms.append(f'cond(substr({src}, {pos}, 1) == "", 0, (strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr({src}, {pos}, 1)) + 31) * {pow256})')
-expr = ' + '.join(terms)
-run(f'gen double __px_t = {expr}')
-result = scratch()
-tmp = int(result)
-decoded = ''
-for i in range(6):
-    b = (tmp >> (i * 8)) & 0xFF
-    if b == 0:
-        break
-    decoded += chr(b)
-print(f'  Decoded var1 name: "{decoded}"')
-print(f'  Expected: "price"')
-
-# Test 9: Read var name via Stata extended function + gen double
-print('\n=== Test 9: Read var name directly ===')
-run('scalar __px_vname = 0')
-for var_idx in range(1, 5):
-    run(f'local __px_name : variable {var_idx}')
-    # Store as double: encode first 6 chars
-    src_str = f'"`__px_name\'"'
-    terms = []
-    for i in range(6):
-        pos = i + 1
-        pow256 = 256 ** i
-        terms.append(f'cond(substr({src_str}, {pos}, 1) == "", 0, (strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr({src_str}, {pos}, 1)) + 31) * {pow256})')
-    expr = ' + '.join(terms)
-    run(f'gen double __px_n{var_idx} = {expr}')
-    r = scratch()
-    tmp = int(r)
+# Test 2: Get variable names
+print('\n--- Variable names ---')
+for var_idx in range(1, 13):
+    execute(f'local __px_name : variable {var_idx}')
+    # Store the macro value in a string var  
+    execute(f'gen str32 __px_s{var_idx} = "`__px_name\'"')
+    # Now encode the first 6 chars
+    # Use scalar for each char
     decoded = ''
-    for i in range(6):
-        b = (tmp >> (i * 8)) & 0xFF
-        if b <= 0 or b > 127:
+    for chunk in range(3):
+        encoded = 0
+        for i in range(6):
+            pos = chunk * 6 + i + 1
+            execute(f'scalar __px_charcode = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr(__px_s{var_idx}[1], {pos}, 1))')
+            execute('capture drop __px_t')
+            execute('gen double __px_t = __px_charcode')
+            code = int(scratch())
+            if code > 0:
+                # code is strpos index, the actual char is at that position
+                pass
+        execute(f'drop __px_s{var_idx}')
+    
+    # Simpler approach: use local macro directly via scalar encoding
+    execute(f'local __px_name : variable {var_idx}')
+    decoded = ''
+    for chunk in range(3):  # Up to 18 chars (3 groups of 6)
+        encoded = 0
+        for i in range(6):
+            pos = chunk * 6 + i + 1
+            # Use strpos to get character index, then encode
+            execute(f'scalar __px_char = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr("`__px_name\'", {pos}, 1))')
+            execute('capture drop __px_t')
+            execute('gen double __px_t = __px_char')
+            code = int(scratch())
+            if code > 0:
+                # The character index in our alphabet = code - 1
+                alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                if 1 <= code <= len(alphabet):
+                    decoded += alphabet[code - 1]
+                    encoded += code * (256 ** i)
+            else:
+                break
+        if not decoded:
             break
-        decoded += chr(b)
-    print(f'  var{var_idx}: scratch={r} decoded="{decoded}"')
-    run(f'drop __px_n{var_idx}')
+    
+    print(f'  var{var_idx}: decoded="{decoded}"')
+
+# Test 3: Get variable type
+print('\n--- Variable types ---')
+for var_idx in range(1, 13):
+    execute(f'local __px_type : type `:variable {var_idx}\'')
+    # The type is returned as a string like "byte", "int", "float", "double", "str##"
+    execute(f'scalar __px_type_code = strpos("byte int float double str", substr("`__px_type\'", 1, 3))')
+    execute('capture drop __px_t')
+    execute('gen double __px_t = __px_type_code')
+    type_code = int(scratch())
+    type_names = ['', 'byte', 'int ', 'float', 'doubl', 'str']
+    print(f'  var{var_idx}: type_code={type_code} (type={type_names[type_code] if 0 < type_code < len(type_names) else "?"})')
 
 print('\nDone')
