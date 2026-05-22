@@ -1,23 +1,5 @@
-"""BUILD COMPLETE WINDOWS SFI SOLUTION using scalar intermediate pattern.
-
-data_get(obs, var) pattern:
-1. scalar __px_val = varname[obs]
-2. gen double __px_t = __px_val  (writes scalar value to 0x922C00)
-3. Read double at 0x922C00
-4. drop __px_t
-
-For strings (var names, types, etc.):
-1. Store in local macro first
-2. Store macro value in a scalar (only for numeric) 
-3. For strings: use the encode-as-double approach with intermediate gen through scalar
-
-For var names specifically:
-1. local __px_name : variable 1
-2. gen str32 __px_s = "`__px_name'"  (creates string var, last variable)
-3. Write each char as a double via scalar
-"""
+"""Verify: is price[74] really 11995 or should it be 13466?"""
 import ctypes
-import struct
 
 dll_path = r'C:\Program Files\StataNow19\se-64.dll'
 dll = ctypes.WinDLL(dll_path)
@@ -41,117 +23,55 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
         break
 data_ptr = handle + data_rva
 
-SCRATCH_OFF = 0x922C00
-
 def scratch():
     buf = (ctypes.c_double * 1)()
-    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + SCRATCH_OFF), 8)
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + 0x922C00), 8)
     return buf[0]
 
 def execute(cmd):
-    if isinstance(cmd, str):
-        cmd = cmd.encode()
+    if isinstance(cmd, str): cmd = cmd.encode()
     return dll.StataSO_Execute(cmd)
 
-# Load auto
+# Fresh run - ONLY test price[74]
 execute('sysuse auto, clear')
-
-# === TEST: BUILD COMPLETE DATA ACCESS ===
-
-# Create reusable temp variable once
+execute('scalar __px_tmp = price[74]')
 execute('capture drop __px_t')
-execute('scalar __px_tmp = 0')
+execute('gen double __px_t = __px_tmp')
+print('price[74] via scalar:', scratch())
 
-print('=== WINDOWS SFI DATA ACCESS TEST ===')
+# Also test price[73] and price[1]
+execute('scalar __px_tmp = price[73]')
+execute('capture drop __px_t')
+execute('gen double __px_t = __px_tmp')
+print('price[73]:', scratch())
 
-# Test 1: data_get(obs, var) for numeric values
-def win_data_get(obs, var, varname=None):
-    """Read Stata data value on Windows.
-    
-    Pattern: scalar __px_tmp = varname[obs+1]; gen double __px_t = __px_tmp
-    Last gen'd var's obs 0 value is at .data+0x922C00.
-    """
-    if varname is None:
-        # Get varname via macro first
-        execute(f'local __px_vn : variable {var}')
-        varname = '`__px_vn\''  # Will expand to actual name
-    
-    # Store value in scalar
-    execute(f'scalar __px_tmp = {varname}[{obs}]')
-    # Write scalar to temp variable (goes to scratch buffer)
-    execute('capture drop __px_t')
-    execute('gen double __px_t = __px_tmp')
-    val = scratch()
-    return val
+execute('scalar __px_tmp = price[1]')
+execute('capture drop __px_t')
+execute('gen double __px_t = __px_tmp')
+print('price[1]:', scratch())
 
-# Test: read all obs of price
-print('\n--- data_get tests ---')
-for obs in [1, 2, 10, 74]:
-    val = win_data_get(obs, 1, 'price')
-    print(f'  price[{obs}] = {val:.0f}')
+execute('scalar __px_tmp = price[2]')
+execute('capture drop __px_t')
+execute('gen double __px_t = __px_tmp')
+print('price[2]:', scratch())
 
-# Test: read various variables
-for var_idx, varname in enumerate(['price', 'mpg', 'rep78', 'weight', 'length', 'turn'], 1):
-    val = win_data_get(1, var_idx, varname)
-    print(f'  {varname}[1] = {val:.0f}')
+# Also check using list
+execute('gen double __px_val = price in 1/5')
+execute('list price in 1/5')
+# After list, nothing in scratch - but we can check via gen
+execute('scalar __px_tmp = price[1]')
+execute('capture drop __px_t')
+execute('gen double __px_t = __px_tmp')
+print('price[1] (after list):', scratch())
 
-# Test 2: Get variable names
-print('\n--- Variable names ---')
-for var_idx in range(1, 13):
-    execute(f'local __px_name : variable {var_idx}')
-    # Store the macro value in a string var  
-    execute(f'gen str32 __px_s{var_idx} = "`__px_name\'"')
-    # Now encode the first 6 chars
-    # Use scalar for each char
-    decoded = ''
-    for chunk in range(3):
-        encoded = 0
-        for i in range(6):
-            pos = chunk * 6 + i + 1
-            execute(f'scalar __px_charcode = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr(__px_s{var_idx}[1], {pos}, 1))')
-            execute('capture drop __px_t')
-            execute('gen double __px_t = __px_charcode')
-            code = int(scratch())
-            if code > 0:
-                # code is strpos index, the actual char is at that position
-                pass
-        execute(f'drop __px_s{var_idx}')
-    
-    # Simpler approach: use local macro directly via scalar encoding
-    execute(f'local __px_name : variable {var_idx}')
-    decoded = ''
-    for chunk in range(3):  # Up to 18 chars (3 groups of 6)
-        encoded = 0
-        for i in range(6):
-            pos = chunk * 6 + i + 1
-            # Use strpos to get character index, then encode
-            execute(f'scalar __px_char = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr("`__px_name\'", {pos}, 1))')
-            execute('capture drop __px_t')
-            execute('gen double __px_t = __px_char')
-            code = int(scratch())
-            if code > 0:
-                # The character index in our alphabet = code - 1
-                alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-                if 1 <= code <= len(alphabet):
-                    decoded += alphabet[code - 1]
-                    encoded += code * (256 ** i)
-            else:
-                break
-        if not decoded:
-            break
-    
-    print(f'  var{var_idx}: decoded="{decoded}"')
+# Also try after 'count' to see nobs
+execute('count')
+# Read nobs... but we don't have that in memory
 
-# Test 3: Get variable type
-print('\n--- Variable types ---')
-for var_idx in range(1, 13):
-    execute(f'local __px_type : type `:variable {var_idx}\'')
-    # The type is returned as a string like "byte", "int", "float", "double", "str##"
-    execute(f'scalar __px_type_code = strpos("byte int float double str", substr("`__px_type\'", 1, 3))')
-    execute('capture drop __px_t')
-    execute('gen double __px_t = __px_type_code')
-    type_code = int(scratch())
-    type_names = ['', 'byte', 'int ', 'float', 'doubl', 'str']
-    print(f'  var{var_idx}: type_code={type_code} (type={type_names[type_code] if 0 < type_code < len(type_names) else "?"})')
+# Try _N
+execute('scalar __px_tmp = _N')
+execute('capture drop __px_t')
+execute('gen double __px_t = __px_tmp')
+print('_N:', scratch())
 
 print('\nDone')
