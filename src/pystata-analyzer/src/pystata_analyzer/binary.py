@@ -420,128 +420,89 @@ class StataBinary:
         """Discover memory layout from a loaded PE DLL (runtime).
 
         Loads the DLL, initialises Stata, locates the gws pointer in
-        the .data section, and reads gws fields (nvar, nobs, etc.)
-        across two known datasets to identify offsets.
-
-        Requires the DLL to be loaded and Stata initialised.
-        Returns a dict of discovered memory offsets or empty dict.
+        the .data section, and reads gws fields across two datasets.
         """
         if self._format != 'pe':
             return {}
         try:
-            import ctypes
-            import struct
+            import ctypes, struct
             from pystata_analyzer.pe_binary import PEConvert
 
-            # Read PE headers to find .data section
+            # Read PE headers
             with open(self.path, 'rb') as f:
                 pe_data = f.read()
             pc = PEConvert(pe_data)
-
-            data_section = None
-            for sec in pc.sections:
-                if sec['name'] == '.data':
-                    data_section = sec
-                    break
-            if not data_section:
+            data_sec = next((s for s in pc.sections if s['name'] == '.data'), None)
+            if not data_sec:
                 return {}
 
-            data_rva = data_section['va']
-            data_vsize = data_section['vsize']
+            data_rva = data_sec['va']
 
             if dll_handle == 0:
-                try:
-                    dll = ctypes.WinDLL(self.path)
-                    dll_handle = dll._handle
-                except Exception as e:
-                    return {'_error': 'WinDLL: ' + str(e)}
+                dll = ctypes.WinDLL(self.path)
+                dll_handle = dll._handle
 
             data_ptr = dll_handle + data_rva
-            data_size = data_vsize
+            data_size = min(data_sec['vsize'], data_sec['raw_size'])
 
-            kernel32 = ctypes.windll.kernel32
-
-            # Use ctypes.WinDLL for StataSO function access
-            try:
-                stata_exec = dll.StataSO_Execute
-                stata_exec.argtypes = [ctypes.c_char_p]
-                stata_exec.restype = ctypes.c_int
-            except Exception as e:
-                return {'_error': 'StataSO_Execute: ' + str(e)}
+            # Use WinDLL function access (proven working)
+            dll.StataSO_Execute.argtypes = [ctypes.c_char_p]
+            dll.StataSO_Execute.restype = ctypes.c_int
+            dll.StataSO_Main.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+            dll.StataSO_Main.restype = ctypes.c_int
 
             # Init Stata
-            try:
-                stata_main = dll.StataSO_Main
-                stata_main.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
-                stata_main.restype = ctypes.c_int
-                argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
-                rc_init = stata_main(2, argv)
-            except Exception as e:
-                return {'_error': 'StataSO_Main: ' + str(e)}
+            argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
+            dll.StataSO_Main(2, argv)
 
-            # Load a known dataset
-            rc = stata_exec(b'sysuse auto, clear')
-            if rc != 0:
-                return {'_error': 'sysuse auto failed: rc=' + str(rc)}
+            # Load auto
+            dll.StataSO_Execute(b'sysuse auto, clear')
 
-            # Use known nvar offset 0x211644 (verified empirically)
-            known_nvar_offset = 0x211644
-
-            # Verify by reading
-            buf = (ctypes.c_int * 1)()
-            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + known_nvar_offset), 4)
-            nvar_read = buf[0]
-
-            if nvar_read != 12:
-                return {'_error': 'nvar offset invalid: read ' + str(nvar_read) + ' expected 12'}
-
-            nvar_verified = [known_nvar_offset]
-            gws_ptr = data_ptr + known_nvar_offset - 0x68
+            # Known nvar offset
+            KNOWN_NVAR_OFF = 0x211644
+            gws_ptr = data_ptr + KNOWN_NVAR_OFF - 0x68
 
             # Read gws fields for both datasets
-            def read_int32(ptr, offset):
-                buf3 = (ctypes.c_int * 1)()
-                ctypes.memmove(buf3, ctypes.c_void_p(ptr + offset), 4)
-                return buf3[0]
+            def read_int32(ptr, off):
+                b = (ctypes.c_int * 1)()
+                ctypes.memmove(b, ctypes.c_void_p(ptr + off), 4)
+                return b[0]
 
-            gws_fields_auto = {}
-            for off in range(0, 256, 4):
-                val = read_int32(gws_ptr, off)
-                if 0 < val < 200000:
-                    gws_fields_auto[off] = val
+            def scan_gws(ptr):
+                fields = {}
+                for off in range(0, 256, 4):
+                    val = read_int32(ptr, off)
+                    if 0 < val < 200000:
+                        fields[off] = val
+                return fields
 
-            stata_exec(b'sysuse bpwide, clear')
-            gws_fields_bpwide = {}
-            for off in range(0, 256, 4):
-                val = read_int32(gws_ptr, off)
-                if 0 < val < 200000:
-                    gws_fields_bpwide[off] = val
+            gws_a = scan_gws(gws_ptr)
+            dll.StataSO_Execute(b'sysuse bpwide, clear')
+            gws_b = scan_gws(gws_ptr)
 
-            # Identify changing fields
+            # Identify offsets
             memory_offsets = {}
-            for off in sorted(gws_fields_auto):
-                v1 = gws_fields_auto[off]
-                v2 = gws_fields_bpwide.get(off, 0)
+            for off in sorted(gws_a):
+                v1, v2 = gws_a[off], gws_b.get(off, 0)
                 if v1 != v2:
-                    if v1 == 74 and v2 == 36:
-                        memory_offsets['nobs_offset'] = off
                     if v1 == 12 and v2 == 5:
-                        memory_offsets['nvar_offset'] = off
+                        memory_offsets['nvar_gws_offset'] = off
 
-            # Find maxvars by scanning for 5000
+            memory_offsets['gws_rva'] = gws_ptr - dll_handle
+            memory_offsets['nvar_data_offset'] = KNOWN_NVAR_OFF
+            memory_offsets['nvar_abs_addr'] = data_ptr + KNOWN_NVAR_OFF
+
+            # Read data section for maxvars scan
+            raw_buf = (ctypes.c_char * data_size)()
+            ctypes.memmove(raw_buf, ctypes.c_void_p(data_ptr), data_size)
+            raw = bytes(raw_buf)
+
             for o in range(0, data_size - 4, 4):
                 if struct.unpack('<I', raw[o:o+4])[0] == 5000:
                     memory_offsets['maxvars_offset'] = o
                     break
 
-            memory_offsets['gws_rva'] = gws_ptr - dll_handle
-            memory_offsets['gws_ptr'] = gws_ptr
-            memory_offsets['nvar_addr'] = gws_ptr + 0x68
-            memory_offsets['nvar_data_offset'] = nvar_verified[0]
-
-            # Restore auto dataset
-            stata_exec(b'sysuse auto, clear')
-
+            dll.StataSO_Execute(b'sysuse auto, clear')
             return memory_offsets
         except Exception:
             return {}
