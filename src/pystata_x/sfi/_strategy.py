@@ -1120,11 +1120,12 @@ class _WindowsStrategy(_X86Strategy):
         (byte - 1) becomes the 0-based index into the alphabet.
         """
         alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/"
+        chunk_size = 5  # 5 chars per chunk avoids double precision loss (< 2.7e11)
         result_chars = []
-        for chunk in range(3):  # Up to 18 characters (3 groups of 6)
+        for chunk in range(6):  # Up to 30 characters (6 groups of 5)
             terms = []
-            for i in range(6):
-                pos = chunk * 6 + i + 1
+            for i in range(chunk_size):
+                pos = chunk * chunk_size + i + 1
                 pow256 = 256 ** i
                 terms.append(
                     f"cond(substr({src_expr}, {pos}, 1) == \"\", 0,"
@@ -1140,13 +1141,11 @@ class _WindowsStrategy(_X86Strategy):
                 break
             raw_int = int(raw_val)
             chunk_chars = []
-            for i in range(6):
+            for i in range(chunk_size):
                 b = (raw_int >> (i * 8)) & 0xFF
                 if b == 0:
                     break
-                # strpos is 1-based, we store (strpos + 1)
-                # To recover: idx = b - 2 (since strpos + 1 - 1 = strpos - 1 = 0-based)
-                idx = b - 2  # Corrects for strpos 1-based + our +1 offset
+                idx = b - 2
                 if 0 <= idx < len(alphabet):
                     chunk_chars.append(alphabet[idx])
                 else:
