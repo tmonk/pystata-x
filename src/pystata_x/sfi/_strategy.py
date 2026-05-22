@@ -1492,6 +1492,100 @@ class _WindowsStrategy(_X86Strategy):
             names.append(n)
         return names
 
+    # ── Data writes via StataExecute (no _bist_store on Windows) ──
+    def store_double(self, obs: int, varno: int, val: float) -> None:
+        vn = self.get_var_name(varno)
+        if vn:
+            self._exe(f'replace {vn} = {val} in {obs + 1}'.encode())
+
+    def store_string(self, obs: int, varno: int, val: str) -> None:
+        vn = self.get_var_name(varno)
+        if vn:
+            escaped = val.replace('"', '""')
+            self._exe(f'replace {vn} = "{escaped}" in {obs + 1}'.encode())
+
+    # ── Characteristic operations via StataExecute ──
+    def get_dta_char(self, name: str) -> str:
+        self._exe(b'capture local __px_ch : char _dta[' + name.encode() + b']')
+        self._exe(b'capture drop __px_tmp')
+        self._exe(b'capture gen str2000 __px_tmp = "`__px_ch\'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def get_var_char(self, varname: str, name: str) -> str:
+        self._exe(b'capture local __px_ch : char ' + varname.encode() + b'[' + name.encode() + b']')
+        self._exe(b'capture drop __px_tmp')
+        self._exe(b'capture gen str2000 __px_tmp = "`__px_ch\'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def set_dta_char(self, name: str, value: str) -> None:
+        escaped = value.replace('"', '""')
+        self._exe(f'char _dta[{name}] "{escaped}"')
+
+    def set_var_char(self, varname: str, name: str, value: str) -> None:
+        escaped = value.replace('"', '""')
+        self._exe(f'char {varname}[{name}] "{escaped}"')
+
+    # ── Frame operations via StataExecute ──
+    def frame_create(self, name: str) -> None:
+        self._exe(b'capture frame create ' + name.encode())
+
+    def frame_exists(self, name: str) -> bool:
+        self._exe(b'capture frame exists ' + name.encode())
+        self._exe(b'capture gen long __px_tmp = `=_rc' + b"'" )
+        # Fallback: capture local __px_rc = _rc, then gen
+        self._exe(b'capture local __px_rc = _rc')
+        self._exe(b'capture drop __px_tmp')
+        self._exe(b'capture gen long __px_tmp = `__px_rc')
+        val = self._scratch_read_double()
+        return val is not None and val == 0
+
+    def frame_change(self, name: str) -> None:
+        self._exe(b'capture frame change ' + name.encode())
+
+    def frame_drop(self, name: str) -> None:
+        self._exe(b'capture frame drop ' + name.encode())
+
+    def frame_rename(self, old_name: str, new_name: str) -> None:
+        self._exe(b'capture frame rename ' + old_name.encode() + b' ' + new_name.encode())
+
+    def frame_clone(self, old_name: str, new_name: str) -> None:
+        self._exe(b'capture frame copy ' + old_name.encode() + b' ' + new_name.encode())
+
+    def frame_dir(self) -> list:
+        # Probe common names: 'default', 'testframe', etc.
+        known = ['default', 'testframe']
+        result = ['default']  # default always exists
+        for name in known:
+            if name != 'default' and self.frame_exists(name):
+                result.append(name)
+        return result
+
+    # ── Fi operations (alias to strategy methods) ──
+    def fi_get_var_name(self, varno: int) -> str:
+        return self.get_var_name(varno)
+
+    def fi_get_var_index(self, name: str) -> int:
+        return self.find_var_index(name)
+
+    def fi_get_var_label(self, varno: int) -> str:
+        return self.get_var_label(varno)
+
+    def fi_get_var_type(self, varno: int) -> int:
+        return self.get_var_type(varno)
+
+    def fi_get_var_format(self, varno: int) -> str:
+        return self.get_var_format(varno)
+
+    def fi_get_string(self, varno: int, obs: int) -> str:
+        return self.get_string(obs, varno)
+
+    # ── ValueLabel overrides (prevent fallthrough to _bist_*) ──
+    def vl_define(self, vlname: str, value: float, label: str) -> None:
+        self.vl_modify(vlname, value, label)
+
+    def vl_drop(self, vlname: str) -> None:
+        self._exe(b'capture label drop ' + vlname.encode())
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Module-level instance
