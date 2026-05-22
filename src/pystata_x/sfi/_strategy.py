@@ -1223,8 +1223,10 @@ class _WindowsStrategy(_X86Strategy):
     def get_macro_global(self, name: str) -> str:
         """Read a global Stata macro via StataExecute + encoding."""
         if name.startswith('c(') and name.endswith(')'):
-            return self._gen_from_str('__px_gs', f'`={name}\'')
-        return self._gen_from_str('__px_gs', f'"${name}"')
+            # `=c(level)' syntax fails on Windows (rc=109).
+            # Use c() directly as an expression in gen instead.
+            return self._gen_from_str('__px_gs', name)
+        return self._gen_from_str('__px_gs', '"' + '$' + name + '"')
 
     def get_macro_local(self, name: str) -> str:
         """Read a local Stata macro via StataExecute + encoding."""
