@@ -1133,17 +1133,19 @@ class ValueLabel:
     def exists(name: str) -> bool:
         """Check if a value label exists."""
         if _IS_X86_64:
-            # Use Stata's : label extended macro function
             try:
-                from pystata_x.sfi._engine import _LIB
+                from pystata_x.sfi._engine import _LIB, call_double
+                # Capture _rc immediately after capture label list
                 _LIB.StataSO_Execute(
-                    b'local __tmp : label ' + name.encode() + b' 0')
+                    b'capture label list '
+                    + name.encode())
+                _LIB.StataSO_Execute(b'local __px_rc = _rc')
                 _LIB.StataSO_Execute(b'capture drop __px_z')
                 _LIB.StataSO_Execute(
-                    b'gen str2000 __px_z = "`__tmp\'"')
-                val = _x86_read_encoded_str(
-                    lambda o1: '__px_z[1]', 0, is_dataset=False)
-                return bool(val)
+                    b'gen byte __px_z = \x60__px_rc\x27')
+                nv = int(call_double('_bist_nvar'))
+                rc = call_double('_bist_data', 1, nv)
+                return rc == 0.0  # _rc = 0 means label exists
             except Exception:
                 pass
             return False

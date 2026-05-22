@@ -922,24 +922,27 @@ _x86_tmp_scl_var = -1  # var index for temp scalar, discovered on first use
 def _get_tmp_scl_var() -> int:
     """Get or create temp variable for scalar reads."""
     global _x86_tmp_scl_var
+    # Verify cached index still points to a valid __px_scl
     if _x86_tmp_scl_var >= 0:
-        return _x86_tmp_scl_var
+        try:
+            nvar = int(call_double('_bist_nvar'))
+            if (_x86_tmp_scl_var <= nvar and
+                    _read_var_name_x86(_x86_tmp_scl_var - 1) == '__px_scl'):
+                return _x86_tmp_scl_var
+        except Exception:
+            pass
+        _x86_tmp_scl_var = -1
     try:
-        # Create temp var if it does not exist
-        execute('capture confirm variable __px_scl, exact')
-        rc = _error_code() if hasattr(_LIB, '_st_error') else -1
-        # If confirm failed (rc != 0), create the var
-        execute('capture confirm variable __px_scl, exact')
-        # We use a different approach: just create or ensure exists
         execute('capture drop __px_scl')
         execute('generate double __px_scl = 0')
-        from pystata_x.sfi._engine import call_double
         nvar = call_double('_bist_nvar')
         if nvar is not None:
             _x86_tmp_scl_var = int(nvar)
         else:
-            _x86_tmp_scl_var = 1
+            _x86_tmp_scl_var = -1
     except Exception:
+        _x86_tmp_scl_var = -1
+    if _x86_tmp_scl_var < 0:
         _x86_tmp_scl_var = 1
     return _x86_tmp_scl_var
 
@@ -952,9 +955,15 @@ def _read_scalar_x86(name: str) -> Optional[float]:
     """
     try:
         var_idx = _get_tmp_scl_var()
-        execute(f'quietly replace __px_scl = scalar({name}) in 1')
-        from pystata_x.sfi._engine import call_double
-        return call_double('_bist_data', 1.0, float(var_idx))
+        # Verify var_idx is reasonable (not the fallback 1)
+        if var_idx <= 0:
+            return None
+        _LIB.StataSO_Execute(
+            b'quietly replace __px_scl = scalar('
+            + name.encode() + b') in 1')
+        val = call_double('_bist_data', 1.0, float(var_idx))
+        if val is not None and val != 8.98846567431158e+307:
+            return val
     except Exception:
         pass
     return None
