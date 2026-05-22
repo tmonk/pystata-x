@@ -134,9 +134,22 @@ def _x86_read_encoded_str(source_expr, obs, is_dataset=False):
     ``source_expr`` is a callable that takes a 1-based obs index
     and returns a Stata expression like ``varname[obs]``.
     Returns the decoded string, or ``""`` on failure.
+
+    On Windows (where _bist_* functions aren't available), delegates
+    to _STRATEGY.read_encoded_str().
     """
+    from pystata_x.sfi._engine import _LIB, call_double
+    from pystata_x.sfi._platform import IS_WINDOWS
+    from pystata_x.sfi._strategy import _STRATEGY
+
+    # Windows path: use strategy's read_encoded_str
+    if IS_WINDOWS:
+        obs1 = obs + 1 if is_dataset else 1
+        src = source_expr(obs1) if callable(source_expr) else source_expr
+        return _STRATEGY.read_encoded_str(src, obs1)
+
+    # Linux / macOS path: use call_double
     try:
-        from pystata_x.sfi._engine import _LIB, call_double
         from pystata_x.sfi._engine import _read_var_name_x86 as _rvn
         obs1 = obs + 1 if is_dataset else 1
         src = source_expr(obs1) if callable(source_expr) else source_expr

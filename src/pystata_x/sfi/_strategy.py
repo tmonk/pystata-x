@@ -1007,49 +1007,125 @@ class _WindowsStrategy(_X86Strategy):
                 return val
         return 0
 
-    def obs_count(self) -> int:
-        # Use StataExecute + gen to store _N
+    # ── Scratch buffer (stores last gen'd variable's obs 0 value) ──
+    def _scratch_addr(self) -> int | None:
+        """Get absolute address of the scratch buffer (gen'd var obs 0)."""
+        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
+        rva = _MEMORY_OFFSETS.get('scratch_buffer_rva')
+        if rva and _LIB:
+            return _LIB._handle + rva
+        return None
+
+    def _scratch_read_double(self) -> float | None:
+        """Read double from scratch buffer."""
+        import ctypes
+        addr = self._scratch_addr()
+        if addr:
+            buf = (ctypes.c_double * 1)()
+            ctypes.memmove(buf, ctypes.c_void_p(addr), 8)
+            return buf[0]
+        return None
+
+    def _exe(self, cmd: str | bytes) -> int:
+        """Execute a Stata command via StataSO_Execute."""
         import ctypes
         from pystata_x.sfi._engine import _LIB
         if _LIB is None:
-            return 0
-        _LIB.StataSO_Execute.restype = ctypes.c_int
-        _LIB.StataSO_Execute.argtypes = [ctypes.c_char_p]
-        _LIB.StataSO_Execute(b'capture drop __px_obs')
-        _LIB.StataSO_Execute(b'gen double __px_obs = _N')
-        # Read the variable value from the data buffer
-        # We know nvar, so __px_obs is at position nvar
-        nv = self.var_count()
-        if nv <= 0:
-            return 0
-        # Read the first observation value
-        # The data buffer address depends on the Stata internals
-        # Use StataExecute to store the value in a macro
-        _LIB.StataSO_Execute(b'local __px_no = __px_obs[1]')
-        # Now read the macro value
-        _LIB.StataSO_Execute(b'capture drop __px_no2')
-        _LIB.StataSO_Execute(b'gen double __px_no2 = `__px_no\'')
-        # Need to read __px_no2 variable
-        # Use the same encoding mechanism
-        from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
-        _init_px_ref()
-        val_str = _x86_read_encoded_str(lambda o1: '__px_no2[1]', 0, is_dataset=False)
-        if val_str:
-            try:
-                return int(float(val_str))
-            except (ValueError, TypeError):
-                pass
-        return 0
+            return -1
+        if isinstance(cmd, str):
+            cmd = cmd.encode()
+        return _LIB.StataSO_Execute(cmd)
+
+    def obs_count(self) -> int:
+        """Read _N via scalar + gen + scratch buffer."""
+        self._exe('scalar __px_N = _N')
+        self._exe('capture drop __px_obs')
+        self._exe('gen double __px_obs = __px_N')
+        val = self._scratch_read_double()
+        return int(val) if val is not None else 0
+
+    def data_get(self, obs: int, var: int) -> float | None:
+        """Read numeric variable value via scalar + gen + scratch buffer."""
+        # Get variable name
+        vn = self.get_var_name(var)
+        if not vn:
+            return None
+        self._exe(f'scalar __px_val = {vn}[{obs}]')
+        self._exe('capture drop __px_tmp')
+        self._exe('gen double __px_tmp = __px_val')
+        return self._scratch_read_double()
+
+    def get_var_name(self, varno: int) -> str:
+        """Get variable name via Stata extended macro + encoding."""
+        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
+        # Use Stata's extended macro function to get variable name
+        self._exe(f'local __px_name : variable {varno}')
+        # Encode and read via scalar intermediates (one char at a time)
+        name_chars = []
+        for pos in range(1, 33):  # Max 32 chars
+            # Get char index via strpos
+            self._exe(f'scalar __px_c = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr("`__px_name\'", {pos}, 1))')
+            self._exe('capture drop __px_tmp')
+            self._exe('gen double __px_tmp = __px_c')
+            code = self._scratch_read_double()
+            if code is None or code <= 0:
+                break
+            alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+            idx = int(code) - 1
+            if 0 <= idx < len(alphabet):
+                name_chars.append(alphabet[idx])
+            else:
+                break
+        return ''.join(name_chars)
 
     # ── Override all _bist_*-dependent methods ──
-    def find_var_index(self, name: str) -> int:
-        from pystata_x.sfi._engine import _read_var_name_x86
-        nvar = self.var_count()
-        for i in range(nvar):
-            vn = _read_var_name_x86(i)
-            if vn and vn.lower() == name.lower():
-                return i + 1
-        return 0
+    def get_scalar_value(self, name: str) -> float:
+        """Read scalar value via gen + scratch buffer."""
+        self._exe(f'capture drop __px_sc')
+        self._exe(f'gen double __px_sc = scalar({name})')
+        val = self._scratch_read_double()
+        if val is not None:
+            return val
+        return 0.0
+
+    def read_encoded_str(self, src_expr: str, obs: int = 1) -> str:
+        """Read a string value by encoding bytes as doubles.
+
+        Uses scalar intermediate to bypass expression evaluation issue
+        in scratch buffer. The src_expr is a Stata expression like
+        ``make[1]`` or ``__px_vn[1]``.
+        """
+        import math
+        raw_bytes = bytearray()
+        for chunk in range(3):
+            # Build encoding expression
+            terms = []
+            for i in range(6):
+                pos = chunk * 6 + i + 1
+                pow256 = 256 ** i
+                terms.append(
+                    f"cond(substr({src_expr}, {pos}, 1) == \"\", 0,"
+                    f" (strpos(\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\","
+                    f" substr({src_expr}, {pos}, 1)) + 1) * {pow256})")
+            expr = " + ".join(terms)
+            # Store via scalar intermediate (bypasses expression-in-scratch issue)
+            self._exe(f'scalar __px_enc_c{chunk} = {expr}')
+            self._exe('capture drop __px_tmp')
+            self._exe(f'gen double __px_tmp = __px_enc_c{chunk}')
+            raw_val = self._scratch_read_double()
+            if raw_val is None or raw_val <= 0:
+                break
+            raw_int = int(raw_val)
+            for i in range(6):
+                b = (raw_int >> (i * 8)) & 0xFF
+                if b == 0:
+                    break
+                raw_bytes.append(b)
+            if b == 0:
+                break
+        if raw_bytes:
+            return bytes(raw_bytes).decode("latin-1", errors="replace")
+        return ""
 
     def get_max_vars(self) -> int:
         from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
@@ -1059,17 +1135,6 @@ class _WindowsStrategy(_X86Strategy):
             if val and val > 0:
                 return val
         return 5000  # default for SE
-
-    def get_scalar_value(self, name: str) -> float:
-        from pystata_x.sfi._engine import _LIB, call_double
-        from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
-        _init_px_ref()
-        _LIB.StataSO_Execute(b'capture drop __px_ws')
-        _LIB.StataSO_Execute(
-            b'gen double __px_ws = scalar(' + name.encode() + b')')
-        # Same issue: need to read __px_ws without _bist_data
-        # Fall back to call_double if available
-        return call_double("_bist_numscalar", name.encode())
 
     def is_valid_name(self, name: str) -> bool:
         from pystata_x.sfi._engine import _LIB

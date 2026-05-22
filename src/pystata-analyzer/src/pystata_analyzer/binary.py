@@ -512,9 +512,27 @@ class StataBinary:
                     memory_offsets['maxvars_offset'] = o
                     break
 
+            # Discover scratch buffer RVA
+            # Pattern: gen double with a unique literal, search in .data for it
+            import random as _rnd
+            _test_val = _rnd.randint(100000, 999999)
+            _val_str = str(_test_val)
+            dll.StataSO_Execute(b'capture drop __px_discover')
+            dll.StataSO_Execute(b'gen double __px_discover = ' + _val_str.encode())
+            _s_bytes = struct.pack('<d', float(_test_val))
+            _found = None
+            _big = (ctypes.c_char * data_size)()
+            ctypes.memmove(_big, ctypes.c_void_p(data_ptr), data_size)
+            _all_data = bytes(_big)
+            _idx = _all_data.find(_s_bytes)
+            if _idx >= 0:
+                memory_offsets['scratch_buffer_rva'] = data_rva + _idx
+                memory_offsets['scratch_buffer_offset'] = _idx
+            dll.StataSO_Execute(b'drop __px_discover')
             dll.StataSO_Execute(b'sysuse auto, clear')
             return memory_offsets
-        except Exception:
+        except Exception as e:
+            print('Exception in pe_discover_memory_layout:', e)
             return {}
 
     def pe_generate_manifest(self, dll_handle: int = 0) -> dict:
