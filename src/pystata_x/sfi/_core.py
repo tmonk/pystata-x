@@ -130,6 +130,61 @@ def _init_px_ref() -> None:
         pass
 
 
+def _x86_read_encoded_str(source_expr, obs, is_dataset=False):
+    """Read a string value on x86_64 by encoding bytes as doubles.
+
+    ``source_expr`` is a callable that takes a 1-based obs index
+    and returns a Stata expression like ``varname[obs]``.
+    Returns the decoded string, or ``""`` on failure.
+    """
+    try:
+        from pystata_x.sfi._engine import _LIB, call_double
+        from pystata_x.sfi._engine import _read_var_name_x86 as _rvn
+        obs1 = obs + 1 if is_dataset else 1
+        src = source_expr(obs1) if callable(source_expr) else source_expr
+        # Ensure __px_ref exists
+        try:
+            nv = int(call_double("_bist_nvar"))
+            _pxr = _rvn(nv - 1) if nv > 0 else None
+            if _pxr != '__px_ref':
+                _init_px_ref()
+        except Exception:
+            _init_px_ref()
+        _LIB.StataSO_Execute(b"capture drop __px_s")
+        _LIB.StataSO_Execute(b"gen double __px_s = .")
+        idx = int(call_double("_bist_nvar"))
+        raw_bytes = bytearray()
+        for chk in range(3):
+            base = chk * 6
+            terms = []
+            for i in range(6):
+                pos = base + i + 1
+                pow256 = 256 ** i
+                terms.append(
+                    f"cond(substr({src}, {pos}, 1) == \"\", 0,"
+                    f" (strpos(__px_ref[1], substr({src},"
+                    f" {pos}, 1)) + 31) * {pow256})")
+            expr = " + ".join(terms)
+            cmd = f"replace __px_s = {expr}"
+            _LIB.StataSO_Execute(cmd.encode())
+            raw = call_double("_bist_data", 1, idx)
+            if raw is None:
+                break
+            raw_int = int(raw)
+            for i in range(6):
+                b = (raw_int >> (i * 8)) & 0xFF
+                if b == 0:
+                    break
+                raw_bytes.append(b)
+            if b == 0:
+                break
+        if raw_bytes:
+            return bytes(raw_bytes).decode("latin-1", errors="replace")
+    except Exception:
+        pass
+    return ""
+
+
 # Fast C extension path — lazy import, checked at call time
 _fast_path = None  # Will be set to module on first use
 
@@ -190,9 +245,17 @@ class Macro:
                 if name in _c_values:
                     return _c_values[name]
                 return ""
-            import pystata_x.sfi._engine as _eng
-            r = _eng.call_string("_bist_macroexpand", b"$" + name.encode())
-            return r if r is not None else ""
+            # Create a temp str var with the macro expansion via StataExecute
+            try:
+                from pystata_x.sfi._engine import _LIB, call_double
+                _LIB.StataSO_Execute(b"capture drop __px_mv")
+                _LIB.StataSO_Execute(
+                    b'gen str2000 __px_mv = "$' + name.encode() + b'"')
+                return _x86_read_encoded_str(
+                    lambda o1: "__px_mv[1]", 0, is_dataset=False)
+            except Exception:
+                pass
+            return ""
         if _check_fast_path():
             return _fast_path.get_macro(name)
         return call_string("_bist_global", name.encode())
@@ -205,8 +268,11 @@ class Macro:
         which handles both 1-arg (read) and 2-arg (write) modes.
         """
         if _IS_X86_64:
-            from pystata_x.sfi._engine import call_void as _cv
-            _cv("_bist_global", name.encode(), value.encode())
+            # Use StataSO with proper quoting for $expansion compatibility
+            from pystata_x.sfi._engine import _LIB
+            escaped = value.replace('"', '""')
+            _LIB.StataSO_Execute(
+                f'global {name} = "{escaped}"'.encode())
             return
         call_int("_bist_putglobal", name.encode(), value.encode())
 
@@ -368,62 +434,11 @@ class Data:
         via ``_bist_data``, then decode.
         """
         if _IS_X86_64:
-            try:
-                from pystata_x.sfi._engine import (_read_var_name_x86,
-                    _LIB, call_double)
-                name = _read_var_name_x86(varno)
-                if name:
-                    obs1 = obs + 1
-                    # Ensure __px_ref reference string exists
-                    _LIB.StataSO_Execute(
-                        b"capture confirm str var __px_ref, exact")
-                    # Check if __px_ref exists by peeking at var list
-                    try:
-                        from pystata_x.sfi._engine import _read_var_name_x86
-                        _pxr = _read_var_name_x86(nvar - 1)
-                        if _pxr != '__px_ref':
-                            _init_px_ref()
-                    except Exception:
-                        _init_px_ref()
-                    _LIB.StataSO_Execute(b"capture drop __px_s")
-                    _LIB.StataSO_Execute(b"gen double __px_s = .")
-                    nvar = int(call_double("_bist_nvar"))
-                    idx = nvar
-                    raw_bytes = bytearray()
-                    for chk in range(3):
-                        base = chk * 6
-                        terms = []
-                        for i in range(6):
-                            pos = base + i + 1
-                            pow256 = 256 ** i
-                            # Use cond() to return 0 for positions beyond
-                            # the string's actual length
-                            terms.append(
-                                f"cond(substr({name}[{obs1}],"
-                                f" {pos}, 1) == \"\", 0,"
-                                f" (strpos(__px_ref[1],"
-                                f" substr({name}[{obs1}],"
-                                f" {pos}, 1)) + 31) * {pow256})")
-                        expr = " + ".join(terms)
-                        cmd = f"replace __px_s = {expr}"
-                        _LIB.StataSO_Execute(cmd.encode())
-                        raw = call_double("_bist_data", 1, idx)
-                        if raw is None:
-                            break
-                        raw_int = int(raw)
-                        for i in range(6):
-                            b = (raw_int >> (i * 8)) & 0xFF
-                            if b == 0:
-                                break
-                            raw_bytes.append(b)
-                        if b == 0:
-                            break
-                    if raw_bytes:
-                        return bytes(raw_bytes).decode(
-                            "latin-1", errors="replace")
-
-            except Exception:
-                pass
+            from pystata_x.sfi._engine import _read_var_name_x86
+            name = _read_var_name_x86(varno) if varno >= 0 else ""
+            if name:
+                return _x86_read_encoded_str(
+                    lambda o1: f"{name}[{o1}]", obs, is_dataset=True)
             return ""
         if _check_fast_path():
             try:
