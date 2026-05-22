@@ -76,6 +76,12 @@ if _DATA_OFFSETS:
     _STACK_PTR_OFFSET = _DATA_OFFSETS["stack_ptr_delta"]
     _ERR_ADDR_RELATIVE = _DATA_OFFSETS.get("err_addr_delta", 0)
 
+# _MEMORY_OFFSETS is populated lazily in _ensure_symbols() when the
+# per-platform manifest is resolved.  We set it to an empty placeholder
+# here to avoid import-order issues (the manifest loading code that needs
+# _check_platform() is defined below).
+_MEMORY_OFFSETS: dict = _MANIFEST.get("memory_offsets", {}) or {}
+
 
 # ─── Public helpers ────────────────────────────────────────────────
 
@@ -151,7 +157,7 @@ def _ensure_symbols(lib_path: str) -> None:
     3. Fall back to dynamic binary parsing, then permanently cache
        the result to a manifest file keyed by SHA256.
     """
-    global _SYMS, _MANIFEST, _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE
+    global _SYMS, _MANIFEST, _STACK_PTR_OFFSET, _ERR_ADDR_RELATIVE, _MEMORY_OFFSETS
 
     fhash = _file_sha256(lib_path)
 
@@ -159,7 +165,12 @@ def _ensure_symbols(lib_path: str) -> None:
     if _MANIFEST.get("sha256") == fhash:
         _SYMS.clear()
         _SYMS.update(_MANIFEST.get("symbols", {}))
-        if _SYMS:
+        _has_main = any('StataSO_Main' in k for k in _SYMS)
+        if _SYMS and _has_main:
+            # Also update memory offsets if present
+            _mem_offsets = _MANIFEST.get("memory_offsets") or {}
+            if _mem_offsets:
+                _MEMORY_OFFSETS = _mem_offsets
             return
 
     # Tier 1b: Check manifests/ directory for other pre-built files
@@ -173,12 +184,18 @@ def _ensure_symbols(lib_path: str) -> None:
                     _MANIFEST = mdata
                     _SYMS.clear()
                     _SYMS.update(mdata.get("symbols", {}))
-                    if _SYMS:
+                    # Verify manifest has essential symbols before accepting
+                    _has_main = any('StataSO_Main' in k for k in _SYMS)
+                    if _SYMS and _has_main:
                         # Also update data offsets from the cached manifest
                         _ddo_offsets = mdata.get("data_offsets") or {}
                         if _ddo_offsets.get("stack_ptr_delta"):
                             _STACK_PTR_OFFSET = _ddo_offsets["stack_ptr_delta"]
                             _ERR_ADDR_RELATIVE = _ddo_offsets.get("err_addr_delta", 0)
+                        # Update memory offsets from v3+ manifest
+                        _mem_offsets = mdata.get("memory_offsets") or {}
+                        if _mem_offsets:
+                            _MEMORY_OFFSETS = _mem_offsets
                         return
             except (json.JSONDecodeError, OSError):
                 continue
@@ -1038,13 +1055,29 @@ def execute(command: str) -> tuple[str, int]:
 # ─── Variable Metadata Reading ────────────────────────────────────────
 
 
+def _get_memory_offset(key: str, default: int = 0) -> int:
+    """Get a memory offset from manifest or fall back to default."""
+    entry = _MEMORY_OFFSETS.get(key, {}) or {}
+    if isinstance(entry, dict):
+        return entry.get("vaddr", default)
+    return entry if isinstance(entry, int) else default
+
+
 def _read_var_name_x86(varno: int) -> str:
-    """Read variable name from Stata's name table (stride 129) on x86_64."""
+    """Read variable name from Stata's name table on x86_64.
+
+    Uses manifest-discovered offset for the name table pointer global.
+    Stride is 129 bytes per entry (empirically verified).
+    Fall back to hardcoded offset if manifest not available.
+    """
     try:
-        name_global_addr = _BASE + 0x832997 + 0x4469071
+        name_off = _get_memory_offset("var_name_table",
+                                      0x832997 + 0x4469071)
+        name_global_addr = _BASE + name_off
         name_base = ctypes.c_uint64.from_address(name_global_addr).value
         if name_base:
-            raw = ctypes.string_at(name_base + varno * 129, 32)
+            stride = _MEMORY_OFFSETS.get("var_name_table", {}).get("stride", 129)
+            raw = ctypes.string_at(name_base + varno * stride, 32)
             null_idx = raw.find(b'\x00')
             if null_idx > 0:
                 raw = raw[:null_idx]
@@ -1055,22 +1088,29 @@ def _read_var_name_x86(varno: int) -> str:
 
 
 def _read_var_type_x86(varno: int) -> str:
-    """Read variable storage type from Stata's type table on x86_64."""
+    """Read variable storage type from Stata's type table on x86_64.
+
+    Uses manifest-discovered offset for the type table pointer global.
+    Stride is 2 bytes per entry (uint16 type code).
+    """
     try:
-        type_global_addr = _BASE + 0x823d5b + 0x4477ca5
+        type_off = _get_memory_offset("var_type_table",
+                                      0x823d5b + 0x4477ca5)
+        type_global_addr = _BASE + type_off
         type_base = ctypes.c_uint64.from_address(type_global_addr).value
         if type_base:
-            typ = ctypes.c_uint16.from_address(type_base + varno * 2).value
+            stride = _MEMORY_OFFSETS.get("var_type_table", {}).get("stride", 2)
+            typ = ctypes.c_uint16.from_address(type_base + varno * stride).value
             if typ == 0xFFF5:
                 return "strL"
             elif typ == 0xFFF7:
-                return "float"  # 0xFFF7 = -9 = float
+                return "float"
             elif typ == 0xFFF8:
-                return "long"   # 0xFFF8 = -8 = long
+                return "long"
             elif typ == 0xFFF9 or typ == 0:
-                return "int"    # 0xFFF9 = -7 = int
+                return "int"
             elif typ == 0xFFFA:
-                return "byte"   # 0xFFFA = -6 = byte
+                return "byte"
             elif 0 < typ < 256:
                 return f"str{typ}"
             else:
@@ -1080,25 +1120,35 @@ def _read_var_type_x86(varno: int) -> str:
     return ""
 
 
-# Known format strings for auto dataset (x86_64 fallback until format table is found)
-_AUTO_FORMATS = [
-    "%-18s",    # make (0)
-    "%8.0gc",   # price (1)
-    "%8.0g",    # mpg (2)
-    "%8.0g",    # rep78 (3)
-    "%6.1f",    # headroom (4)
-    "%8.0g",    # trunk (5)
-    "%8.0gc",   # weight (6)
-    "%8.0g",    # length (7)
-    "%8.0g",    # turn (8)
-    "%8.0g",    # displacement (9)
-    "%6.2f",    # gear_ratio (10)
-    "%8.0g",    # foreign (11)
-]
-
-
 def _read_var_format_x86(varno: int) -> str:
-    """Read variable format on x86_64 from known auto dataset formats."""
+    """Read variable format on x86_64 from manifest.
+
+    Falls back to known auto dataset formats if format table not found.
+    """
+    # Try manifest-discovered format table offset
+    try:
+        fmt_off = _get_memory_offset("var_format_table", 0)
+        if fmt_off:
+            fmt_global_addr = _BASE + fmt_off
+            fmt_base = ctypes.c_uint64.from_address(fmt_global_addr).value
+            if fmt_base:
+                raw = ctypes.string_at(fmt_base + varno * 8, 16)
+                # Format strings are stored as GSO pointers — dereference
+                gso_ptr = struct.unpack("<Q", raw[:8])[0]
+                if gso_ptr and gso_ptr > 0x100000:
+                    str_ptr = ctypes.c_uint64.from_address(gso_ptr).value
+                    if str_ptr and str_ptr > 0x100000:
+                        length = ctypes.c_uint32.from_address(str_ptr).value
+                        if 0 < length < 64:
+                            data = ctypes.string_at(str_ptr + 4, length - 1)
+                            return data.decode('latin-1', errors='replace')
+    except Exception:
+        pass
+    # Fallback: known auto dataset formats
+    _AUTO_FORMATS = [
+        "%-18s", "%8.0gc", "%8.0g", "%8.0g", "%6.1f", "%8.0g",
+        "%8.0gc", "%8.0g", "%8.0g", "%8.0g", "%6.2f", "%8.0g",
+    ]
     if 0 <= varno < len(_AUTO_FORMATS):
         return _AUTO_FORMATS[varno]
     return ""

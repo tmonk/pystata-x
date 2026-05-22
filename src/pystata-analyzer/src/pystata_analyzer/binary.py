@@ -349,6 +349,7 @@ class StataBinary:
         self._discover_st_names()
         self._discover_push_functions()
         self._discover_stack_ptr()
+        self._discover_dynamic_symbols()
 
     def _discover_dispatch_table(self) -> None:
         """Discover dispatch table from .rela.dyn R_X86_64_RELATIVE entries.
@@ -544,6 +545,52 @@ class StataBinary:
         if not self._stack_ptr_vaddr:
             self._stack_ptr_vaddr = ARG_PTR_ADDR
             self._err_addr_vaddr = 0x500C698
+
+    def _discover_dynamic_symbols(self) -> None:
+        """Read ELF .dynsym section for exported dynamic symbols.
+
+        Adds symbols like StataSO_Main, StataSO_Execute, etc. to
+        self._symbols.  These are required by the runtime engine
+        for base address computation.
+        """
+        if not self._elf:
+            return
+        ds = self._elf.sections.get(".dynsym")
+        dn = self._elf.sections.get(".dynstr")
+        if not ds or not dn or ds.get("size", 0) == 0:
+            return
+        raw = self._elf.raw
+        dynsym_data = raw[ds["offset"]:ds["offset"] + ds["size"]]
+        dynstr_data = raw[dn["offset"]:dn["offset"] + dn["size"]]
+        n_syms = ds["size"] // 24
+        for i in range(n_syms):
+            entry = dynsym_data[i * 24:(i + 1) * 24]
+            if len(entry) < 24:
+                break
+            st_name, st_info, st_other, st_shndx, st_value, st_size = \
+                struct.unpack("<IBBHQQ", entry)
+            if st_value == 0:
+                continue
+            bind = st_info >> 4
+            type_ = st_info & 0xF
+            # Only add global/weak defined functions and objects
+            if bind not in (1, 2):  # STB_GLOBAL, STB_WEAK
+                continue
+            if type_ not in (2, 1):  # STT_FUNC, STT_OBJECT
+                continue
+            # Read symbol name from .dynstr
+            try:
+                end = dynstr_data.index(b"\x00", st_name)
+                name = dynstr_data[st_name:end].decode("ascii", errors="replace")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not name:
+                continue
+            # Only add symbols we care about (StataSO_*, _push*, _bist*)
+            if any(kw in name for kw in
+                   ("StataSO", "_push", "_bist_", "_bi_st_")):
+                if name not in self._symbols:
+                    self._symbols[name] = st_value
 
     # ═══════════════════════════════════════════════════════════════
     # Disassembly & Thunk following
