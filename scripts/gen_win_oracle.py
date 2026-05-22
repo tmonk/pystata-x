@@ -131,7 +131,7 @@ output_path = os.path.join(os.path.dirname(__file__), '..', 'tests', 'e2e', 'ora
 with open(output_path, 'w') as f:
     json.dump(o, f, indent=2, default=str, ensure_ascii=False)
 
-print(f'✅ Windows oracle saved to {output_path} — {len(o)} top-level keys')
+print(f'OK Windows oracle saved to {output_path} — {len(o)} top-level keys')
 for k, v in sorted(o.items()):
     if isinstance(v, dict):
         print(f'  {k}: {len(v)} entries')
