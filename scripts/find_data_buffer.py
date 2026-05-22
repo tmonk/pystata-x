@@ -142,6 +142,8 @@ if count == 0:
                         count += 1
                         if count >= 5:
                             break
+                except:
+                    pass
             if count >= 5:
                 break
         except:
