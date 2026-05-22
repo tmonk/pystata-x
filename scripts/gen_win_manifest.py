@@ -16,8 +16,14 @@ b.analyze()
 print('Done.', flush=True)
 
 print('Calling pe_discover_memory_layout...', flush=True)
-mem = b.pe_discover_memory_layout()
-print('Memory discovery result:', json.dumps(mem, indent=2), flush=True)
+try:
+    mem = b.pe_discover_memory_layout()
+    print('Memory discovery result:', json.dumps(mem, indent=2), flush=True)
+except Exception as e:
+    import traceback
+    print('Error:', e, flush=True)
+    traceback.print_exc()
+    mem = {}
 
 print('Generating manifest...', flush=True)
 m = b.generate_manifest()
