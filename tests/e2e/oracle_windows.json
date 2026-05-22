@@ -1,0 +1,50 @@
+{
+  "obs_total": 74,
+  "var_count": 13,
+  "var_names": [
+    "make",
+    "price",
+    "mpg",
+    "rep78",
+    "headroom",
+    "trunk",
+    "weight",
+    "length",
+    "turn",
+    "displacement",
+    "gear_ratio",
+    "foreign"
+  ],
+  "var_labels": [],
+  "var_types": [
+    "0xf5",
+    "0x81",
+    "0x81",
+    "0x81",
+    "0x82",
+    "0x81",
+    "0x81",
+    "0x81",
+    "0x81",
+    "0x81",
+    "0x82",
+    "0x80"
+  ],
+  "data_samples": {
+    "var1_obs1": 1.0,
+    "var1_obs2": 2.0,
+    "var1_obs74": 74.0,
+    "var2_obs1": 4099.0,
+    "var2_obs2": 4749.0,
+    "var2_obs74": 11995.0,
+    "var3_obs1": 22.0,
+    "var3_obs2": 17.0,
+    "var3_obs74": 17.0,
+    "var4_obs1": 3.0,
+    "var4_obs2": 3.0,
+    "var4_obs74": 5.0,
+    "var5_obs1": 2.5,
+    "var5_obs2": 3.0,
+    "var5_obs74": 2.5
+  }
+}
