@@ -521,13 +521,37 @@ class StataBinary:
                     break
 
             # Discover scratch buffer RVA
-            # Pattern: gen double with a unique literal, search in .data for it
+            # Pattern: gen double with a unique literal, then search .data
+            # The scratch buffer is where obs 0 of the most recent gen'd var is stored.
             _test_val = 999777  # Fixed unique value
             _val_str = str(_test_val)
             dll.StataSO_Execute(b'capture drop __px_discover')
             dll.StataSO_Execute(b'gen double __px_discover = ' + _val_str.encode())
             _s_bytes = struct.pack('<d', float(_test_val))
-            _idx = raw.find(_s_bytes)
+            # Search by scanning from COMMITTED pages only
+            # Try the known scratch area first (typically at .data + 0x922C00)
+            _known_scratch_off = 0x922C00
+            _idx = -1
+            try:
+                _test_buf = (ctypes.c_char * 8)()
+                ctypes.memmove(_test_buf, ctypes.c_void_p(data_ptr + _known_scratch_off), 8)
+                if bytes(_test_buf) == _s_bytes:
+                    _idx = _known_scratch_off
+            except:
+                pass
+            if _idx < 0:
+                # Fallback: scan pages that are committed (search forward from start)
+                for _page_off in range(0, data_size, 4096):
+                    try:
+                        _tmp = (ctypes.c_char * 4096)()
+                        ctypes.memmove(_tmp, ctypes.c_void_p(data_ptr + _page_off), 4096)
+                        _page_data = bytes(_tmp)
+                        _loc = _page_data.find(_s_bytes)
+                        if _loc >= 0:
+                            _idx = _page_off + _loc
+                            break
+                    except:
+                        continue
             if _idx >= 0:
                 memory_offsets['scratch_buffer_rva'] = data_rva + _idx
                 memory_offsets['scratch_buffer_offset'] = _idx
