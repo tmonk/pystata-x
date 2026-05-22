@@ -68,7 +68,6 @@ from pystata_x.sfi._engine import (
     read_obs_count,
     read_var_count,
 )
-from pystata_x.sfi._platform import IS_X86_64
 from pystata_x.sfi._strategy import _STRATEGY
 
 # Stata epoch: January 1, 1960 00:00:00 UTC
@@ -1049,7 +1048,7 @@ class SFIToolkit:
     @staticmethod
     def isValidName(name: str) -> bool:
         """Check if a name is a valid Stata name."""
-        _STRATEGY.is_valid_name(name)
+        return _STRATEGY.is_valid_name(name)
 
     @staticmethod
     def macroExpand(s: str) -> str:
@@ -1064,7 +1063,7 @@ class SFIToolkit:
     @staticmethod
     def getTempName(pref: str = "") -> str:
         """Get a temporary name."""
-        _STRATEGY.get_temp_name(pref)
+        return _STRATEGY.get_temp_name(pref)
 
     @staticmethod
     def getCharSet() -> str:
@@ -1225,18 +1224,16 @@ class SFIToolkit:
 
     @staticmethod
     def strToName(s: str, prefix: bool = False) -> str:
-        """Convert a string to a valid Stata name (pure Python)."""
+        """Convert a string to a valid Stata name (pure Python).
+
+        Strips non-alphanumeric chars (matching Stata's makens behavior).
+        """
         if not s:
             return "_" if prefix else ""
-        result = ""
-        for c in s:
-            if c.isalnum() or c == "_":
-                result += c
-            else:
-                result += "_"
-        if result and result[0].isdigit():
-            result = "_" + result
-        if prefix:
+        result = "".join(c for c in s if c.isalnum())
+        if not result:
+            return "_" if prefix else "x"
+        if result[0].isdigit():
             result = "_" + result
         return result[:32]
 
@@ -1250,10 +1247,14 @@ class SFIToolkit:
 
     @staticmethod
     def makeVarName(s: str, retainCase: bool = False) -> str:
-        """Make a valid Stata variable name (pure Python)."""
-        name = SFIToolkit.strToName(s, prefix=True)
+        """Make a valid Stata variable name (pure Python).
+
+        Strips non-alphanumeric chars, lowercases, truncates to 32 chars.
+        Prepends '_' if the result would start with a digit.
+        """
+        name = SFIToolkit.strToName(s)
         if not retainCase:
-            name = name[:32].lower()
+            name = name.lower()
         return name[:32]
 
     @staticmethod
@@ -3051,6 +3052,11 @@ class Frame:
     def getFrames() -> list:
         """Get all frame names."""
         return _STRATEGY.frame_dir()
+
+    @staticmethod
+    def setCWF(name: str) -> None:
+        """Switch to a frame by name."""
+        _STRATEGY.frame_change(name)
 
     @staticmethod
     def exists(name: str) -> bool:

@@ -365,7 +365,9 @@ class _X86Strategy(_BaseStrategy):
         from pystata_x.sfi._engine import _LIB, _BASE
         _BASE = _BASE
         from pystata_x.sfi._engine import _MEMORY_OFFSETS
-        off = _MEMORY_OFFSETS.get('max_vars', 0x4C910DC)
+        off = _MEMORY_OFFSETS.get('max_vars', {}).get('vaddr', 0) if isinstance(_MEMORY_OFFSETS.get('max_vars'), dict) else _MEMORY_OFFSETS.get('max_vars', 0)
+        if not off:
+            return 5000  # default Stata SE max
         return _ct.cast(_BASE + off, _ct.POINTER(_ct.c_int))[0]
 
     # ── Data operations ──
