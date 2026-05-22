@@ -453,43 +453,36 @@ class StataBinary:
                 try:
                     dll = ctypes.WinDLL(self.path)
                     dll_handle = dll._handle
-                except Exception:
-                    return {}
+                except Exception as e:
+                    return {'_error': 'WinDLL: ' + str(e)}
 
             data_ptr = dll_handle + data_rva
             data_size = data_vsize
 
             kernel32 = ctypes.windll.kernel32
 
-            _Execute = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
+            # Use ctypes.WinDLL for StataSO function access
             try:
-                kernel32.GetProcAddress.restype = ctypes.c_void_p
-                exec_addr = kernel32.GetProcAddress(
-                    ctypes.c_void_p(dll_handle), b'StataSO_Execute')
-                if not exec_addr:
-                    return {}
-                stata_exec = _Execute(exec_addr)
-            except Exception:
-                return {}
+                stata_exec = dll.StataSO_Execute
+                stata_exec.argtypes = [ctypes.c_char_p]
+                stata_exec.restype = ctypes.c_int
+            except Exception as e:
+                return {'_error': 'StataSO_Execute: ' + str(e)}
 
             # Init Stata
             try:
-                _Main = ctypes.WINFUNCTYPE(ctypes.c_int,
-                    ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
-                kernel32.GetProcAddress.restype = ctypes.c_void_p
-                main_addr = kernel32.GetProcAddress(
-                    ctypes.c_void_p(dll_handle), b'StataSO_Main')
-                if not main_addr:
-                    return {}
+                stata_main = dll.StataSO_Main
+                stata_main.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+                stata_main.restype = ctypes.c_int
                 argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
-                rc_init = _Main(main_addr)(2, argv)
-                if rc_init < 0 and rc_init != -7100:
-                    return {}
-            except Exception:
-                return {}
+                rc_init = stata_main(2, argv)
+            except Exception as e:
+                return {'_error': 'StataSO_Main: ' + str(e)}
 
             # Load a known dataset
-            stata_exec(b'sysuse auto, clear')
+            rc = stata_exec(b'sysuse auto, clear')
+            if rc != 0:
+                return {'_error': 'sysuse auto failed: rc=' + str(rc)}
 
             # Use known nvar offset 0x211644 (verified empirically)
             known_nvar_offset = 0x211644
@@ -500,7 +493,7 @@ class StataBinary:
             nvar_read = buf[0]
 
             if nvar_read != 12:
-                return {}  # offset invalid, or dataset not loaded
+                return {'_error': 'nvar offset invalid: read ' + str(nvar_read) + ' expected 12'}
 
             nvar_verified = [known_nvar_offset]
             gws_ptr = data_ptr + known_nvar_offset - 0x68
