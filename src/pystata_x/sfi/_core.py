@@ -1389,12 +1389,36 @@ class SFIToolkit:
     @staticmethod
     def isValidName(name: str) -> bool:
         """Check if a name is a valid Stata name."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'capture confirm name ' + name.encode())
+            _LIB.StataSO_Execute(b'local __px_rc = _rc')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen byte __px_z = \x60__px_rc\x27')
+            nv = int(call_double('_bist_nvar'))
+            return call_double('_bist_data', 1, nv) == 0.0
         r = call_int("_bist_isname", name.encode())
         return bool(r) if r is not None else False
 
     @staticmethod
     def macroExpand(s: str) -> str:
         """Expand macros in a string."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+            _init_px_ref()
+            # Use Stata to expand macros in the string
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = \x22' + s.encode() + b'\x22')
+            _LIB.StataSO_Execute(b'local __tmp = __px_z[1]')
+            _LIB.StataSO_Execute(b'capture drop __px_z2')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z2 = "`__tmp\'"')
+            return _x86_read_encoded_str(
+                lambda o1: '__px_z2[1]', 0, is_dataset=False)
         return call_string("_bist_macroexpand", s.encode())
 
     @staticmethod
@@ -1405,6 +1429,19 @@ class SFIToolkit:
     @staticmethod
     def getTempName(pref: str = "") -> str:
         """Get a temporary name."""
+        if _IS_X86_64 and pref:
+            from pystata_x.sfi._engine import _LIB
+            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+            _init_px_ref()
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = ""')
+            _LIB.StataSO_Execute(b'local __tmp : display \x60=_stata(\x22tempname '
+                + pref.encode() + b'\x22)\x27')
+            _LIB.StataSO_Execute(
+                b'replace __px_z = "`__tmp\'" in 1')
+            return _x86_read_encoded_str(
+                lambda o1: '__px_z[1]', 0, is_dataset=False)
         if pref:
             return call_string("_bist_tempname", pref.encode())
         return call_string("_bist_tempname")
@@ -1674,11 +1711,25 @@ class Platform:
 # Characteristic
 # ═══════════════════════════════════════════
 class Characteristic:
-    """Access to Stata dataset and variable characteristics via _bist_char_dir."""
+    """Access to Stata dataset and variable characteristics."""
 
     @staticmethod
     def getDtaChar(name: str) -> str:
-        """Get a characteristic for the current dataset via _bist_char_dir."""
+        """Get a characteristic for the current dataset."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+            _init_px_ref()
+            _LIB.StataSO_Execute(
+                b'local __tmp : char _dta[' + name.encode() + b']')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = "`__tmp\'"')
+            r = _x86_read_encoded_str(
+                lambda o1: '__px_z[1]', 0, is_dataset=False)
+            if r:
+                return r.strip()
+            return ""
         r = call_string("_bist_char_dir", name.encode())
         if r:
             return r.strip()
@@ -1686,12 +1737,27 @@ class Characteristic:
 
     @staticmethod
     def getVariableChar(var: str or int, name: str) -> str:
-        """Get a characteristic for a variable via _bist_char_dir."""
+        """Get a characteristic for a variable."""
         if isinstance(var, int):
             from pystata_x.sfi._core import Data
             var_name = Data.getVarName(var)
         else:
             var_name = var
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+            _init_px_ref()
+            _LIB.StataSO_Execute(
+                b'local __tmp : char '
+                + var_name.encode() + b'[' + name.encode() + b']')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = "`__tmp\'"')
+            r = _x86_read_encoded_str(
+                lambda o1: '__px_z[1]', 0, is_dataset=False)
+            if r:
+                return r.strip()
+            return ""
         r = call_string("_bist_char_dir", f'{var_name}[{name}]'.encode())
         if r:
             return r.strip()
@@ -1699,20 +1765,34 @@ class Characteristic:
 
     @staticmethod
     def setDtaChar(name: str, value: str) -> None:
-        """Set a characteristic for the current dataset via executeCommand."""
+        """Set a characteristic for the current dataset."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            escaped = value.replace('"', '""')
+            _LIB.StataSO_Execute(
+                b'char define [dta] ' + name.encode()
+                + b' "' + escaped.encode() + b'"')
+            return
         from pystata_x.sfi._engine import execute as _exec
         escaped_value = value.replace('"', '""')
         _exec(f'char define [dta] {name} "{escaped_value}"')
 
     @staticmethod
     def setVariableChar(var: str or int, name: str, value: str) -> None:
-        """Set a variable characteristic via executeCommand."""
-        from pystata_x.sfi._engine import execute as _exec
+        """Set a variable characteristic."""
         if isinstance(var, int):
             from pystata_x.sfi._core import Data
             var_name = Data.getVarName(var)
         else:
             var_name = var
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            escaped = value.replace('"', '""')
+            _LIB.StataSO_Execute(
+                b'char define ' + var_name.encode() + b'['
+                + name.encode() + b'] "' + escaped.encode() + b'"')
+            return
+        from pystata_x.sfi._engine import execute as _exec
         escaped_value = value.replace('"', '""')
         _exec(f'char define {var_name}[{name}] "{escaped_value}"')
 
@@ -1726,16 +1806,25 @@ class Preference:
     @staticmethod
     def getSavedPref(name: str) -> str:
         """Get a saved preference value."""
+        if _IS_X86_64:
+            raise NotImplementedError(
+                "Preference.getSavedPref is not available on this Stata build")
         return call_string("_bist_sys_getusb", name.encode())
 
     @staticmethod
     def setSavedPref(name: str, value: str) -> None:
         """Set a saved preference value."""
+        if _IS_X86_64:
+            raise NotImplementedError(
+                "Preference.setSavedPref is not available on this Stata build")
         call_int("_bist_sys_putusb", name.encode(), value.encode())
 
     @staticmethod
     def deleteSavedPref(name: str) -> None:
         """Delete a saved preference."""
+        if _IS_X86_64:
+            raise NotImplementedError(
+                "Preference.deleteSavedPref is not available on this Stata build")
         call_int("_bist_sys_putusb", name.encode(), b"")
 
 
@@ -3399,6 +3488,10 @@ class Frame:
     @classmethod
     def create(cls, name: str) -> 'Frame':
         """Create a new frame."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(b'frame create ' + name.encode())
+            return cls.connect(name)
         call_void("_bist_framecreate", name.encode())
         return cls.connect(name)
 
@@ -3423,6 +3516,19 @@ class Frame:
     @staticmethod
     def getFrames() -> list:
         """Get all frame names."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+            _init_px_ref()
+            _LIB.StataSO_Execute(b'local __tmp : frame dir')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = "`__tmp\'"')
+            r = _x86_read_encoded_str(
+                lambda o1: '__px_z[1]', 0, is_dataset=False)
+            if r:
+                return [x.strip() for x in r.split() if x.strip()]
+            return []
         r = call_string("_bist_framedir")
         if r:
             return [x.strip() for x in r.split() if x.strip()]
@@ -3431,6 +3537,16 @@ class Frame:
     @staticmethod
     def exists(name: str) -> bool:
         """Check if a frame exists."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'capture frame exists ' + name.encode())
+            _LIB.StataSO_Execute(b'local __px_rc = _rc')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen byte __px_z = \x60__px_rc\x27')
+            nv = int(call_double('_bist_nvar'))
+            return call_double('_bist_data', 1, nv) == 0.0
         r = call_int("_bist_frameexists", name.encode())
         return bool(r) if r is not None else False
 
@@ -3444,12 +3560,23 @@ class Frame:
         """Make this frame the current working frame."""
         if self._name is None:
             raise FrameError('frame not initialized')
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(
+                b'frame change ' + self._name.encode())
+            return
         call_void("_bist_framecurrent", self._name.encode())
 
     def drop(self) -> None:
         """Drop this frame."""
         if self._name is None:
             raise FrameError('frame not initialized')
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(
+                b'frame drop ' + self._name.encode())
+            self._name = None
+            return
         call_void("_bist_framedrop", self._name.encode())
         self._name = None
 
@@ -3457,6 +3584,13 @@ class Frame:
         """Rename this frame."""
         if self._name is None:
             raise FrameError('frame not initialized')
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(
+                b'frame rename '
+                + self._name.encode() + b' ' + newName.encode())
+            self._name = newName
+            return
         call_void("_bist_framerename", self._name.encode(), newName.encode())
         self._name = newName
 
@@ -3464,6 +3598,12 @@ class Frame:
         """Clone this frame to a new frame."""
         if self._name is None:
             raise FrameError('frame not initialized')
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            _LIB.StataSO_Execute(
+                b'frame copy '
+                + self._name.encode() + b' ' + newName.encode())
+            return Frame.connect(newName)
         call_void("_bist_framecopy", self._name.encode(), newName.encode())
         return Frame.connect(newName)
 
@@ -3480,18 +3620,35 @@ class Frame:
 
     def getVarName(self, varno: int) -> str:
         """Get variable name (0-based)."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _read_var_name_x86
+            return _read_var_name_x86(varno)
         return call_string("_bist_varname", varno + 1)
 
     def getVarLabel(self, varno: int) -> str:
         """Get variable label."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            return call_string("_bist_varlabel", varno + 1)
         return call_string("_bist_varlabel", varno + 1)
 
     def getVarType(self, varno: int) -> int:
         """Get variable type."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _read_var_type_x86
+            return _read_var_type_x86(varno)
         return call_int("_bist_vartype", varno + 1)
 
     def getVarIndex(self, name: str) -> int:
         """Get 0-based variable index by name."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _read_var_name_x86, call_double
+            nvar = int(call_double('_bist_nvar'))
+            for i in range(nvar):
+                vn = _read_var_name_x86(i)
+                if vn == name:
+                    return i
+            raise ValueError(f'variable {name!r} not found')
         idx = call_int("_bist_varindex", name.encode())
         if idx is None or idx == 0:
             raise ValueError(f'variable {name!r} not found')
@@ -3499,14 +3656,30 @@ class Frame:
 
     def getVarFormat(self, varno: int) -> str:
         """Get variable display format."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _read_var_format_x86
+            return _read_var_format_x86(varno)
         return call_string("_bist_varformat", varno + 1)
 
     def setVarFormat(self, varno: int, fmt: str) -> None:
         """Set variable display format."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            vn = self.getVarName(varno)
+            _LIB.StataSO_Execute(
+                b'format ' + vn.encode() + b' ' + fmt.encode())
+            return
         call_int("_bist_varformat", varno + 1, fmt.encode())
 
     def setVarLabel(self, varno: int, label: str) -> None:
         """Set variable label."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            vn = self.getVarName(varno)
+            _LIB.StataSO_Execute(
+                b'label variable ' + vn.encode() + b' "' + label.encode()
+                + b'"')
+            return
         call_int("_bist_varlabel", varno + 1, label.encode())
 
     def getDouble(self, varno: int, obs: int) -> float:
@@ -3515,6 +3688,8 @@ class Frame:
 
     def getString(self, varno: int, obs: int) -> str:
         """Read string value from cell."""
+        if _IS_X86_64:
+            return Data.getString(varno + 1, obs + 1)
         return call_string("_bist_sdata", obs + 1, varno + 1)
 
     def storeDouble(self, varno: int, obs: int, val: float) -> None:
@@ -3531,26 +3706,55 @@ class Frame:
 
     def addVarDouble(self, name: str) -> int:
         """Add a new double variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'generate double ' + name.encode() + b' = 0')
+            return int(call_double('_bist_nvar'))
         return call_int("_bist_addvar", name.encode(), ord('d'))
 
     def addVarStr(self, name: str, length: int) -> int:
         """Add a new string variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            slen = min(length, 2000)
+            _LIB.StataSO_Execute(
+                b'generate str' + str(slen).encode() + b' '
+                + name.encode() + b' = ""')
+            return int(call_double('_bist_nvar'))
         return call_int("_bist_addvar", name.encode(), ord('s'), length)
 
     def addVarByte(self, name: str) -> int:
         """Add a new byte variable."""
+        if _IS_X86_64:
+            return self.addVarDouble(name)
         return call_int("_bist_addvar", name.encode(), ord('b'))
 
     def addVarInt(self, name: str) -> int:
         """Add a new int variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'generate int ' + name.encode() + b' = 0')
+            return int(call_double('_bist_nvar'))
         return call_int("_bist_addvar", name.encode(), ord('i'))
 
     def addVarLong(self, name: str) -> int:
         """Add a new long variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'generate long ' + name.encode() + b' = 0')
+            return int(call_double('_bist_nvar'))
         return call_int("_bist_addvar", name.encode(), ord('l'))
 
     def addVarFloat(self, name: str) -> int:
         """Add a new float variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB, call_double
+            _LIB.StataSO_Execute(
+                b'generate float ' + name.encode() + b' = 0')
+            return int(call_double('_bist_nvar'))
         return call_int("_bist_addvar", name.encode(), ord('f'))
 
     def dropVar(self, varno: int) -> None:
@@ -3559,6 +3763,12 @@ class Frame:
 
     def renameVar(self, varno: int, new_name: str) -> None:
         """Rename a variable."""
+        if _IS_X86_64:
+            from pystata_x.sfi._engine import _LIB
+            vn = self.getVarName(varno)
+            _LIB.StataSO_Execute(
+                b'rename ' + vn.encode() + b' ' + new_name.encode())
+            return
         call_void("_bist_varrename", float(varno + 1), new_name.encode())
 
     def keepVar(self, varno: int) -> None:
