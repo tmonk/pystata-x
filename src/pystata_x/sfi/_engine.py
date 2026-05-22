@@ -71,16 +71,38 @@ _SYMS: dict = _MANIFEST.get("symbols", {})
 _STACK_PTR_OFFSET: int = 0
 _ERR_ADDR_RELATIVE: int = 0
 
-_DATA_OFFSETS: dict = _MANIFEST.get("data_offsets", {}) or {}
-if _DATA_OFFSETS:
-    _STACK_PTR_OFFSET = _DATA_OFFSETS["stack_ptr_delta"]
-    _ERR_ADDR_RELATIVE = _DATA_OFFSETS.get("err_addr_delta", 0)
+# ─── Manifest validation helpers ────────────────────────────────────
+# These MUST be defined before _DATA_OFFSETS loading below because
+# we validate the manifest's platform against the current platform
+# before accepting its data_offsets.
 
-# _MEMORY_OFFSETS is populated lazily in _ensure_symbols() when the
-# per-platform manifest is resolved.  We set it to an empty placeholder
-# here to avoid import-order issues (the manifest loading code that needs
-# _check_platform() is defined below).
-_MEMORY_OFFSETS: dict = _MANIFEST.get("memory_offsets", {}) or {}
+
+def _detect_platform() -> str:
+    """Return platform key: 'arm64', 'x86_64', or 'windows'."""
+    if sys.platform == "darwin":
+        return "arm64"
+    elif sys.platform in ("linux", "linux2"):
+        return "x86_64"
+    elif sys.platform == "win32":
+        return "windows"
+    return sys.platform
+
+
+_PLATFORM: str = _detect_platform()
+_MANIFEST_PLATFORM: str = _MANIFEST.get("platform", "") or ""
+
+# Only trust data_offsets from the manifest if it was generated on
+# the same platform.  An ARM64 manifest has different stack_ptr_delta
+# than x86_64 — using the wrong one causes segfaults.
+_DATA_OFFSETS: dict = {}
+_MEMORY_OFFSETS: dict = {}
+
+if _MANIFEST_PLATFORM == _PLATFORM:
+    _DATA_OFFSETS = _MANIFEST.get("data_offsets", {}) or {}
+    if _DATA_OFFSETS:
+        _STACK_PTR_OFFSET = _DATA_OFFSETS["stack_ptr_delta"]
+        _ERR_ADDR_RELATIVE = _DATA_OFFSETS.get("err_addr_delta", 0)
+    _MEMORY_OFFSETS = _MANIFEST.get("memory_offsets", {}) or {}
 
 
 # ─── Public helpers ────────────────────────────────────────────────
@@ -109,21 +131,7 @@ def _find_lib() -> str:
     raise FileNotFoundError(f"libstata not found. Set STATA_LIB_PATH")
 
 
-def _check_platform() -> str:
-    """Return platform key: 'arm64', 'x86_64', or 'windows'."""
-    if sys.platform == "darwin":
-        return "arm64"  # macOS on Apple Silicon
-    elif sys.platform in ("linux", "linux2"):
-        return "x86_64"
-    elif sys.platform == "win32":
-        return "windows"
-    return sys.platform
-
-
-_PLATFORM: str = _check_platform()
-
 # Auto-discover data offsets from binary if shipped manifest didn't match.
-# Works on ARM64 (Mach-O Capstone-based) and x86_64 (ELF .text pattern).
 if not _DATA_OFFSETS and _STACK_PTR_OFFSET == 0:
     try:
         _lib_path = _find_lib()

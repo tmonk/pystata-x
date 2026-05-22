@@ -464,49 +464,92 @@ class StataBinary:
                 self._symbols[name] = vmaddr
 
     def _discover_push_functions(self) -> None:
-        """Find _pushdbl, _pushint, _pushstr in .text by scanning for
-        ``movsd xmm0,[rdi]`` pattern near known offsets.
+        """Find _pushdbl, _pushint, _pushstr in .text dynamically.
 
-        Known x86_64 addresses (verified):
-        - _pushdbl = 0x8b2351
-        - _pushint = 0x8b23a6
-        - _pushstr = 0x8b24a6
+        Uses structural matching:
+        1. Find function prologue (sub rsp, N)
+        2. Verify the function body has expected instructions
+           (allocator call for _pushdbl, cvtsi2sd for _pushint,
+            type=-3 for _pushstr)
+
+        Falls back to empirically verified addresses if discovery fails.
         """
         if not self._elf:
             return
 
-        # Priority: use known verified addresses for x86_64
-        if self.arch == "x86_64":
-            self._push_fns["_pushdbl"] = 0x8b2351
-            self._push_fns["_pushint"] = 0x8b23a6
-            self._push_fns["_pushstr"] = 0x8b24a6
-            return
-
-        # Fallback: pattern matching for other architectures
         text_raw = self._elf.text_raw
         text_vaddr = self._elf.text_vaddr
 
-        # Pattern: movsd xmm0,[rdi] → F2 0F 10 07
-        pattern = bytes([0xF2, 0x0F, 0x10, 0x07])
-        hits = _find_bytes(text_raw, pattern)
+        def _find_in_text(pat: bytes, start: int = 0) -> int:
+            return text_raw.find(pat, start, len(text_raw))
 
-        for hit in hits:
-            abs_addr = text_vaddr + hit
-            fn_addr = _fn_start(text_raw, hit, text_vaddr)
-            if fn_addr and fn_addr not in self._push_fns.values():
-                prev = text_raw[hit - 4:hit] if hit >= 4 else b""
-                if b"\x48\x8b\x07" in prev:  # mov rax,[rdi] → _pushint
-                    self._push_fns["_pushint"] = fn_addr
-                elif len(self._push_fns) == 0:
-                    self._push_fns["_pushdbl"] = fn_addr
-                elif len(self._push_fns) == 1:
-                    self._push_fns["_pushstr"] = fn_addr
+        # --- _pushdbl: prologue + movsd xmm0,[rdi] + test rax,rax ---
+        # Pattern: sub rsp, 8; movsd xmm0, [rdi]; call XX; test rax, rax
+        dbl_pat = bytes([0x48, 0x83, 0xEC, 0x08, 0xF2, 0x0F, 0x10, 0x07])
+        idx = _find_in_text(dbl_pat)
+        if idx >= 0:
+            # Verify: call (E8 XX XX XX XX) followed by test rax,rax (48 85 C0)
+            call_start = idx + 8
+            if call_start + 7 <= len(text_raw):
+                call_insn = text_raw[call_start]
+                after_call = text_raw[call_start + 5:call_start + 8]
+                if call_insn == 0xE8 and after_call == bytes([0x48, 0x85, 0xC0]):
+                    self._push_fns["_pushdbl"] = text_vaddr + idx
 
-        # Fallback: known addresses
+        # --- _pushint: sub rsp + cvtsi2sd xmm0,edi ---
+        pushint_pat = bytes([0xF2, 0x0F, 0x2A, 0xC7])  # cvtsi2sd xmm0,edi
+        search_start = 0
+        while '_pushint' not in self._push_fns:
+            idx = _find_in_text(pushint_pat, search_start)
+            if idx < 0:
+                break
+            # Verify preceded by sub rsp within 16 bytes
+            for back in range(idx - 16, idx):
+                if text_raw[back:back+3] == bytes([0x48, 0x83, 0xec]):
+                    fn_addr = text_vaddr + back
+                    # Verify followed by movsd [rsp+8], xmm0; lea rdi, [rsp+8]
+                    # bytes: F2 0F 11 44 24 08 48 8D 7C 24 08
+                    store_pat = bytes([0xF2, 0x0F, 0x11, 0x44, 0x24, 0x08,
+                                       0x48, 0x8D, 0x7C, 0x24, 0x08])
+                    if text_raw[idx+4:idx+15] == store_pat:
+                        self._push_fns["_pushint"] = fn_addr
+                        break
+            search_start = idx + 1
+
+        # --- _pushstr: mov edi, -3 + repne scasb ---
+        pushstr_pat = bytes([0xBF, 0xFD, 0xFF, 0xFF, 0xFF])  # mov edi, -3
+        scasb_pat = bytes([0xF2, 0xAE])  # repne scasb
+        search_start = 0
+        while '_pushstr' not in self._push_fns:
+            idx = _find_in_text(pushstr_pat, search_start)
+            if idx < 0:
+                break
+            scasb_idx = _find_in_text(scasb_pat, idx)
+            if 0 < scasb_idx - idx < 128:
+                # Verify function prologue nearby
+                for back in range(idx - 64, idx):
+                    if text_raw[back:back+3] == bytes([0x48, 0x83, 0xec]):
+                        fn_addr = text_vaddr + back
+                        # Verify first instruction loads arg into rbp
+                        # (mov rbp, rdi = 48 89 FD)
+                        if text_raw[back+3:back+6] == bytes([0x48, 0x89, 0xFD]):
+                            self._push_fns["_pushstr"] = fn_addr
+                            break
+            search_start = idx + 1
+
+        # --- Fallback: empirically verified addresses ---
+        # These were confirmed via disassembly for Stata 19.5 x86_64.
         if not self._push_fns.get("_pushdbl"):
-            self._push_fns["_pushdbl"] = 0x8b2351
-            self._push_fns["_pushint"] = 0x8b23a6
-            self._push_fns["_pushstr"] = 0x8b24a6
+            self._push_fns["_pushdbl"] = 0x8b23ec
+        if not self._push_fns.get("_pushint"):
+            self._push_fns["_pushint"] = 0x8b2441
+        if not self._push_fns.get("_pushstr"):
+            self._push_fns["_pushstr"] = 0x8b2524
+
+        # Add to _symbols so they appear in the manifest
+        for pname, paddr in self._push_fns.items():
+            if pname not in self._symbols:
+                self._symbols[pname] = paddr
 
     def _discover_stack_ptr(self) -> None:
         """Find stack pointer and error address by scanning .text for the

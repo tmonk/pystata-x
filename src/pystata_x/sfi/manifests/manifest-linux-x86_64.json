@@ -3,7 +3,7 @@
   "sha256": "9fa8ba0edb3b3a82cd662fc39cbee72a50e16ddfdba95aa745721bbdf591b313",
   "platform": "linux",
   "arch": "x86_64",
-  "n_bist_symbols": 254,
+  "n_bist_symbols": 257,
   "symbols": {
     "_bist_macroexpand()": 7068383,
     "st_macroexpand()": 7068383,
@@ -241,6 +241,9 @@
     "st_aliasvarname": 8593545,
     "_bist_sortidx": 7236325,
     "st_sortidx": 7236325,
+    "_pushint": 9118785,
+    "_pushdbl": 9118700,
+    "_pushstr": 9119012,
     "StataSO_Shutdown": 12114864,
     "StataSO_RunInteractiveLoop": 12115056,
     "StataSO_Main": 10643839,
@@ -2542,9 +2545,9 @@
     ]
   ],
   "push_fns": {
-    "_pushdbl": 9118545,
-    "_pushint": 9118630,
-    "_pushstr": 9118886
+    "_pushint": 9118785,
+    "_pushdbl": 9118700,
+    "_pushstr": 9119012
   },
   "data_offsets": {
     "stack_ptr_delta": 83936928,
@@ -2648,11 +2651,11 @@
       "note": "Reads from data/bss tables, 122 instr \u2014 likely real implementation"
     },
     "_bist_dir": {
-      "classification": "echo",
+      "classification": "likely_echo",
       "instr_count": 124,
       "has_mem_read": true,
       "calls_expression_parser": true,
-      "note": "Calls expression parser and push functions \u2014 identity stub that echoes input"
+      "note": "Calls expression parser \u2014 likely echoes or evaluates expression rather than doing table lookup"
     },
     "_bist_dropobsin": {
       "classification": "working",
@@ -2816,18 +2819,18 @@
       "note": "Reads from data/bss tables, 125 instr \u2014 likely real implementation"
     },
     "_bist_matrix": {
-      "classification": "echo",
+      "classification": "likely_echo",
       "instr_count": 124,
       "has_mem_read": true,
       "calls_expression_parser": true,
-      "note": "Calls expression parser and push functions \u2014 identity stub that echoes input"
+      "note": "Calls expression parser \u2014 likely echoes or evaluates expression rather than doing table lookup"
     },
     "_bist_matrix_hcat": {
-      "classification": "echo",
+      "classification": "likely_echo",
       "instr_count": 124,
       "has_mem_read": true,
       "calls_expression_parser": true,
-      "note": "Calls expression parser and push functions \u2014 identity stub that echoes input"
+      "note": "Calls expression parser \u2014 likely echoes or evaluates expression rather than doing table lookup"
     },
     "_bist_matrixcoleqnumb": {
       "classification": "working",
@@ -2991,18 +2994,18 @@
       "note": "Reads from data/bss tables, 119 instr \u2014 likely real implementation"
     },
     "_bist_numscalar": {
-      "classification": "echo",
+      "classification": "likely_echo",
       "instr_count": 125,
       "has_mem_read": true,
       "calls_expression_parser": true,
-      "note": "Calls expression parser and push functions \u2014 identity stub that echoes input"
+      "note": "Calls expression parser \u2014 likely echoes or evaluates expression rather than doing table lookup"
     },
     "_bist_numscalar_hcat": {
-      "classification": "echo",
+      "classification": "likely_echo",
       "instr_count": 125,
       "has_mem_read": true,
       "calls_expression_parser": true,
-      "note": "Calls expression parser and push functions \u2014 identity stub that echoes input"
+      "note": "Calls expression parser \u2014 likely echoes or evaluates expression rather than doing table lookup"
     },
     "_bist_nvar": {
       "classification": "working",
