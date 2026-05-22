@@ -1,5 +1,4 @@
-"""Understand data buffer layout on Windows.
-Sentinel is at data+0x922C00 for tiny datasets. Find it for larger ones."""
+"""Read gws struct and nearby memory systematically to find data buffer pointer."""
 import ctypes
 import struct
 
@@ -12,6 +11,9 @@ dll.StataSO_Main.restype = ctypes.c_int
 dll.StataSO_Main(2, (ctypes.c_char_p * 2)(b'stata', b'-q'))
 dll.StataSO_Execute.argtypes = [ctypes.c_char_p]
 dll.StataSO_Execute.restype = ctypes.c_int
+
+# Load a dataset
+dll.StataSO_Execute(b'sysuse auto, clear')
 
 with open(dll_path, 'rb') as f:
     pe_data = f.read()
@@ -28,148 +30,111 @@ for i in range(num_sections):
         break
 data_ptr = handle + data_rva
 print('data_ptr:', hex(data_ptr))
-gws_off = 0x211644 - 0x68  # 0x2115DC
+data_rva_actual = data_rva  # For computing RVA offsets
 
-def find_sentinel_in_data(dll, data_ptr, data_vsize, sentinel_val):
-    s_bytes = struct.pack('<d', sentinel_val)
-    chunk_size = 256 * 1024
-    for chunk_start in range(0, data_vsize, chunk_size):
-        cur_size = min(chunk_size, data_vsize - chunk_start)
-        buf = (ctypes.c_char * cur_size)()
-        try:
-            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur_size)
-        except:
-            return None
-        chunk_raw = bytes(buf)
-        idx = chunk_raw.find(s_bytes)
-        if idx >= 0:
-            return chunk_start + idx
-    return None
-
-def search_gws_for_val(dll, data_ptr, data_vsize, gws_off, target_val, search_radius=65536):
-    """Search vicinity of gws for a pointer containing target_val."""
-    read_start = max(0, gws_off - search_radius)
-    read_size = min(data_vsize - read_start, search_radius * 2)
-    buf = (ctypes.c_char * read_size)()
-    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + read_start), read_size)
-    raw = bytes(buf)
-    matches = []
-    for j in range(0, len(raw) - 8, 8):
-        ptr = struct.unpack('<Q', raw[j:j+8])[0]
-        if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
-            continue
-        if handle <= ptr < handle + 0x04000000:
-            continue
-        try:
-            test_buf = (ctypes.c_double * 1)()
-            ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
-            if abs(test_buf[0] - target_val) < 0.0001:
-                abs_off = read_start + j
-                matches.append((abs_off, ptr))
-        except:
-            pass
-    return matches
-
-# Test 1: tiny dataset
-print('\n=== Test 1: 1 var, 1 obs ===')
-dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'set obs 1')
-dll.StataSO_Execute(b'gen double __px_a = 12345.6789')
-off1 = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
-print('  data+%s (1 obs)' % ('None' if off1 is None else hex(off1)))
-
-# Test 2: medium dataset
-print('\n=== Test 2: 3 vars, 2 obs ===')
-dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'set obs 2')
-dll.StataSO_Execute(b'gen double __px_a = 1111.2222')
-dll.StataSO_Execute(b'gen double __px_b = 3333.4444')
-dll.StataSO_Execute(b'gen double __px_c = 5555.6666')
-for label, val in [('a', 1111.2222), ('b', 3333.4444), ('c', 5555.6666)]:
-    off = find_sentinel_in_data(dll, data_ptr, data_vsize, val)
-    if off is not None:
-        print('  __px_%s at data+%s (IN .data)' % (label, hex(off)))
-    else:
-        print('  __px_%s NOT in .data (must be in heap)' % label)
-        matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, val)
-        if matches:
-            for moff, mptr in matches:
-                print('    Found via gws_vic+%x -> ptr=%x' % (moff, mptr))
-        else:
-            print('    Not found via gws vicinity either')
-
-# Test 3: larger dataset
-print('\n=== Test 3: 12 vars, 74 obs (auto) ===')
-dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'sysuse auto, clear')
+# nvar at data_ptr + 0x211644
 nv_buf = (ctypes.c_int * 1)()
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-print('  nvar:', nv_buf[0])
+nvar_val = nv_buf[0]
+print('nvar:', nvar_val)
 
-# Find price (first obs, first var = 4099)
-off = find_sentinel_in_data(dll, data_ptr, data_vsize, 4099.0)
-if off is not None:
-    print('  price(obs0) at data+%s (IN .data)' % hex(off))
-else:
-    print('  price(obs0) NOT in .data (must be in heap)')
-    matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, 4099.0)
-    if matches:
-        for moff, mptr in matches[:5]:
-            print('    Found via gws_vic+%x -> ptr=%x' % (moff, mptr))
-    else:
-        print('    Not found via gws vicinity either')
+# gws at data_ptr + 0x2115DC
+gws_ptr = data_ptr + 0x211644 - 0x68
+gws_off = gws_ptr - data_ptr
 
-# Test 4: huge search - find the data buffer by searching ALL .data for heap pointers
-print('\n=== Test 4: Search ALL .data section for heap ptrs to var values ===')
-dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'sysuse auto, clear')
-# Use a unique value
-dll.StataSO_Execute(b'gen double __px_unique = 888888.9999')
-test_val = 888888.9999
+# Read 8192 bytes starting from 512 bytes BEFORE gws
+# This gives us a clear picture of the gws structure
+region_start = gws_off - 512
+region_size = 8192
+print('\nReading gws region 0x%x-0x%x (relative to data)' % (region_start, region_start + region_size))
+buf = (ctypes.c_char * region_size)()
+ctypes.memmove(buf, ctypes.c_void_p(data_ptr + region_start), region_size)
+raw = bytes(buf)
 
-# Check if in .data
-off = find_sentinel_in_data(dll, data_ptr, data_vsize, test_val)
-print('  __px_unique in .data:', off is not None, 'at' if off else '', hex(off) if off else '')
-if off is None:
-    # It's in heap. Find the data buffer pointer.
-    print('  Searching gws vicinity for the pointer...')
-    matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, test_val, 65536*4)
-    if matches:
-        for moff, mptr in matches:
-            print('    FOUND at .data+%x: ptr=%x' % (moff, mptr))
-            print('    RVA:', hex(mptr - handle))
-    else:
-        print('  NOT found in gws vicinity. Trying FULL .data scan...')
-        # Full scan of .data for heap pointers
-        s_bytes = struct.pack('<d', test_val)
-        count = 0
-        for chunk_start in range(0, data_vsize, 65536):
-            cur = min(65536, data_vsize - chunk_start)
-            buf = (ctypes.c_char * cur)()
-            try:
-                ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur)
-            except:
-                continue
-            raw = bytes(buf)
-            for j in range(0, len(raw) - 8, 8):
-                ptr = struct.unpack('<Q', raw[j:j+8])[0]
-                if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
-                    continue
-                if handle <= ptr < handle + 0x04000000:
-                    continue
-                try:
-                    test_buf = (ctypes.c_double * 1)()
-                    ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
-                    if abs(test_buf[0] - test_val) < 0.0001:
-                        print('    FOUND at .data+%x: ptr=%x (RVA: %x)' 
-                              % (chunk_start + j, ptr, ptr - handle))
-                        count += 1
-                        if count >= 3:
-                            break
-                except:
-                    pass
-            if count >= 3:
-                break
-        print('  Total matches:', count)
+# Analyze 8-byte fields near gws
+# gws is at offset 512 within our read buffer
+gws_rel = 512  # offset of gws start in our buffer
+print('\n=== gws fields (relative to gws start) ===')
+print('Off in gws | Abs data off | Value (hex) | Value (int) | Notes')
+print('-' * 80)
+
+for off in range(0, min(region_size - gws_rel, 2048), 8):
+    abs_off = region_start + gws_rel + off
+    val = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
+    notes = ''
+    
+    # Check if it's nvar (should be at gws+0x68)
+    if off == 0x68:
+        notes = 'nvar=' + str(val)
+    elif off == 0:
+        notes = 'gws start'
+    # Check if it's a pointer within the DLL
+    elif handle <= val < handle + 0x04000000:
+        rva = val - handle
+        notes = 'DLL ptr -> rva %x' % rva
+    elif val < 1000000 and val > 0:
+        notes = 'small int'
+    
+    if notes:
+        print('gws+%-4d | data+%-9x | %-16x | %-10d | %s' % (off, abs_off, val, val, notes))
+
+# Now specifically look for the data buffer pointer
+# The data buffer for auto (12 vars, 74 obs) is 74 * 12 * 8 = 7104 bytes
+# Find it by looking at ALL qwords in gws vicinity that point to heap memory
+print('\n=== All pointers in gws region pointing OUTSIDE DLL ===')
+count = 0
+for j in range(0, region_size - 8, 8):
+    ptr = struct.unpack('<Q', raw[j:j+8])[0]
+    if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
+        continue
+    if handle <= ptr < handle + 0x04000000:
+        continue  # DLL-local pointer
+    abs_off = region_start + j
+    gws_rel_off = abs_off - (region_start + 512)
+    # Try reading the first double at this pointer
+    try:
+        test_buf = (ctypes.c_double * 1)()
+        ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
+        val = test_buf[0]
+        print('  data+%x (gws%+d): ptr=%x first_val=%.1f' % (abs_off, gws_rel_off, ptr, val))
+        count += 1
+    except:
+        pass
+    if count >= 50:
+        print('  ... (showing 50)')
+        break
+
+if count == 0:
+    print('  (none found in this region)')
+    print('\nTrying alternative: maybe data buffer is stored at gws+0x48 (Linux convention)')
+    linux_off = 0x48
+    linux_ptr = struct.unpack('<Q', raw[gws_rel + linux_off:gws_rel + linux_off + 8])[0]
+    print('  gws+0x48 value: %x' % linux_ptr)
+    if handle <= linux_ptr < handle + 0x04000000:
+        # Try dereferencing this DLL-local pointer
+        print('  Is a DLL-local pointer. Data at that address:')
+        for k in range(8):
+            v = struct.unpack('<Q', raw[gws_rel + k*8:gws_rel + k*8 + 8])[0]
+            print('    [%d] %x' % (k, v))
+
+# Also check: maybe the data buffer is at a computed RVA
+# On Linux, gws.D = gws + 0x48 = pointer to data buffer
+# The VALUE at gws+0x48 on Linux is a HEAP pointer
+# Let me check what's at gws+0x48 on Windows
+print('\n=== Detailed gws dump (0-256 bytes) ===')
+for off in range(0, 256, 8):
+    abs_off = region_start + gws_rel + off
+    val = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
+    val_d = struct.unpack('<d', raw[gws_rel + off:gws_rel + off + 8])[0]
+    line = 'gws+%03d: 0x%016x (int=%-12d double=%.2f' % (off, val, val, val_d)
+    # Type check
+    if handle <= val < handle + 0x04000000:
+        line += ' [DLL ptr RVA %x]' % (val - handle)
+    elif 1 <= val < 1000000:
+        line += ' [small int]'
+    elif val >= 0x10000:
+        line += ' [heap ptr?]'
+    line += ')'
+    print(line)
 
 print('\nDone')
