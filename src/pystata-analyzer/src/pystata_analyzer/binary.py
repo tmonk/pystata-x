@@ -467,7 +467,7 @@ class StataBinary:
                     ctypes.c_void_p(dll_handle), b'StataSO_Execute')
                 if not exec_addr:
                     return {}
-                stata_exec = _Execute(exec_addr)
+                stata_exec = _Execute(ctypes.c_void_p(exec_addr & 0xffffffff).value)
             except Exception:
                 return {}
 
@@ -475,10 +475,11 @@ class StataBinary:
             try:
                 _Main = ctypes.CFUNCTYPE(ctypes.c_int,
                     ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
-                main_addr = kernel32.GetProcAddress(
+                raw_main = kernel32.GetProcAddress(
                     ctypes.c_void_p(dll_handle), b'StataSO_Main')
-                if not main_addr:
+                if not raw_main:
                     return {}
+                main_addr = ctypes.c_void_p(raw_main & 0xffffffff).value
                 argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
                 rc_init = _Main(main_addr)(2, argv)
                 if rc_init < 0 and rc_init != -7100:
