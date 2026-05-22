@@ -141,22 +141,33 @@ class PEStata:
         pe = d[e_lfanew:e_lfanew+0x200]
         num_sections = struct.unpack('<H', pe[6:8])[0]
         opt_hdr_size = struct.unpack('<H', pe[20:22])[0]
-        data_dir_offset = e_lfanew + 24 + opt_hdr_size
+        optional_hdr = e_lfanew + 24
 
-        # Export directory is first data directory
+        # For PE32+, data directories start at optional_header + 112
+        magic = struct.unpack('<H', d[optional_hdr:optional_hdr+2])[0]
+        if magic == 0x20b:  # PE32+
+            data_dir_offset = optional_hdr + 112
+        elif magic == 0x10b:  # PE32
+            data_dir_offset = optional_hdr + 96
+        else:
+            return []
+
+        # Export directory is first data directory (index 0, 8 bytes each)
         export_rva = struct.unpack('<I', d[data_dir_offset:data_dir_offset+4])[0]
         export_size = struct.unpack('<I', d[data_dir_offset+4:data_dir_offset+8])[0]
 
         if export_rva == 0 or export_size == 0:
             return []
 
-        # Find section containing export dir
-        sec = self.pe
-        for s in self.pe.sections:
-            if s['va'] <= export_rva < s['va'] + s['vsize']:
-                export_off = export_rva - s['va'] + s['raw_offset']
-                break
-        else:
+        # Find section containing export dir and convert RVA to file offset
+        def rva_to_file(rva):
+            for s in self.pe.sections:
+                if s['va'] <= rva < s['va'] + s.get('raw_size', s['vsize']):
+                    return rva - s['va'] + s['raw_offset']
+            return None
+
+        export_off = rva_to_file(export_rva)
+        if export_off is None:
             return []
 
         # Parse export table
@@ -166,12 +177,6 @@ class PEStata:
         funcs_rva = struct.unpack('<I', d[export_off+28:export_off+32])[0]
         names_rva = struct.unpack('<I', d[export_off+32:export_off+36])[0]
         ords_rva = struct.unpack('<I', d[export_off+36:export_off+40])[0]
-
-        def rva_to_file(rva):
-            for s in self.pe.sections:
-                if s['va'] <= rva < s['va'] + s.get('raw_size', s['vsize']):
-                    return rva - s['va'] + s['raw_offset']
-            return None
 
         names_off = rva_to_file(names_rva)
         ords_off = rva_to_file(ords_rva)
@@ -186,7 +191,8 @@ class PEStata:
             name_off = rva_to_file(name_rva)
             if name_off is None:
                 continue
-            name = d[name_off:d.index(b'\x00', name_off)].decode('utf-8', errors='replace')
+            end = d.index(b'\x00', name_off)
+            name = d[name_off:end].decode('utf-8', errors='replace')
             ordinal = struct.unpack('<H', d[ords_off + i*2:ords_off + i*2 + 2])[0]
             func_rva = struct.unpack('<I', d[funcs_off + ordinal*4:funcs_off + ordinal*4 + 4])[0]
             exports.append((name, ordinal + ord_base, func_rva))
