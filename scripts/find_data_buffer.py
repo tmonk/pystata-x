@@ -102,8 +102,6 @@ for label, val in [('a', 1111.2222), ('b', 3333.4444), ('c', 5555.6666)]:
 print('\n=== Test 3: 12 vars, 74 obs (auto) ===')
 dll.StataSO_Execute(b'clear')
 dll.StataSO_Execute(b'sysuse auto, clear')
-print('  nvar:', struct.unpack('<I', bytes(
-    (ctypes.c_int * 1)()))[0] if False else 0)
 nv_buf = (ctypes.c_int * 1)()
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
 print('  nvar:', nv_buf[0])
@@ -168,6 +166,8 @@ if off is None:
                         count += 1
                         if count >= 3:
                             break
+                except:
+                    pass
             if count >= 3:
                 break
         print('  Total matches:', count)
