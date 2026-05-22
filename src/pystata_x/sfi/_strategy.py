@@ -1055,21 +1055,46 @@ class _WindowsStrategy(_X86Strategy):
         self._exe('gen double __px_tmp = __px_val')
         return self._scratch_read_double()
 
+    def _get_varlist(self) -> str:
+        """Get full variable list from Stata via ds + r(varlist).
+        
+        Uses ``ds`` command which works on all platforms (unlike
+        ``: variable`` which fails on Windows Stata with rc=101).
+        """
+        self._exe('quietly ds')
+        # r(varlist) returns space-separated variable names
+        # Store in a local macro for extraction
+        self._exe('local __px_vlist = "`r(varlist)\'"')
+        # Read and decode each variable name
+        names = []
+        for i in range(1, self.var_count() + 1):
+            self._exe(f'capture drop __px_vn')
+            # Use : word N which DOES work on Windows
+            self._exe(f'local __px_v : word {i} of `__px_vlist\'')
+            self._exe(f'gen str32 __px_vn = "`__px_v\'"')
+            name = self.read_encoded_str('__px_vn[1]', obs=1)
+            names.append(name)
+            self._exe('drop __px_vn')
+        self._varlist_cache = names
+        return names
+
     def get_var_name(self, varno: int) -> str:
-        """Get variable name via Stata extended macro + gen str32 + encoding."""
-        # Store variable name in a string variable via macro
-        self._exe(f'capture drop __px_vn')
-        self._exe(f'local __px_name : variable {varno}')
-        # gen str32 stores the macro-expanded name
-        self._exe(f'gen str32 __px_vn = "`__px_name\'"')
-        # Use read_encoded_str to decode the string variable
-        return self.read_encoded_str('__px_vn[1]', obs=1)
+        """Get variable name via ds + r(varlist) + : word N of.
+        
+        Uses ``quietly ds`` to get the varlist (works on Windows, unlike
+        the ``: variable`` extended macro function which returns rc=101).
+        """
+        if not hasattr(self, '_varlist_cache') or len(self._varlist_cache) < self.var_count():
+            self._get_varlist()
+        if 1 <= varno <= len(self._varlist_cache):
+            return self._varlist_cache[varno - 1]
+        return ''
 
     # ── Override all _bist_*-dependent methods ──
     def find_var_index(self, name: str) -> int:
-        nvar = self.var_count()
-        for i in range(1, nvar + 1):
-            vn = self.get_var_name(i)
+        # Refresh cache in case dataset changed
+        names = self._get_varlist()
+        for i, vn in enumerate(names, 1):
             if vn and vn.lower() == name.lower():
                 return i
         return 0
@@ -1089,18 +1114,21 @@ class _WindowsStrategy(_X86Strategy):
         Uses scalar intermediate to bypass expression evaluation issue
         in scratch buffer. The src_expr is a Stata expression like
         ``make[1]`` or ``__px_vn[1]``.
+
+        Encoding: each character is encoded as strpos(alphabet, char) + 1
+        stored in a base-256 packed integer. Decoding reverses this:
+        (byte - 1) becomes the 0-based index into the alphabet.
         """
-        import math
-        raw_bytes = bytearray()
-        for chunk in range(3):
-            # Build encoding expression
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+        result_chars = []
+        for chunk in range(3):  # Up to 18 characters (3 groups of 6)
             terms = []
             for i in range(6):
                 pos = chunk * 6 + i + 1
                 pow256 = 256 ** i
                 terms.append(
                     f"cond(substr({src_expr}, {pos}, 1) == \"\", 0,"
-                    f" (strpos(\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\","
+                    f" (strpos(\"{alphabet}\","
                     f" substr({src_expr}, {pos}, 1)) + 1) * {pow256})")
             expr = " + ".join(terms)
             # Store via scalar intermediate (bypasses expression-in-scratch issue)
@@ -1111,16 +1139,20 @@ class _WindowsStrategy(_X86Strategy):
             if raw_val is None or raw_val <= 0:
                 break
             raw_int = int(raw_val)
+            chunk_chars = []
             for i in range(6):
                 b = (raw_int >> (i * 8)) & 0xFF
                 if b == 0:
                     break
-                raw_bytes.append(b)
+                idx = b - 1  # strpos + 1 -> 0-based index
+                if 0 <= idx < len(alphabet):
+                    chunk_chars.append(alphabet[idx])
+                else:
+                    break
+            result_chars.extend(chunk_chars)
             if b == 0:
                 break
-        if raw_bytes:
-            return bytes(raw_bytes).decode("latin-1", errors="replace")
-        return ""
+        return ''.join(result_chars)
 
     def get_max_vars(self) -> int:
         from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
