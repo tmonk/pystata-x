@@ -18,7 +18,7 @@ print('StataSO_Main addr:', hex(main_addr) if main_addr else 'None', flush=True)
 
 print('Initializing Stata...', flush=True)
 argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
-rc = _Main(main_addr)(2, argv)
+rc = _Main(ctypes.c_void_p(main_addr & 0xffffffff).value)(2, argv)
 print('Init rc:', rc, flush=True)
 
 print('Getting StataSO_Execute...', flush=True)
