@@ -1144,7 +1144,9 @@ class _WindowsStrategy(_X86Strategy):
                 b = (raw_int >> (i * 8)) & 0xFF
                 if b == 0:
                     break
-                idx = b - 1  # strpos + 1 -> 0-based index
+                # strpos is 1-based, we store (strpos + 1)
+                # To recover: idx = b - 2 (since strpos + 1 - 1 = strpos - 1 = 0-based)
+                idx = b - 2  # Corrects for strpos 1-based + our +1 offset
                 if 0 <= idx < len(alphabet):
                     chunk_chars.append(alphabet[idx])
                 else:
