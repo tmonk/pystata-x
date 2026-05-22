@@ -1,4 +1,6 @@
-"""Find data buffer pointer on Windows by searching gws vicinity."""
+"""Understand data buffer layout relative to .data section.
+The sentinel is at data+0x922c00 with 1 var + 1 obs.
+Vary the dataset size to see how the data buffer shifts."""
 import ctypes
 import struct
 
@@ -6,20 +8,12 @@ dll_path = r'C:\Program Files\StataNow19\se-64.dll'
 dll = ctypes.WinDLL(dll_path)
 handle = dll._handle
 
-# Init Stata
 dll.StataSO_Main.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
 dll.StataSO_Main.restype = ctypes.c_int
 dll.StataSO_Main(2, (ctypes.c_char_p * 2)(b'stata', b'-q'))
 dll.StataSO_Execute.argtypes = [ctypes.c_char_p]
 dll.StataSO_Execute.restype = ctypes.c_int
 
-# Create clean dataset
-dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'set obs 1')
-sentinel_val = 12345.6789
-dll.StataSO_Execute(b'gen double __px_sentinel = ' + str(sentinel_val).encode())
-
-# Find .data section
 with open(dll_path, 'rb') as f:
     pe_data = f.read()
 e_lfanew = struct.unpack('<I', pe_data[0x3c:0x40])[0]
@@ -36,51 +30,85 @@ for i in range(num_sections):
 data_ptr = handle + data_rva
 print('data_ptr:', hex(data_ptr))
 
-# Confirmed: sentinel is at data+0x922c00
-SENTINEL_DATA_OFF = 0x922c00
-sentinel_abs_addr = data_ptr + SENTINEL_DATA_OFF
-print('sentinel abs:', hex(sentinel_abs_addr))
+def find_sentinel_in_data(dll, data_ptr, data_vsize, sentinel_val):
+    """Search .data section for a double value, return offset or None."""
+    s_bytes = struct.pack('<d', sentinel_val)
+    chunk_size = 256 * 1024
+    for chunk_start in range(0, data_vsize, chunk_size):
+        cur_size = min(chunk_size, data_vsize - chunk_start)
+        buf = (ctypes.c_char * cur_size)()
+        try:
+            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur_size)
+        except:
+            return None  # Access violation (trying to read beyond real committed pages)
+        chunk_raw = bytes(buf)
+        idx = chunk_raw.find(s_bytes)
+        if idx >= 0:
+            return chunk_start + idx
+    return None
 
-# gws vicinity
-gws_off = 0x211644 - 0x68  # 0x2115DC
-print('gws off:', hex(gws_off))
-
-# Read a region around gws for pointer search
-gws_read_start = 0x210000
-gws_read_size = 0x8000  # 32KB
-buf = (ctypes.c_char * gws_read_size)()
-ctypes.memmove(buf, ctypes.c_void_p(data_ptr + gws_read_start), gws_read_size)
+print('\n=== Test 1: 1 var, 1 obs ===')
+dll.StataSO_Execute(b'clear')
+dll.StataSO_Execute(b'set obs 1')
+dll.StataSO_Execute(b'gen double __px_sentinel = 12345.6789')
+off1 = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
+print('  sentinel at data+%x' % off1)
+# nvar
+nv_buf = (ctypes.c_int * 1)()
+ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
+print('  nvar:', nv_buf[0])
+# Read nearby - what's around the sentinel?
+buf = (ctypes.c_char * 256)()
+ctypes.memmove(buf, ctypes.c_void_p(data_ptr + off1 - 64), 256)
 raw = bytes(buf)
+for k in range(0, 256, 8):
+    val = struct.unpack('<d', raw[k:k+8])[0]
+    val_int = struct.unpack('<Q', raw[k:k+8])[0]
+    marker = ' <-- SENTINEL' if k == 64 else ''
+    addr = data_ptr + off1 - 64 + k
+    print('  [%s] %.1f (0x%x)%s' % ('%+d' % (k - 64), val, val_int, marker))
 
-sentinel_region_start = data_ptr + 0x920000
-sentinel_region_end = data_ptr + 0x930000
+print('\n=== Test 2: 3 vars, 2 obs ===')
+dll.StataSO_Execute(b'clear')
+dll.StataSO_Execute(b'set obs 2')
+dll.StataSO_Execute(b'gen double __px_a = 12345.6789')
+dll.StataSO_Execute(b'gen double __px_b = 112233.4455')
+dll.StataSO_Execute(b'gen double __px_c = 998877.6655')
 
-print('\nSearching gws vicinity for pointers to data buffer region...')
-for j in range(0, len(raw) - 8, 8):
-    ptr = struct.unpack('<Q', raw[j:j+8])[0]
-    if sentinel_region_start <= ptr <= sentinel_region_end:
-        abs_off = gws_read_start + j
-        print('  GWS_VICINITY+%x (abs %x): ptr=%x (data+%x)' 
-              % (abs_off, data_ptr + abs_off, ptr, ptr - data_ptr))
+off2a = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
+off2b = find_sentinel_in_data(dll, data_ptr, data_vsize, 112233.4455)
+off2c = find_sentinel_in_data(dll, data_ptr, data_vsize, 998877.6655)
+print('  sentinel_a at data+%x' % off2a)
+print('  sentinel_b at data+%x' % off2b)
+print('  sentinel_c at data+%x' % off2c)
+print('  deltas: a-c=%d obs stride=%d' % (off2a - off2c if off2c else 0, off2a - off2b if off2b else 0))
 
-# Also scan a region before, during, and after sentinel for data struct pointers
-# Store the sentinel's actual position in each stride
-# The data buffer has 1 variable, 1 obs = 8 bytes
-# Check what's around the sentinel in memory
-print('\nReading the data buffer region...')
-db_buf = (ctypes.c_char * 2048)()
-ctypes.memmove(db_buf, ctypes.c_void_p(data_ptr + SENTINEL_DATA_OFF - 1024), 2048)
-db_raw = bytes(db_buf)
+# nvar
+ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
+print('  nvar:', nv_buf[0])
 
-# Find the sentinel within this buffer
-idx = db_raw.find(struct.pack('<d', sentinel_val))
-print('Sentinel found at local offset %d (from page -1024)' % idx)
+print('\n=== Test 3: 1 var, 5 obs ===')
+dll.StataSO_Execute(b'clear')
+dll.StataSO_Execute(b'set obs 5')
+dll.StataSO_Execute(b'gen double __px_sentinel = 12345.6789')
+off3 = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
+print('  sentinel at data+%x' % off3)
+ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
+print('  nvar:', nv_buf[0])
 
-# Show surrounding qwords
-for k in range(max(0, idx - 32), min(len(db_raw) - 8, idx + 64), 8):
-    val = struct.unpack('<d', db_raw[k:k+8])[0]
-    val_int = struct.unpack('<Q', db_raw[k:k+8])[0]
-    marker = ' <-- SENTINEL' if k == idx else ''
-    print('  [%+d] double=%.1f hex=%x%s' % (k - 1024, val, val_int, marker))
+# Also try auto dataset
+print('\n=== Test 4: auto dataset ===')
+dll.StataSO_Execute(b'clear')
+rc = dll.StataSO_Execute(b'sysuse auto, clear')
+print('  sysuse rc:', rc)
+ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
+print('  nvar:', nv_buf[0])
+
+# Where is price (var 1) for obs 0? It should be 4099.
+off_price = find_sentinel_in_data(dll, data_ptr, data_vsize, 4099.0)
+off_mpg = find_sentinel_in_data(dll, data_ptr, data_vsize, 22.0)
+print('  price (4099) at data+%x' % off_price)
+print('  mpg (22) at data+%x' % off_mpg)
+print('  delta price-mpg: %d' % (off_price - off_mpg if off_price and off_mpg else 0))
 
 print('\nDone')
