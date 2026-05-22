@@ -1459,14 +1459,17 @@ class _WindowsStrategy(_X86Strategy):
         return self._scratch_read_double()
 
     def matrix_get_row_total(self, name: str) -> int:
+        # rowsof/colsof work via scalar, NOT via direct gen into scratch buffer
+        self._exe(f'capture scalar __px_s = rowsof({name})'.encode())
         self._exe(b'capture drop __px_tmp')
-        self._exe(f'gen long __px_tmp = rowsof({name})'.encode())
+        self._exe(b'capture gen double __px_tmp = scalar(__px_s)')
         val = self._scratch_read_double()
         return int(val) if val is not None else 0
 
     def matrix_get_col_total(self, name: str) -> int:
+        self._exe(f'capture scalar __px_s = colsof({name})'.encode())
         self._exe(b'capture drop __px_tmp')
-        self._exe(f'gen long __px_tmp = colsof({name})'.encode())
+        self._exe(b'capture gen double __px_tmp = scalar(__px_s)')
         val = self._scratch_read_double()
         return int(val) if val is not None else 0
 
