@@ -1,4 +1,5 @@
-"""Extended gws analysis - read more of the struct to find data buffer pointer."""
+"""Test if hi32 values in gws struct are 32-bit addresses.
+These could be data buffer pointers truncated to 32 bits."""
 import ctypes
 import struct
 
@@ -11,180 +12,122 @@ dll.StataSO_Main.restype = ctypes.c_int
 dll.StataSO_Main(2, (ctypes.c_char_p * 2)(b'stata', b'-q'))
 dll.StataSO_Execute.argtypes = [ctypes.c_char_p]
 dll.StataSO_Execute.restype = ctypes.c_int
-dll.StataSO_Execute(b'sysuse auto, clear')
 
 with open(dll_path, 'rb') as f:
     pe_data = f.read()
 e_lfanew = struct.unpack('<I', pe_data[0x3c:0x40])[0]
 opt_hdr_size = struct.unpack('<H', pe_data[e_lfanew+20:e_lfanew+22])[0]
 sh_off = e_lfanew + 24 + opt_hdr_size
-num_sections = struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]
-for i in range(num_sections):
+for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
     sh = pe_data[sh_off + i*40:sh_off + i*40 + 40]
-    name = sh[:8].rstrip(b'\x00').decode('utf-8', errors='replace')
-    if name == '.data':
+    if sh[:8].rstrip(b'\x00').decode('utf-8', errors='replace') == '.data':
         data_rva = struct.unpack('<I', sh[12:16])[0]
-        data_vsize = struct.unpack('<I', sh[8:12])[0]
         break
 data_ptr = handle + data_rva
 
-# nvar
-nv_buf = (ctypes.c_int * 1)()
-ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-print('nvar:', nv_buf[0])
-
-# gws: start at the assumed gws offset and read 8KB
-gws_ptr = data_ptr + 0x211644 - 0x68
-gws_off = gws_ptr - data_ptr
-print('gws off:', hex(gws_off))
-
-# Read 8KB from gws (4KB before to 4KB after)
-region_start = max(0, gws_off - 4096)
-region_size = 8192
-buf = (ctypes.c_char * region_size)()
-ctypes.memmove(buf, ctypes.c_void_p(data_ptr + region_start), region_size)
-raw = bytes(buf)
-
-gws_rel = gws_off - region_start  # offset of gws start in our buffer
-
-print('\n=== gws fields (as 4-byte and 8-byte reads) ===')
-print('Off in gws | Data+off | Qword (8-byte) | Lo32 (4-byte) | Hi32 (4-byte)')
-print('-' * 80)
-
-# Also track which values might be pointers
-for off in range(0, min(len(raw) - gws_rel, 4096), 8):
-    abs_off = region_start + gws_rel + off
-    qword = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
-    lo32 = qword & 0xFFFFFFFF
-    hi32 = (qword >> 32) & 0xFFFFFFFF
-    
-    notes = ''
-    
-    lo32_notes = ''
-    hi32_notes = ''
-    
-    # Check lo32 as small int
-    if lo32 < 200 and lo32 != 0:
-        if off == 0x68:
-            lo32_notes = ' (nvar!)'
-        else:
-            lo32_notes = ''
-    
-    # Check hi32 as small int  
-    if hi32 < 200 and hi32 != 0:
-        hi32_notes = ' (small int %d)' % hi32
-    
-    # Check if lo32 is a pointer (user space addr < 0x7FFFFFFF)
-    if 0x10000 < lo32 < 0x7FFFFFFF:
-        lo32_notes += ' [ptr?]'
-    
-    # Check if hi32 is a pointer
-    if 0x10000 < hi32 < 0x7FFFFFFF:
-        hi32_notes += ' [ptr?]'
-    
-    if lo32 != 0 or hi32 != 0:
-        print('gws+%-4d | data+%-6x | %-18s | %-8x %s | %-8x %s' % 
-              (off, abs_off, hex(qword), lo32, lo32_notes, hi32, hi32_notes))
-
-# Now specifically look for the data buffer
-# Create a known-value dataset and find it
-print('\n=== Searching for data buffer via known values ===')
+# Create dataset with known value (not in .data, i.e., large enough)
 dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'set obs 10')
-dll.StataSO_Execute(b'gen double __px_a = 111111')
-dll.StataSO_Execute(b'gen double __px_b = 222222')
-dll.StataSO_Execute(b'gen double __px_c = 333333')
+dll.StataSO_Execute(b'set obs 100')
+test_val = 88888.99999
+dll.StataSO_Execute(b'gen double __px = ' + str(test_val).encode())
+s_bytes = struct.pack('<d', test_val)
 
-# First find these values in the data section
-val_a = struct.pack('<d', 111111.0)
-val_b = struct.pack('<d', 222222.0)
-val_c = struct.pack('<d', 333333.0)
-
-found_a = None
-found_b = None
-found_c = None
-
-chunk_size = 256 * 1024
-for chunk_start in range(0, data_vsize, chunk_size):
-    cur = min(chunk_size, data_vsize - chunk_start)
-    buf = (ctypes.c_char * cur)()
+# Verify NOT in .data
+found_in_data = False
+for cs in range(0, 12*1024*1024, 256*1024):
+    cur = min(256*1024, 12*1024*1024 - cs)
     try:
-        ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur)
+        buf = (ctypes.c_char * cur)()
+        ctypes.memmove(buf, ctypes.c_void_p(data_ptr + cs), cur)
+        if s_bytes in bytes(buf):
+            found_in_data = True
+            break
     except:
-        continue
-    raw_chunk = bytes(buf)
-    if found_a is None:
-        idx = raw_chunk.find(val_a)
-        if idx >= 0: found_a = chunk_start + idx
-    if found_b is None:
-        idx = raw_chunk.find(val_b)
-        if idx >= 0: found_b = chunk_start + idx
-    if found_c is None:
-        idx = raw_chunk.find(val_c)
-        if idx >= 0: found_c = chunk_start + idx
-    if found_a and found_b and found_c:
         break
 
-print('Found: a=%s b=%s c=%s' % 
-      (hex(found_a) if found_a else 'N', 
-       hex(found_b) if found_b else 'N',
-       hex(found_c) if found_c else 'N'))
+# Read gws struct
+gws_ptr = data_ptr + 0x211644 - 0x68
+gws_off = gws_ptr - data_ptr
+region_start = max(0, gws_off - 512)
+buf = (ctypes.c_char * 4096)()
+ctypes.memmove(buf, ctypes.c_void_p(data_ptr + region_start), 4096)
+raw = bytes(buf)
+gws_rel = gws_off - region_start
 
-if found_b and found_a:
-    print('Data buffer stride (vars * obs?):', found_b - found_a)
-    print('Obs count computed:', (found_b - found_a) // 8)
-
-# Now search gws vicinity for pointers to where these values are
-print('\n=== Search gws region for pointers to data buffer ===')
-refound_a = data_ptr + found_a if found_a else 0
-buf = (ctypes.c_char * data_vsize)()
-try:
-    ctypes.memmove(buf, ctypes.c_void_p(data_ptr), min(data_vsize, 4*1024*1024))
-    full_raw = bytes(buf)
-    print('Read first 4MB of .data section')
-except:
-    full_raw = b''
-    print('Could not read full .data')
-
-# Search for ptr_a in the data section
-if found_a:
-    ptr_a = refound_a
-    ptr_a_rva = ptr_a - handle
-    print('Looking for pointer to data buffer at abs %x / RVA %x' % (ptr_a, ptr_a_rva))
+if found_in_data:
+    print('Value IN .data - buffer is in .data section')
+else:
+    print('Value NOT in .data - buffer is on heap')
+    print('\nTesting hi32 values at gws+0x5C, 0x6C, 0x74, 0x7C as addresses...')
     
-    # By absolute address 
-    for off in range(0, len(full_raw) - 8, 8):
-        val = struct.unpack('<Q', full_raw[off:off+8])[0]
-        if val == ptr_a:
-            print('  ABS PTR at .data+%x' % off)
-        if val == ptr_a_rva:
-            print('  RVA PTR at .data+%x' % off)
+    # Check each hi32 field as a 32-bit pointer
+    fields = [(0x58, 'gws+0x58 hi32'), (0x5C, 'gws+0x5C field'), 
+              (0x68, 'gws+0x68/hi(gws+0x6C)'), (0x6C, 'gws+0x6C'),
+              (0x70, 'gws+0x70'), (0x74, 'gws+0x74'),
+              (0x78, 'gws+0x78'), (0x7C, 'gws+0x7C'),
+              (0x80, 'gws+0x80'), (0x84, 'gws+0x84')]
     
-    # Also try 4-byte RVA
-    for off in range(0, len(full_raw) - 4, 4):
-        val32 = struct.unpack('<I', full_raw[off:off+4])[0]
-        if val32 == (ptr_a_rva & 0xFFFFFFFF):
-            print('  32-bit RVA at .data+%x' % off)
+    for off, desc in fields:
+        abs_off = region_start + gws_rel + off
+        if abs_off + 4 > len(raw):
+            continue
+        val32 = struct.unpack('<I', raw[abs_off:abs_off+4])[0]
+        # Try as a 32-bit address (zero-extend to 64-bit)
+        if val32 > 0x10000:  # Looks like a pointer
+            ptr64 = val32  # Zero-extend (upper 32 bits = 0)
+            try:
+                test_buf = (ctypes.c_double * 5)()
+                ctypes.memmove(test_buf, ctypes.c_void_p(ptr64), 40)
+                for k in range(5):
+                    if abs(test_buf[k] - test_val) < 0.0001:
+                        print('  %s: val32=%x -> ptr=%x CONTAINS SENTINEL at slot %d!' 
+                              % (desc, val32, ptr64, k))
+                        break
+                else:
+                    # Check if any value in the first 5 is a valid double
+                    for k in range(5):
+                        if test_buf[k] != 0:
+                            pass  # has non-zero data
+            except:
+                pass
+        # Also try as DLL-relative (handle + val32)
+        if val32 < 0x04000000:  # Could be DLL RVA
+            ptr64 = handle + val32
+            try:
+                test_buf = (ctypes.c_double * 5)()
+                ctypes.memmove(test_buf, ctypes.c_void_p(ptr64), 40)
+                for k in range(5):
+                    if abs(test_buf[k] - test_val) < 0.0001:
+                        print('  %s: RVA=%x -> ptr=%x CONTAINS SENTINEL at slot %d!' 
+                              % (desc, val32, ptr64, k))
+                        break
+            except:
+                pass
     
-    # Also check: is the buffer at a known offset from nvar?
-    # nvar is at data+0x211644. Data buffer should be at some computed location
-    # Check if any gws field value = data buffer offset
-    print('\nChecking if any gws field equals data section offset of buffer...')
-    buf_size = min(data_vsize - region_start, 4 * 1024 * 1024)
-    buf2 = (ctypes.c_char * buf_size)()
-    ctypes.memmove(buf2, ctypes.c_void_p(data_ptr + region_start), buf_size)
-    full_raw2 = bytes(buf2)
-    
-    # Count how many times ptr_a (abs) or any pointer within range appears as a qword
-    ptr_a_page = ptr_a & ~0xFFF  # 4KB page containing data buffer
-    count = 0
-    for off in range(0, len(full_raw2) - 8, 8):
-        val = struct.unpack('<Q', full_raw2[off:off+8])[0]
-        if ptr_a_page <= val < ptr_a_page + 0x1000:
-            print('  NEAR DATA PTR at region+%x (data+%x): val=%x' 
-                  % (off, region_start + off, val))
-            count += 1
-            if count >= 5:
-                break
+    # Also check: what if hi32 + lo32 = a full 64-bit address?
+    # E.g., gws+0x68 = combined as lo32=nvar, hi32=hi
+    # But this would need TWO fields: low and high parts
+    # Check: gws+0x6C (hi) as pointer = 0, gws+0x70 as lo = 0x1b9
+    # Try combining gws+0x6C and gws+0x70 as a 64-bit address
+    print('\nTrying hi32+lo32 combinations as 64-bit addresses...')
+    for lo_off, hi_off in [(0x6C, 0x70), (0x68, 0x6C), (0x78, 0x7C), (0x74, 0x78)]:
+        lo_abs = gws_rel + lo_off
+        hi_abs = gws_rel + hi_off
+        lo32 = struct.unpack('<I', raw[lo_abs:lo_abs+4])[0] if lo_abs + 4 <= len(raw) else 0
+        hi32 = struct.unpack('<I', raw[hi_abs:hi_abs+4])[0] if hi_abs + 4 <= len(raw) else 0
+        # Try both byte orders
+        for ptr in [(hi32 << 32) | lo32, (lo32 << 32) | hi32]:
+            if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
+                continue
+            try:
+                test_buf = (ctypes.c_double * 5)()
+                ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 40)
+                for k in range(5):
+                    if abs(test_buf[k] - test_val) < 0.0001:
+                        print('  gws+%x+%x combined=%x CONTAINS SENTINEL at slot %d!' 
+                              % (lo_off, hi_off, ptr, k))
+                        break
+            except:
+                pass
 
 print('\nDone')
