@@ -1055,19 +1055,24 @@ class _WindowsStrategy(_X86Strategy):
         self._exe('gen double __px_tmp = __px_val')
         return self._scratch_read_double()
 
+    def _encode_char(self, varno_or_str, pos):
+        """Encode one character of a variable name or string as double via scratch.
+        """
+        # Build Stata command: scalar __px_c = strpos(... substr("`__px_name'", pos, 1))
+        # Use explicit string concatenation to avoid escape issues
+        alphabet = "\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\""
+        cmd = 'scalar __px_c = strpos(' + alphabet + ', substr("`__px_name\'"' + f', {pos}, 1))'
+        self._exe(cmd)
+        self._exe('capture drop __px_tmp')
+        self._exe('gen double __px_tmp = __px_c')
+        return self._scratch_read_double()
+
     def get_var_name(self, varno: int) -> str:
         """Get variable name via Stata extended macro + encoding."""
-        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
-        # Use Stata's extended macro function to get variable name
         self._exe(f'local __px_name : variable {varno}')
-        # Encode and read via scalar intermediates (one char at a time)
         name_chars = []
-        for pos in range(1, 33):  # Max 32 chars
-            # Get char index via strpos
-            self._exe(f'scalar __px_c = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr("`__px_name\'", {pos}, 1))')
-            self._exe('capture drop __px_tmp')
-            self._exe('gen double __px_tmp = __px_c')
-            code = self._scratch_read_double()
+        for pos in range(1, 33):
+            code = self._encode_char(varno, pos)
             if code is None or code <= 0:
                 break
             alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
@@ -1079,6 +1084,14 @@ class _WindowsStrategy(_X86Strategy):
         return ''.join(name_chars)
 
     # ── Override all _bist_*-dependent methods ──
+    def find_var_index(self, name: str) -> int:
+        nvar = self.var_count()
+        for i in range(1, nvar + 1):
+            vn = self.get_var_name(i)
+            if vn and vn.lower() == name.lower():
+                return i
+        return 0
+
     def get_scalar_value(self, name: str) -> float:
         """Read scalar value via gen + scratch buffer."""
         self._exe(f'capture drop __px_sc')
