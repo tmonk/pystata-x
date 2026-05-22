@@ -98,11 +98,6 @@ for off in sorted(fields_auto):
             memory_offsets['nvar_gws_offset'] = off
 
 # 11. Find maxvars (5000)
-for o in range(0, 921088 - 4, 4):
-    if struct.unpack('<I', pe_data[data_rva + o - data_rva_ofs...])):
-        ...
-
-# Actually read from loaded memory
 data_size = 921088
 raw_buf = (ctypes.c_char * data_size)()
 ctypes.memmove(raw_buf, ctypes.c_void_p(data_ptr), data_size)
