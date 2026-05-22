@@ -1,4 +1,4 @@
-"""Read gws struct and nearby memory systematically to find data buffer pointer."""
+"""Extended gws analysis - read more of the struct to find data buffer pointer."""
 import ctypes
 import struct
 
@@ -11,8 +11,6 @@ dll.StataSO_Main.restype = ctypes.c_int
 dll.StataSO_Main(2, (ctypes.c_char_p * 2)(b'stata', b'-q'))
 dll.StataSO_Execute.argtypes = [ctypes.c_char_p]
 dll.StataSO_Execute.restype = ctypes.c_int
-
-# Load a dataset
 dll.StataSO_Execute(b'sysuse auto, clear')
 
 with open(dll_path, 'rb') as f:
@@ -29,112 +27,164 @@ for i in range(num_sections):
         data_vsize = struct.unpack('<I', sh[8:12])[0]
         break
 data_ptr = handle + data_rva
-print('data_ptr:', hex(data_ptr))
-data_rva_actual = data_rva  # For computing RVA offsets
 
-# nvar at data_ptr + 0x211644
+# nvar
 nv_buf = (ctypes.c_int * 1)()
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-nvar_val = nv_buf[0]
-print('nvar:', nvar_val)
+print('nvar:', nv_buf[0])
 
-# gws at data_ptr + 0x2115DC
+# gws: start at the assumed gws offset and read 8KB
 gws_ptr = data_ptr + 0x211644 - 0x68
 gws_off = gws_ptr - data_ptr
+print('gws off:', hex(gws_off))
 
-# Read 8192 bytes starting from 512 bytes BEFORE gws
-# This gives us a clear picture of the gws structure
-region_start = gws_off - 512
+# Read 8KB from gws (4KB before to 4KB after)
+region_start = max(0, gws_off - 4096)
 region_size = 8192
-print('\nReading gws region 0x%x-0x%x (relative to data)' % (region_start, region_start + region_size))
 buf = (ctypes.c_char * region_size)()
 ctypes.memmove(buf, ctypes.c_void_p(data_ptr + region_start), region_size)
 raw = bytes(buf)
 
-# Analyze 8-byte fields near gws
-# gws is at offset 512 within our read buffer
-gws_rel = 512  # offset of gws start in our buffer
-print('\n=== gws fields (relative to gws start) ===')
-print('Off in gws | Abs data off | Value (hex) | Value (int) | Notes')
+gws_rel = gws_off - region_start  # offset of gws start in our buffer
+
+print('\n=== gws fields (as 4-byte and 8-byte reads) ===')
+print('Off in gws | Data+off | Qword (8-byte) | Lo32 (4-byte) | Hi32 (4-byte)')
 print('-' * 80)
 
-for off in range(0, min(region_size - gws_rel, 2048), 8):
+# Also track which values might be pointers
+for off in range(0, min(len(raw) - gws_rel, 4096), 8):
     abs_off = region_start + gws_rel + off
-    val = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
+    qword = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
+    lo32 = qword & 0xFFFFFFFF
+    hi32 = (qword >> 32) & 0xFFFFFFFF
+    
     notes = ''
     
-    # Check if it's nvar (should be at gws+0x68)
-    if off == 0x68:
-        notes = 'nvar=' + str(val)
-    elif off == 0:
-        notes = 'gws start'
-    # Check if it's a pointer within the DLL
-    elif handle <= val < handle + 0x04000000:
-        rva = val - handle
-        notes = 'DLL ptr -> rva %x' % rva
-    elif val < 1000000 and val > 0:
-        notes = 'small int'
+    lo32_notes = ''
+    hi32_notes = ''
     
-    if notes:
-        print('gws+%-4d | data+%-9x | %-16x | %-10d | %s' % (off, abs_off, val, val, notes))
+    # Check lo32 as small int
+    if lo32 < 200 and lo32 != 0:
+        if off == 0x68:
+            lo32_notes = ' (nvar!)'
+        else:
+            lo32_notes = ''
+    
+    # Check hi32 as small int  
+    if hi32 < 200 and hi32 != 0:
+        hi32_notes = ' (small int %d)' % hi32
+    
+    # Check if lo32 is a pointer (user space addr < 0x7FFFFFFF)
+    if 0x10000 < lo32 < 0x7FFFFFFF:
+        lo32_notes += ' [ptr?]'
+    
+    # Check if hi32 is a pointer
+    if 0x10000 < hi32 < 0x7FFFFFFF:
+        hi32_notes += ' [ptr?]'
+    
+    if lo32 != 0 or hi32 != 0:
+        print('gws+%-4d | data+%-6x | %-18s | %-8x %s | %-8x %s' % 
+              (off, abs_off, hex(qword), lo32, lo32_notes, hi32, hi32_notes))
 
-# Now specifically look for the data buffer pointer
-# The data buffer for auto (12 vars, 74 obs) is 74 * 12 * 8 = 7104 bytes
-# Find it by looking at ALL qwords in gws vicinity that point to heap memory
-print('\n=== All pointers in gws region pointing OUTSIDE DLL ===')
-count = 0
-for j in range(0, region_size - 8, 8):
-    ptr = struct.unpack('<Q', raw[j:j+8])[0]
-    if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
-        continue
-    if handle <= ptr < handle + 0x04000000:
-        continue  # DLL-local pointer
-    abs_off = region_start + j
-    gws_rel_off = abs_off - (region_start + 512)
-    # Try reading the first double at this pointer
+# Now specifically look for the data buffer
+# Create a known-value dataset and find it
+print('\n=== Searching for data buffer via known values ===')
+dll.StataSO_Execute(b'clear')
+dll.StataSO_Execute(b'set obs 10')
+dll.StataSO_Execute(b'gen double __px_a = 111111')
+dll.StataSO_Execute(b'gen double __px_b = 222222')
+dll.StataSO_Execute(b'gen double __px_c = 333333')
+
+# First find these values in the data section
+val_a = struct.pack('<d', 111111.0)
+val_b = struct.pack('<d', 222222.0)
+val_c = struct.pack('<d', 333333.0)
+
+found_a = None
+found_b = None
+found_c = None
+
+chunk_size = 256 * 1024
+for chunk_start in range(0, data_vsize, chunk_size):
+    cur = min(chunk_size, data_vsize - chunk_start)
+    buf = (ctypes.c_char * cur)()
     try:
-        test_buf = (ctypes.c_double * 1)()
-        ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
-        val = test_buf[0]
-        print('  data+%x (gws%+d): ptr=%x first_val=%.1f' % (abs_off, gws_rel_off, ptr, val))
-        count += 1
+        ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur)
     except:
-        pass
-    if count >= 50:
-        print('  ... (showing 50)')
+        continue
+    raw_chunk = bytes(buf)
+    if found_a is None:
+        idx = raw_chunk.find(val_a)
+        if idx >= 0: found_a = chunk_start + idx
+    if found_b is None:
+        idx = raw_chunk.find(val_b)
+        if idx >= 0: found_b = chunk_start + idx
+    if found_c is None:
+        idx = raw_chunk.find(val_c)
+        if idx >= 0: found_c = chunk_start + idx
+    if found_a and found_b and found_c:
         break
 
-if count == 0:
-    print('  (none found in this region)')
-    print('\nTrying alternative: maybe data buffer is stored at gws+0x48 (Linux convention)')
-    linux_off = 0x48
-    linux_ptr = struct.unpack('<Q', raw[gws_rel + linux_off:gws_rel + linux_off + 8])[0]
-    print('  gws+0x48 value: %x' % linux_ptr)
-    if handle <= linux_ptr < handle + 0x04000000:
-        # Try dereferencing this DLL-local pointer
-        print('  Is a DLL-local pointer. Data at that address:')
-        for k in range(8):
-            v = struct.unpack('<Q', raw[gws_rel + k*8:gws_rel + k*8 + 8])[0]
-            print('    [%d] %x' % (k, v))
+print('Found: a=%s b=%s c=%s' % 
+      (hex(found_a) if found_a else 'N', 
+       hex(found_b) if found_b else 'N',
+       hex(found_c) if found_c else 'N'))
 
-# Also check: maybe the data buffer is at a computed RVA
-# On Linux, gws.D = gws + 0x48 = pointer to data buffer
-# The VALUE at gws+0x48 on Linux is a HEAP pointer
-# Let me check what's at gws+0x48 on Windows
-print('\n=== Detailed gws dump (0-256 bytes) ===')
-for off in range(0, 256, 8):
-    abs_off = region_start + gws_rel + off
-    val = struct.unpack('<Q', raw[gws_rel + off:gws_rel + off + 8])[0]
-    val_d = struct.unpack('<d', raw[gws_rel + off:gws_rel + off + 8])[0]
-    line = 'gws+%03d: 0x%016x (int=%-12d double=%.2f' % (off, val, val, val_d)
-    # Type check
-    if handle <= val < handle + 0x04000000:
-        line += ' [DLL ptr RVA %x]' % (val - handle)
-    elif 1 <= val < 1000000:
-        line += ' [small int]'
-    elif val >= 0x10000:
-        line += ' [heap ptr?]'
-    line += ')'
-    print(line)
+if found_b and found_a:
+    print('Data buffer stride (vars * obs?):', found_b - found_a)
+    print('Obs count computed:', (found_b - found_a) // 8)
+
+# Now search gws vicinity for pointers to where these values are
+print('\n=== Search gws region for pointers to data buffer ===')
+refound_a = data_ptr + found_a if found_a else 0
+buf = (ctypes.c_char * data_vsize)()
+try:
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr), min(data_vsize, 4*1024*1024))
+    full_raw = bytes(buf)
+    print('Read first 4MB of .data section')
+except:
+    full_raw = b''
+    print('Could not read full .data')
+
+# Search for ptr_a in the data section
+if found_a:
+    ptr_a = refound_a
+    ptr_a_rva = ptr_a - handle
+    print('Looking for pointer to data buffer at abs %x / RVA %x' % (ptr_a, ptr_a_rva))
+    
+    # By absolute address 
+    for off in range(0, len(full_raw) - 8, 8):
+        val = struct.unpack('<Q', full_raw[off:off+8])[0]
+        if val == ptr_a:
+            print('  ABS PTR at .data+%x' % off)
+        if val == ptr_a_rva:
+            print('  RVA PTR at .data+%x' % off)
+    
+    # Also try 4-byte RVA
+    for off in range(0, len(full_raw) - 4, 4):
+        val32 = struct.unpack('<I', full_raw[off:off+4])[0]
+        if val32 == (ptr_a_rva & 0xFFFFFFFF):
+            print('  32-bit RVA at .data+%x' % off)
+    
+    # Also check: is the buffer at a known offset from nvar?
+    # nvar is at data+0x211644. Data buffer should be at some computed location
+    # Check if any gws field value = data buffer offset
+    print('\nChecking if any gws field equals data section offset of buffer...')
+    buf_size = min(data_vsize - region_start, 4 * 1024 * 1024)
+    buf2 = (ctypes.c_char * buf_size)()
+    ctypes.memmove(buf2, ctypes.c_void_p(data_ptr + region_start), buf_size)
+    full_raw2 = bytes(buf2)
+    
+    # Count how many times ptr_a (abs) or any pointer within range appears as a qword
+    ptr_a_page = ptr_a & ~0xFFF  # 4KB page containing data buffer
+    count = 0
+    for off in range(0, len(full_raw2) - 8, 8):
+        val = struct.unpack('<Q', full_raw2[off:off+8])[0]
+        if ptr_a_page <= val < ptr_a_page + 0x1000:
+            print('  NEAR DATA PTR at region+%x (data+%x): val=%x' 
+                  % (off, region_start + off, val))
+            count += 1
+            if count >= 5:
+                break
 
 print('\nDone')
