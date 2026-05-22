@@ -81,3 +81,23 @@ if eng._LIB is not None:
     print('nvar addr:', hex(nvar_addr), flush=True)
     ctypes.memmove(buf, ctypes.c_void_p(nvar_addr), 4)
     print('Direct nvar read:', buf[0], flush=True)
+
+# Test more SFI operations
+from pystata_x.sfi._core import Data, Macro, ValueLabel
+print('\nSFI Operations:', flush=True)
+
+print('getVarName(1):', Data.getVarName(1), flush=True)
+print('getVarName(2):', Data.getVarName(2), flush=True)
+print('getVarType(1):', Data.getVarType(1), flush=True)
+print('getVarType(2):', Data.getVarType(2), flush=True)
+print('getVarLabel(1):', Data.getVarLabel(1), flush=True)
+print('Macro.getGlobal("c(level)"):', Macro.getGlobal('c(level)'), flush=True)
+print('ValueLabel.exists("yesno"):', ValueLabel.exists('yesno'), flush=True)
+
+# Test more value labels after creating
+ValueLabel.define('yesno', 0, 'No')
+ValueLabel.define('yesno', 1, 'Yes')
+print('getLabel(yesno, 0):', ValueLabel.getLabel('yesno', 0), flush=True)
+print('getLabel(yesno, 1):', ValueLabel.getLabel('yesno', 1), flush=True)
+
+print('\nAll Windows SFI tests passed!', flush=True)

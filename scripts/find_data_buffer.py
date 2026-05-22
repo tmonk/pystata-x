@@ -35,11 +35,18 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
         data_size = min(data_vsize, data_rawsize)
         break
 
-data_ptr = handle + data_rva
-print('Data section: %x size %d' % (data_ptr, data_size))
+# Read data section from loaded DLL using virtual size (not raw file size)
+data_vsize_from_pe = struct.unpack('<I', pe_data[sh_off + 8:sh_off + 12])[0]
+data_size = data_vsize_from_pe  # Full virtual size in memory
+print('Data section: addr=%x vsize=%d rawsize=%d' % (data_ptr, data_size, data_rawsize))
+
+# Read the full data section from memory
+data_buf = (ctypes.c_char * data_size)()
+ctypes.memmove(data_buf, ctypes.c_void_p(data_ptr), data_size)
+raw = bytes(data_buf)
+print('Read %d bytes from .data' % len(raw))
 
 # Step 1: Create a sentinel variable with unique value
-import math
 sentinel_val = 12345.6789
 sentinel_bytes = struct.pack('<d', sentinel_val)
 print('Sentinel IEEE754 bytes:', sentinel_bytes.hex())
@@ -47,13 +54,6 @@ print('Sentinel IEEE754 bytes:', sentinel_bytes.hex())
 # Create the variable
 dll.StataSO_Execute(b'gen double __px_sentinel = ' + str(sentinel_val).encode())
 print('Created __px_sentinel')
-
-# Step 2: The sentinel value is now stored in Stata's data buffer (heap memory)
-# Search all process memory for this value
-# First, let's check the .data section for pointers to the sentinel
-data_buf = (ctypes.c_char * data_size)()
-ctypes.memmove(data_buf, ctypes.c_void_p(data_ptr), data_size)
-raw = bytes(data_buf)
 
 # Read nvar to know which variable is our sentinel
 nv_buf = (ctypes.c_int * 1)()
