@@ -2378,6 +2378,11 @@ class StataBinary:
                 'confidence': 1.0,
                 'source': 'empirical (verified: int, float, str18...)',
             },
+            'max_vars_addr': {
+                'vaddr': 0x4c910dc,
+                'confidence': 1.0,
+                'source': 'empirical (verified: Stata 19.5 SE returns 5000)',
+            },
         }
         for key, override in EMPIRICAL_OVERRIDES.items():
             # Only apply override if this binary shows the expected

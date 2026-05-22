@@ -2577,6 +2577,11 @@
     "valuelabel_table": {
       "vaddr": 73781344,
       "confidence": 0.0
+    },
+    "max_vars_addr": {
+      "vaddr": 80285916,
+      "confidence": 1.0,
+      "source": "empirical (verified: Stata 19.5 SE returns 5000)"
     }
   },
   "dispatch_function_status": {

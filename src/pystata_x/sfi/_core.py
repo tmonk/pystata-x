@@ -223,16 +223,9 @@ class Data:
     @staticmethod
     def getVarLabel(varno: int) -> str:
         """Get the label of a variable by its Python index (0-based)."""
-        # On x86_64, bypass C fast path, use name+_bist_varlabel
-        if _IS_X86_64:
-            try:
-                name = Data.getVarName(varno)
-                if name:
-                    r = call_string("_bist_varlabel", name.encode())
-                    return r or ""
-            except Exception:
-                pass
-            return ""
+        # _bist_varlabel accepts a numeric variable index on ALL platforms.
+        # On x86_64, passing a string (variable name) via _push_str creates
+        # a type=-3 tsmat which causes SIGSEGV. Always pass numeric index.
         if _check_fast_path():
             result = _fast_path.get_varlabel(varno + 1)
             if result:
@@ -517,10 +510,18 @@ class Data:
             # Read from Stata's runtime via ctypes (direct .bss access)
             import ctypes
             try:
-                from pystata_x.sfi._engine import _BASE
+                from pystata_x.sfi._engine import _BASE, _MEMORY_OFFSETS
                 if _BASE:
-                    # Known .bss offset for maxvars from analysis
-                    val = ctypes.c_int32.from_address(_BASE + 0x500C720).value
+                    # Try manifest-discovered offset first
+                    maxvars_off = _MEMORY_OFFSETS.get("max_vars_addr", 0) or 0
+                    if isinstance(maxvars_off, dict):
+                        maxvars_off = maxvars_off.get("vaddr", 0)
+                    if maxvars_off:
+                        val = ctypes.c_int32.from_address(_BASE + maxvars_off).value
+                        if 100 < val < 200000:
+                            return val
+                    # Fallback: empirically verified offset (Stata 19.5 SE)
+                    val = ctypes.c_int32.from_address(_BASE + 0x4c910dc).value
                     if 100 < val < 200000:
                         return val
             except Exception:
