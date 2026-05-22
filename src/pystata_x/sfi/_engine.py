@@ -588,11 +588,18 @@ def initialize():
     # Try to set up the fast C _bist_* call path.
     # If the C extension (libstata_fast) is loaded and configured,
     # subsequent SFI calls will bypass Python-level ctypes overhead.
-    try:
-        from pystata_x import _stata_fast as _fast_c
-        _fast_c.setup_bist()  # auto-resolves params from _engine module
-    except Exception:
-        pass  # Fast C path not available — fall back to Python path
+    #
+    # NOTE: On x86_64 under QEMU emulation, the C fast path's
+    # _patch_x86_64_type_tag() corrupts tsmat stack state, breaking
+    # subsequent Stata operations (e.g. rowsof for matrices).
+    # Also, ALL _bist_* functions with string args crash on x86_64
+    # because the pool allocator is zeroed. Skip the C fast path.
+    if _PLATFORM not in ('x86_64', 'windows'):
+        try:
+            from pystata_x import _stata_fast as _fast_c
+            _fast_c.setup_bist()
+        except Exception:
+            pass
 
 
 def _resolve_name(name: str) -> Optional[int]:

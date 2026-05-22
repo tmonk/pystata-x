@@ -2499,6 +2499,23 @@ class Matrix:
         Uses _bist_matrix_hcat (this C function returns matrix catalog
         without corrupting state). Falls back to matrix dir if needed.
         """
+        if _IS_X86_64:
+            # _bist_matrix_hcat has pool-header check that fails on x86_64.
+            # Use execute() to run matrix dir and parse output.
+            try:
+                from pystata_x.sfi._engine import execute as _exec
+                out, rc = _exec('matrix dir')
+                names = []
+                for line in out.splitlines():
+                    line = line.strip()
+                    if '[' in line and ']' in line:
+                        name = line[:line.index('[')].strip()
+                        if name and '\n' not in name:
+                            names.append(name)
+                return names
+            except Exception:
+                pass
+            return []
         r = call_string("_bist_matrix_hcat")
         if r:
             names = [x.strip() for x in r.split() if x.strip()]
