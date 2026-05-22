@@ -461,7 +461,7 @@ class StataBinary:
 
             kernel32 = ctypes.windll.kernel32
 
-            _Execute = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
+            _Execute = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
             try:
                 kernel32.GetProcAddress.restype = ctypes.c_void_p
                 exec_addr = kernel32.GetProcAddress(
@@ -474,7 +474,7 @@ class StataBinary:
 
             # Init Stata
             try:
-                _Main = ctypes.CFUNCTYPE(ctypes.c_int,
+                _Main = ctypes.WINFUNCTYPE(ctypes.c_int,
                     ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
                 kernel32.GetProcAddress.restype = ctypes.c_void_p
                 main_addr = kernel32.GetProcAddress(
