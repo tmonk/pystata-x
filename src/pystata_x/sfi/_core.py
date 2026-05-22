@@ -71,6 +71,9 @@ from pystata_x.sfi._engine import (
 from pystata_x.sfi._platform import IS_X86_64
 from pystata_x.sfi._strategy import _STRATEGY
 
+# Stata epoch: January 1, 1960 00:00:00 UTC
+_STATA_EPOCH = datetime(1960, 1, 1, tzinfo=timezone.utc)
+
 
 def _format_stata_value(val: float, varno: int) -> str:
     """Format a Stata cell value using the variable's display format (x86_64)."""
@@ -1333,7 +1336,7 @@ class Characteristic:
     @staticmethod
     def getDtaChar(name: str) -> str:
         """Get a characteristic for the current dataset."""
-        _STRATEGY.get_dta_char(name)
+        return _STRATEGY.get_dta_char(name)
 
     @staticmethod
     def getVariableChar(var: str or int, name: str) -> str:
@@ -2004,7 +2007,7 @@ class Matrix:
         Uses _bist_matrix_hcat (this C function returns matrix catalog
         without corrupting state). Falls back to matrix dir if needed.
         """
-        _STRATEGY.matrix_get_names()
+        return _STRATEGY.matrix_get_names()
 
     @staticmethod
     def exists(name: str) -> bool:
@@ -2021,8 +2024,10 @@ class Matrix:
             True if the matrix exists.
         """
         _matrix_name_validate(name)
-        names = Matrix.getNames()
-        return name in names
+        # Use confirm matrix command (works even when matrix_get_names returns empty)
+        from pystata_x.sfi._engine import execute
+        _, rc = execute(f'capture confirm matrix {name}')
+        return rc == 0
 
     @staticmethod
     def list(name: str, rows=None, cols=None) -> None:
@@ -3030,12 +3035,12 @@ class Frame:
     @staticmethod
     def getFrames() -> list:
         """Get all frame names."""
-        _STRATEGY.frame_dir()
+        return _STRATEGY.frame_dir()
 
     @staticmethod
     def exists(name: str) -> bool:
         """Check if a frame exists."""
-        _STRATEGY.frame_exists(name)
+        return _STRATEGY.frame_exists(name)
 
     def getName(self) -> str:
         """Get this frame's name."""

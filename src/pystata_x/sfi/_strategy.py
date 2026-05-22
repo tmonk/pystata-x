@@ -831,6 +831,24 @@ class _X86Strategy(_BaseStrategy):
         from pystata_x.sfi._engine import _LIB
         _LIB.StataSO_Execute(b'frame create ' + name.encode())
 
+    def frame_exists(self, name: str) -> bool:
+        # Use scalar __px_frx to capture _rc after frame change.
+        # Using scalar (not local) because scalar evaluates _rc at expression
+        # time before scalar creation sets _rc=0.
+        from pystata_x.sfi._engine import _LIB
+        _LIB.StataSO_Execute(
+            b'capture frame change ' + name.encode())
+        _LIB.StataSO_Execute(b'scalar __px_frx = _rc')
+        _LIB.StataSO_Execute(b'frame change default')  # back to default
+        _LIB.StataSO_Execute(b'capture drop __px_z')
+        _LIB.StataSO_Execute(
+            b'gen double __px_z = scalar(__px_frx)')
+        from pystata_x.sfi._engine import call_double as _cd
+        nv = int(_cd('_bist_nvar'))
+        rc = _cd('_bist_data', 1, nv)
+        return rc == 0.0
+
+    # ── Frame (class methods) ──
     def frame_dir(self) -> list:
         from pystata_x.sfi._engine import execute as _exec
         out, rc = _exec('frame dir')
@@ -839,22 +857,9 @@ class _X86Strategy(_BaseStrategy):
             line = line.strip()
             if line and not line.startswith('.'):
                 name = line.split()[0]
-                if name and name.isalpha() and name not in (
-                    'frame', 'dir', ''):
+                if name not in ('frame', 'dir', ''):
                     names.append(name)
         return names
-
-    def frame_exists(self, name: str) -> bool:
-        from pystata_x.sfi._engine import _LIB, call_double as _cd
-        _LIB.StataSO_Execute(
-            b'capture frame exists ' + name.encode())
-        _LIB.StataSO_Execute(b'local __px_rc = _rc')
-        _LIB.StataSO_Execute(b'capture drop __px_z')
-        _LIB.StataSO_Execute(
-            b'gen byte __px_z = \x60__px_rc\x27')
-        nv = int(_cd('_bist_nvar'))
-        rc = _cd('_bist_data', 1, nv)
-        return rc == 1.0
 
     # ── FrameInstance methods ──
     def frame_change(self, name: str) -> None:

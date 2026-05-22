@@ -181,12 +181,20 @@ class TestOracleCompliance:
         with open(oracle_path) as f:
             cls._ORACLE = json.load(f)
 
-        from pystata_x.sfi._core import Data, Macro, Scalar, ValueLabel, Missing
+        from pystata_x.sfi._core import (
+            Data, Macro, Scalar, ValueLabel, Missing,
+            Characteristic, Frame, Matrix, Datetime, Platform,
+        )
         cls._D = Data
         cls._M = Macro
         cls._S = Scalar
         cls._VL = ValueLabel
         cls._MI = Missing
+        cls._CH = Characteristic
+        cls._FR = Frame
+        cls._MX = Matrix
+        cls._DT = Datetime
+        cls._PL = Platform
 
         from pystata_x.sfi._engine import initialize, execute
         initialize()
@@ -194,6 +202,12 @@ class TestOracleCompliance:
         execute("global testglobal = 42")
         execute("scalar myscalar = 3.14")
         execute('scalar mystr = "hello"')
+        execute('matrix mymat = (1,2\\3,4)')
+        execute('matrix rownames mymat = row1 row2')
+        execute('matrix colnames mymat = col1 col2')
+        execute('char _dta[mychar] hello')
+        execute('capture frame drop testframe')
+        execute('frame create testframe')
         execute('label define yesno 0 No 1 Yes')
         execute("label values foreign yesno")
 
@@ -321,6 +335,63 @@ class TestOracleCompliance:
     def test_missing_get_missing(self):
         assert self._MI.getMissing(self._MI.getValue(".a")) == self._o("missing", "missing_a")
         assert self._MI.getMissing(self._MI.getValue(".z")) == self._o("missing", "missing_z")
+
+    # ── Characteristic ───────────────────────────────────────────
+
+    def test_characteristic_dta(self):
+        assert self._CH.getDtaChar("mychar") == self._o("characteristic", "dta_char_mychar")
+        assert self._CH.getDtaChar("nonexistent") == self._o("characteristic", "dta_char_nonexistent")
+
+    # ── Datetime ─────────────────────────────────────────────────
+
+    def test_datetime_format(self):
+        assert self._DT.format(0, "%tc") == self._o("datetime", "format_0_date")
+        assert self._DT.format(0, "%tC") == self._o("datetime", "format_0_clock")
+
+    # ── Frame ────────────────────────────────────────────────────
+
+    def test_frame_cwf(self):
+        assert self._FR.getCWF() == self._o("frame", "cwf")
+
+    def test_frame_count(self):
+        assert self._FR.getFrameCount() == self._o("frame", "frame_count")
+
+    def test_frame_names(self):
+        assert sorted(self._FR.getFrames()) == sorted(self._o("frame", "all_frames"))
+
+    def test_frame_exists(self):
+        about = self._o("frame", "testframe_name")
+        if about:
+            assert self._FR.exists(about) == True
+        assert self._FR.exists("__nonexistent__") == False
+
+    # ── Matrix ───────────────────────────────────────────────────
+
+    def test_matrix_dims(self):
+        assert self._MX.getRowTotal("mymat") == self._o("matrix", "mymat_rows")
+        assert self._MX.getColTotal("mymat") == self._o("matrix", "mymat_cols")
+
+    def test_matrix_rows(self):
+        assert self._MX.getRowNames("mymat") == self._o("matrix", "mymat_row_names")
+
+    def test_matrix_cols(self):
+        assert self._MX.getColNames("mymat") == self._o("matrix", "mymat_col_names")
+
+    def test_matrix_get(self):
+        assert self._MX.get("mymat") == self._o("matrix", "mymat_get")
+        assert self._MX.getAt("mymat", 0, 0) == self._o("matrix", "mymat_at_0_0")
+        assert self._MX.getAt("mymat", 0, 1) == self._o("matrix", "mymat_at_0_1")
+
+    # ── Platform ─────────────────────────────────────────────────
+
+    def test_platform_info(self):
+        # These are platform-independent oracle values
+        assert self._PL.isWindows() == self._o("platform", "is_windows")
+        assert self._PL.isMac() == self._o("platform", "is_mac")
+        assert self._PL.isUnix() == self._o("platform", "is_unix")
+        assert self._PL.isLinux() == self._o("platform", "is_linux")
+        assert self._PL.isSolaris() == self._o("platform", "is_solaris")
+
 class TestCellReads:
     """getDouble / getString — 1-based indexing verified."""
 
