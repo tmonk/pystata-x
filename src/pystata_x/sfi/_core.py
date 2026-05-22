@@ -1354,7 +1354,13 @@ class Characteristic:
         _STRATEGY.set_var_char(var, name, value)
 
 class Preference:
-    """Access to Stata saved preferences (via _bist_sys_getusb/_bist_sys_putusb)."""
+    """Access to Stata saved preferences.
+
+    NOTE: This class requires the Stata-embedded Python runtime
+    (via _bist_sys_getusb/_bist_sys_putusb), which is not available
+    through the external C dispatch interface on x86_64. Raises
+    NotImplementedError on both Linux and Windows.
+    """
 
     @staticmethod
     def getSavedPref(name: str) -> str:
