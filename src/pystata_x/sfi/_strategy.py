@@ -1119,7 +1119,7 @@ class _WindowsStrategy(_X86Strategy):
         stored in a base-256 packed integer. Decoding reverses this:
         (byte - 1) becomes the 0-based index into the alphabet.
         """
-        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/"
         result_chars = []
         for chunk in range(3):  # Up to 18 characters (3 groups of 6)
             terms = []
