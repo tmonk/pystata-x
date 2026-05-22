@@ -1356,16 +1356,15 @@ class Characteristic:
 class Preference:
     """Access to Stata saved preferences.
 
-    NOTE: This class requires the Stata-embedded Python runtime
-    (via _bist_sys_getusb/_bist_sys_putusb), which is not available
-    through the external C dispatch interface on x86_64. Raises
-    NotImplementedError on both Linux and Windows.
+    Uses global macros as a storage backend (the _bist_sys_getusb/
+    _bist_sys_putusb C functions used by the vendor sfi module are not
+    available through the external dispatch interface on x86_64).
     """
 
     @staticmethod
     def getSavedPref(name: str) -> str:
         """Get a saved preference value."""
-        _STRATEGY.pref_get_saved(name)
+        return _STRATEGY.pref_get_saved(name)
 
     @staticmethod
     def setSavedPref(name: str, value: str) -> None:

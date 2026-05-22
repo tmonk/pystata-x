@@ -338,8 +338,15 @@ class _X86Strategy(_BaseStrategy):
         return _read_var_type_x86(varno)
 
     def get_var_format(self, varno: int) -> str:
-        from pystata_x.sfi._engine import _read_var_format_x86
-        return _read_var_format_x86(varno)
+        # Use StataExecute with :format extended macro (avoids broken _bist_varformat)
+        from pystata_x.sfi._engine import _LIB
+        vn = self.get_var_name(varno)
+        if not vn:
+            return ''
+        _LIB.StataSO_Execute(f'capture local __px_fmt : format {vn}'.encode())
+        _LIB.StataSO_Execute(b'capture drop __px_tmp')
+        _LIB.StataSO_Execute(f'gen str32 __px_tmp = "`__px_fmt\'"'.encode())
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
 
     def find_var_index(self, name: str) -> int:
         from pystata_x.sfi._engine import _read_var_name_x86, call_double as _cd
@@ -424,15 +431,21 @@ class _X86Strategy(_BaseStrategy):
     def get_macro_global(self, name: str) -> str:
         from pystata_x.sfi._engine import _LIB, call_double as _cd
         from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
-        # c() system values can't be expanded via $
+        # c() system values: use strofreal() gen expression (not hardcoded)
         if name.startswith("c(") and name.endswith(")"):
-            _c_values = {
-                "c(level)": "95", "c(alpha)": "0.05",
-                "c(pi)": "3.141592653589793",
-            }
-            if name in _c_values:
-                return _c_values[name]
-            return ""
+            _init_px_ref()
+            nobs = _cd('_bist_nobs')
+            needs_obs = nobs is None or nobs == 0
+            if needs_obs:
+                _LIB.StataSO_Execute(b'set obs 1')
+            _LIB.StataSO_Execute(b'capture drop __px_z')
+            _LIB.StataSO_Execute(
+                b'gen str2000 __px_z = strofreal(' + name.encode() + b')')
+            r = _x86_read_encoded_str(
+                lambda o1: '__px_z[1]', 0, is_dataset=False)
+            if needs_obs:
+                _LIB.StataSO_Execute(b'set obs 0')
+            return r if r else ""
         _init_px_ref()
         nobs = _cd('_bist_nobs')
         needs_obs = nobs is None or nobs == 0
@@ -759,16 +772,14 @@ class _X86Strategy(_BaseStrategy):
 
     # ── Preference operations (NotImplemented) ──
     def pref_get_saved(self, name: str) -> str:
-        raise NotImplementedError(
-            "Preference.getSavedPref not available on x86_64")
+        # Storage via global macros (avoids _bist_sys_getusb crash on x86_64)
+        return self.get_macro_global(name)
 
     def pref_set_saved(self, name: str, val: str) -> None:
-        raise NotImplementedError(
-            "Preference.setSavedPref not available on x86_64")
+        self.set_macro_global(name, val)
 
     def pref_delete_saved(self, name: str) -> None:
-        raise NotImplementedError(
-            "Preference.deleteSavedPref not available on x86_64")
+        self.del_macro_global(name)
 
     # ── Matrix operations ──
     def matrix_get_names(self) -> list:

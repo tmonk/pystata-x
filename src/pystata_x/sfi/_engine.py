@@ -1124,11 +1124,9 @@ def _read_var_name_x86(varno: int) -> str:
 
     Uses manifest-discovered offset for the name table pointer global.
     Stride is 129 bytes per entry (empirically verified).
-    Fall back to hardcoded offset if manifest not available.
     """
     try:
-        name_off = _get_memory_offset("var_name_table",
-                                      0x832997 + 0x4469071)
+        name_off = _get_memory_offset("var_name_table", 0)
         name_global_addr = _BASE + name_off
         name_base = ctypes.c_uint64.from_address(name_global_addr).value
         if name_base:
@@ -1150,8 +1148,7 @@ def _read_var_type_x86(varno: int) -> str:
     Stride is 2 bytes per entry (uint16 type code).
     """
     try:
-        type_off = _get_memory_offset("var_type_table",
-                                      0x823d5b + 0x4477ca5)
+        type_off = _get_memory_offset("var_type_table", 0)
         type_global_addr = _BASE + type_off
         type_base = ctypes.c_uint64.from_address(type_global_addr).value
         if type_base:
@@ -1177,11 +1174,7 @@ def _read_var_type_x86(varno: int) -> str:
 
 
 def _read_var_format_x86(varno: int) -> str:
-    """Read variable format on x86_64 from manifest.
-
-    Falls back to known auto dataset formats if format table not found.
-    """
-    # Try manifest-discovered format table offset
+    """Read variable format on x86_64 from manifest (no hardcoded fallback)."""
     try:
         fmt_off = _get_memory_offset("var_format_table", 0)
         if fmt_off:
@@ -1189,7 +1182,6 @@ def _read_var_format_x86(varno: int) -> str:
             fmt_base = ctypes.c_uint64.from_address(fmt_global_addr).value
             if fmt_base:
                 raw = ctypes.string_at(fmt_base + varno * 8, 16)
-                # Format strings are stored as GSO pointers — dereference
                 gso_ptr = struct.unpack("<Q", raw[:8])[0]
                 if gso_ptr and gso_ptr > 0x100000:
                     str_ptr = ctypes.c_uint64.from_address(gso_ptr).value
@@ -1200,13 +1192,6 @@ def _read_var_format_x86(varno: int) -> str:
                             return data.decode('latin-1', errors='replace')
     except Exception:
         pass
-    # Fallback: known auto dataset formats
-    _AUTO_FORMATS = [
-        "%-18s", "%8.0gc", "%8.0g", "%8.0g", "%6.1f", "%8.0g",
-        "%8.0gc", "%8.0g", "%8.0g", "%8.0g", "%6.2f", "%8.0g",
-    ]
-    if 0 <= varno < len(_AUTO_FORMATS):
-        return _AUTO_FORMATS[varno]
     return ""
 
 
@@ -1250,16 +1235,25 @@ def _populate_var_cache() -> bool:
     if not nvar:
         return False
 
-    # x86_64: read variable metadata directly from Stata's memory
-    # This avoids the dispatch-table complexity on x86_64
+    # x86_64: read variable metadata from manifest-discovered offsets
     if _PLATFORM in ("x86_64", "linux"):
         try:
-            # Variable name table: stride 129 bytes per entry
-            name_global_addr = _BASE + 0x832997 + 0x4469071
-            name_base = ctypes.c_uint64.from_address(name_global_addr).value
-            # Variable type table
-            type_global_addr = _BASE + 0x823d5b + 0x4477ca5
-            type_base = ctypes.c_uint64.from_address(type_global_addr).value
+            # Read offsets from manifest (already loaded at this point)
+            name_info = _MEMORY_OFFSETS.get("var_name_table", {}) or {}
+            type_info = _MEMORY_OFFSETS.get("var_type_table", {}) or {}
+            if not name_info or not type_info:
+                return False
+
+            name_vaddr = name_info.get("vaddr", 0)
+            name_stride = name_info.get("stride", 129)
+            type_vaddr = type_info.get("vaddr", 0)
+            type_stride = type_info.get("stride", 2)
+
+            if not name_vaddr or not type_vaddr:
+                return False
+
+            name_base = ctypes.c_uint64.from_address(_BASE + name_vaddr).value
+            type_base = ctypes.c_uint64.from_address(_BASE + type_vaddr).value
 
             names = []
             types = []
@@ -1268,14 +1262,12 @@ def _populate_var_cache() -> bool:
 
             if name_base and type_base:
                 for i in range(nvar):
-                    # Read name at stride 129
-                    raw = ctypes.string_at(name_base + i * 129, 32)
+                    raw = ctypes.string_at(name_base + i * name_stride, 32)
                     null_idx = raw.find(b'\x00')
                     name = raw[:null_idx].decode('latin-1', errors='replace') if null_idx > 0 else raw.decode('latin-1', errors='replace')
                     names.append(name)
 
-                    # Read type code at stride 2
-                    typ = ctypes.c_uint16.from_address(type_base + i * 2).value
+                    typ = ctypes.c_uint16.from_address(type_base + i * type_stride).value
                     if typ == 0xFFF5:
                         types.append("strL")
                     elif typ == 0xFFF9 or typ == 0:
@@ -1291,8 +1283,6 @@ def _populate_var_cache() -> bool:
                     else:
                         types.append(f"type_{typ}")
 
-                    # Labels and formats use string-arg dispatch functions
-                    # that may not work on x86_64. Leave empty for now.
                     labels.append("")
                     formats.append("")
 
