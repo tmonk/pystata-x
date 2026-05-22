@@ -46,7 +46,17 @@ print('  _MEMORY_OFFSETS:', eng._MEMORY_OFFSETS, flush=True)
 # test var_count
 from pystata_x.sfi._strategy import _STRATEGY
 print('\nStrategy:', type(_STRATEGY).__name__, flush=True)
-print('var_count:', _STRATEGY.var_count(), flush=True)
+print('var_count (before load):', _STRATEGY.var_count(), flush=True)
+
+# Setup StataSO_Execute properly
+eng._LIB.StataSO_Execute.restype = ctypes.c_int
+eng._LIB.StataSO_Execute.argtypes = [ctypes.c_char_p]
+
+# Load a dataset
+rc = eng._LIB.StataSO_Execute(b'sysuse auto, clear')
+print('sysuse auto rc:', rc, flush=True)
+print('After sysuse auto:', flush=True)
+print('var_count (after load):', _STRATEGY.var_count(), flush=True)
 
 # test nvar directly from DLL handle
 if eng._LIB is not None:
