@@ -78,10 +78,11 @@ dll.StataSO_Execute(b'gen double __px_c = 998877.6655')
 off2a = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
 off2b = find_sentinel_in_data(dll, data_ptr, data_vsize, 112233.4455)
 off2c = find_sentinel_in_data(dll, data_ptr, data_vsize, 998877.6655)
-print('  sentinel_a at data+%x' % off2a)
-print('  sentinel_b at data+%x' % off2b)
-print('  sentinel_c at data+%x' % off2c)
-print('  deltas: a-c=%d obs stride=%d' % (off2a - off2c if off2c else 0, off2a - off2b if off2b else 0))
+print('  sentinel_a at data+%s' % ('None' if off2a is None else hex(off2a)))
+print('  sentinel_b at data+%s' % ('None' if off2b is None else hex(off2b)))
+print('  sentinel_c at data+%s' % ('None' if off2c is None else hex(off2c)))
+if None not in (off2a, off2b, off2c):
+    print('  deltas: a-c=%d obs stride=%d' % (off2a - off2c, off2a - off2b))
 
 # nvar
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
@@ -107,8 +108,9 @@ print('  nvar:', nv_buf[0])
 # Where is price (var 1) for obs 0? It should be 4099.
 off_price = find_sentinel_in_data(dll, data_ptr, data_vsize, 4099.0)
 off_mpg = find_sentinel_in_data(dll, data_ptr, data_vsize, 22.0)
-print('  price (4099) at data+%x' % off_price)
-print('  mpg (22) at data+%x' % off_mpg)
-print('  delta price-mpg: %d' % (off_price - off_mpg if off_price and off_mpg else 0))
+print('  price (4099) at data+%s' % ('None' if off_price is None else hex(off_price)))
+print('  mpg (22) at data+%s' % ('None' if off_mpg is None else hex(off_mpg)))
+if off_price and off_mpg:
+    print('  delta price-mpg: %d' % (off_price - off_mpg))
 
 print('\nDone')
