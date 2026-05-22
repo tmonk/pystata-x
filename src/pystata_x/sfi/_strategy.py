@@ -1534,9 +1534,10 @@ class _WindowsStrategy(_X86Strategy):
 
     def frame_exists(self, name: str) -> bool:
         # Try frame change — if it succeeds, the frame exists.
-        # frame exists command returns rc=198 on this build, but frame change works.
+        # IMPORTANT: do NOT use capture for the local assignment line,
+        # otherwise _rc is overwritten with 0 (success of the local set).
         self._exe(b'capture frame change ' + name.encode())
-        self._exe(b'capture local __px_rc = _rc')
+        self._exe(b'local __px_rc = _rc')
         self._exe(b'capture drop __px_tmp')
         self._exe(b'capture gen long __px_tmp = `__px_rc')
         val = self._scratch_read_double()
