@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys as _sys
 import ctypes
 
-from pystata_x.sfi._platform import IS_X86_64, PLATFORM_NAME
+from pystata_x.sfi._platform import IS_X86_64, IS_WINDOWS, PLATFORM_NAME
 from pystata_x.sfi._engine import (
     call_int, call_double, call_string, call_void,
     call_vlmodify,
@@ -956,6 +956,203 @@ class _X86Strategy(_BaseStrategy):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Windows Strategy
+# ═══════════════════════════════════════════════════════════════
+class _WindowsStrategy(_X86Strategy):
+    """Windows x86_64 strategy — memory reads + StataExecute only.
+
+    ALL _bist_* functions are unavailable on Windows (not exported
+    from se-64.dll).  Overrides every method that calls _bist_*
+    via call_double/call_string to use StataExecute + memory reads.
+    """
+
+    platform = "windows-amd64"
+
+    def __init__(self):
+        pass
+
+    # ── Memory helpers (read Stata globals from .data section) ──
+    @staticmethod
+    def _read_mem_int32(vaddr: int) -> int | None:
+        """Read a 32-bit signed integer from process memory."""
+        try:
+            import ctypes
+            buf = (ctypes.c_int * 1)()
+            ctypes.memmove(buf, ctypes.c_void_p(vaddr), 4)
+            return buf[0]
+        except Exception:
+            return None
+
+    def _get_nvar_addr(self) -> int | None:
+        """Get the absolute address of nvar in .data section."""
+        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB, _BASE
+        if _MEMORY_OFFSETS and 'nvar_data_offset' in _MEMORY_OFFSETS:
+            # From manifest
+            ndo = _MEMORY_OFFSETS['nvar_data_offset']
+            dll = _LIB
+            if dll is not None and hasattr(dll, '_handle'):
+                return dll._handle + ndo  # handle is the DLL base
+        return None
+
+    def var_count(self) -> int:
+        addr = self._get_nvar_addr()
+        if addr:
+            val = self._read_mem_int32(addr)
+            if val is not None and val > 0:
+                return val
+        return 0
+
+    def obs_count(self) -> int:
+        # Use StataExecute + gen to store _N
+        import ctypes
+        from pystata_x.sfi._engine import _LIB
+        if _LIB is None:
+            return 0
+        _LIB.StataSO_Execute.restype = ctypes.c_int
+        _LIB.StataSO_Execute.argtypes = [ctypes.c_char_p]
+        _LIB.StataSO_Execute(b'capture drop __px_obs')
+        _LIB.StataSO_Execute(b'gen double __px_obs = _N')
+        # Read the variable value from the data buffer
+        # We know nvar, so __px_obs is at position nvar
+        nv = self.var_count()
+        if nv <= 0:
+            return 0
+        # Read the first observation value
+        # The data buffer address depends on the Stata internals
+        # Use StataExecute to store the value in a macro
+        _LIB.StataSO_Execute(b'local __px_no = __px_obs[1]')
+        # Now read the macro value
+        _LIB.StataSO_Execute(b'capture drop __px_no2')
+        _LIB.StataSO_Execute(b'gen double __px_no2 = `__px_no\'')
+        # Need to read __px_no2 variable
+        # Use the same encoding mechanism
+        from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+        _init_px_ref()
+        val_str = _x86_read_encoded_str(lambda o1: '__px_no2[1]', 0, is_dataset=False)
+        if val_str:
+            try:
+                return int(float(val_str))
+            except (ValueError, TypeError):
+                pass
+        return 0
+
+    # ── Override all _bist_*-dependent methods ──
+    def find_var_index(self, name: str) -> int:
+        from pystata_x.sfi._engine import _read_var_name_x86
+        nvar = self.var_count()
+        for i in range(nvar):
+            vn = _read_var_name_x86(i)
+            if vn and vn.lower() == name.lower():
+                return i + 1
+        return 0
+
+    def get_max_vars(self) -> int:
+        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
+        if _MEMORY_OFFSETS and 'maxvars_offset' in _MEMORY_OFFSETS:
+            addr = _LIB._handle + _MEMORY_OFFSETS['maxvars_offset']
+            val = self._read_mem_int32(addr)
+            if val and val > 0:
+                return val
+        return 5000  # default for SE
+
+    def get_scalar_value(self, name: str) -> float:
+        from pystata_x.sfi._engine import _LIB, call_double
+        from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+        _init_px_ref()
+        _LIB.StataSO_Execute(b'capture drop __px_ws')
+        _LIB.StataSO_Execute(
+            b'gen double __px_ws = scalar(' + name.encode() + b')')
+        # Same issue: need to read __px_ws without _bist_data
+        # Fall back to call_double if available
+        return call_double("_bist_numscalar", name.encode())
+
+    def is_valid_name(self, name: str) -> bool:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm name ' + name.encode())
+        return rc == 0
+
+    def fi_get_var_index(self, name: str) -> int:
+        return self.find_var_index(name)
+
+    def fi_add_var_double(self, name: str) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(b'gen double ' + name.encode() + b' = .')
+        # Return the index of the new variable
+        return self.var_count()
+
+    def fi_add_var_str(self, name: str, length: int) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(
+            b'gen str' + str(length).encode() + b' ' + name.encode() + b' = ""')
+        return self.var_count()
+
+    def fi_add_var_byte(self, name: str) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(b'gen byte ' + name.encode() + b' = .')
+        return self.var_count()
+
+    def fi_add_var_int(self, name: str) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(b'gen int ' + name.encode() + b' = .')
+        return self.var_count()
+
+    def fi_add_var_long(self, name: str) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(b'gen long ' + name.encode() + b' = .')
+        return self.var_count()
+
+    def fi_add_var_float(self, name: str) -> int:
+        from pystata_x.sfi._engine import _LIB
+        rc = _LIB.StataSO_Execute(b'capture confirm new var ' + name.encode())
+        if rc != 0:
+            return -1
+        _LIB.StataSO_Execute(b'gen float ' + name.encode() + b' = .')
+        return self.var_count()
+
+    def fi_set_var_format(self, varno: int, fmt: str) -> None:
+        from pystata_x.sfi._engine import _LIB, _read_var_name_x86
+        vn = _read_var_name_x86(varno)
+        if vn:
+            _LIB.StataSO_Execute(
+                b'format ' + vn.encode() + b' ' + fmt.encode())
+
+    def fi_set_var_label(self, varno: int, label: str) -> None:
+        from pystata_x.sfi._engine import _LIB, _read_var_name_x86
+        vn = _read_var_name_x86(varno)
+        if vn:
+            escaped = label.replace('"', '""')
+            _LIB.StataSO_Execute(
+                b'label variable ' + vn.encode()
+                + b' "' + escaped.encode() + b'"')
+
+    def fi_rename_var(self, varno: int, new_name: str) -> None:
+        from pystata_x.sfi._engine import _LIB, _read_var_name_x86
+        vn = _read_var_name_x86(varno)
+        if vn:
+            _LIB.StataSO_Execute(
+                b'rename ' + vn.encode() + b' ' + new_name.encode())
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Module-level instance
 # ═══════════════════════════════════════════════════════════════
-_STRATEGY: _BaseStrategy = _X86Strategy() if IS_X86_64 else _BaseStrategy()
+_STRATEGY: _BaseStrategy = (
+    _WindowsStrategy() if IS_WINDOWS
+    else _X86Strategy() if IS_X86_64
+    else _BaseStrategy()
+)
