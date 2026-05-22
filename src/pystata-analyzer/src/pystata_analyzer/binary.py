@@ -392,7 +392,7 @@ class StataBinary:
         Instead we discover:
         - Main bytecode dispatcher via call-target frequency
         - Thin wrappers (mov eax, <id>; call dispatcher)
-        - Memory offsets in .data section by scanning for known values
+        - Memory offsets via gws pointer discovery in .data section
         """
         try:
             from pystata_analyzer.pe_binary import PEStata
@@ -400,11 +400,9 @@ class StataBinary:
             self._pe.analyze()
             self._pe_info = self._pe.generate_manifest()
 
-            # Populate standard StataBinary fields from PE analysis
             if self._pe.main_dispatcher:
                 self._dispatch_vaddr = self._pe.main_dispatcher
 
-            # Register any discovered dispatch IDs as symbols
             for wrapper in self._pe.thin_wrappers:
                 did = wrapper['dispatch_id']
                 rva = wrapper['rva']
@@ -412,10 +410,169 @@ class StataBinary:
                 self._symbols[name] = rva
                 self._dispatch_entries.append(rva)
 
-            # Sort dispatch entries
             self._dispatch_entries.sort()
         except ImportError:
             self._pe_info = {'error': 'PEStata not available'}
+
+    def pe_discover_memory_layout(self, dll_handle: int = 0) -> dict:
+        """Discover memory layout from a loaded PE DLL (runtime).
+
+        Loads the DLL, initialises Stata, locates the gws pointer in
+        the .data section, and reads gws fields (nvar, nobs, etc.)
+        across two known datasets to identify offsets.
+
+        Requires the DLL to be loaded and Stata initialised.
+        Returns a dict of discovered memory offsets or empty dict.
+        """
+        if self._format != 'pe':
+            return {}
+        try:
+            import ctypes
+            import struct
+            from pystata_analyzer.pe_binary import PEConvert
+
+            # Read PE headers to find .data section
+            with open(self.path, 'rb') as f:
+                pe_data = f.read()
+            pc = PEConvert(pe_data)
+
+            data_section = None
+            for sec in pc.sections:
+                if sec['name'] == '.data':
+                    data_section = sec
+                    break
+            if not data_section:
+                return {}
+
+            data_rva = data_section['va']
+            data_vsize = data_section['vsize']
+
+            if dll_handle == 0:
+                dll = ctypes.WinDLL(self.path)
+                dll_handle = dll._handle
+
+            data_ptr = dll_handle + data_rva
+            data_size = data_vsize
+
+            kernel32 = ctypes.windll.kernel32
+
+            # Use PE-exported StataSO_Main for init (not thin wrapper)
+            _Main = ctypes.CFUNCTYPE(ctypes.c_int,
+                ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
+            try:
+                main_addr = kernel32.GetProcAddress(
+                    ctypes.c_void_p(dll_handle), b'StataSO_Main')
+                if main_addr:
+                    stata_main = _Main(main_addr)
+                    argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
+                    stata_main(2, argv)
+            except Exception:
+                pass
+
+            _Execute = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
+            try:
+                exec_addr = kernel32.GetProcAddress(
+                    ctypes.c_void_p(dll_handle), b'StataSO_Execute')
+                if exec_addr:
+                    stata_exec = _Execute(exec_addr)
+                else:
+                    return {}
+            except Exception:
+                return {}
+
+            # Read .data section
+            buf = (ctypes.c_char * data_size)()
+            ctypes.memmove(buf, ctypes.c_void_p(data_ptr), data_size)
+            raw = bytes(buf)
+
+            # Scan for nvar by loading known dataset
+            stata_exec(b'sysuse auto, clear')
+
+            # Find all int32 values == 12 in .data
+            nvar_candidates = []
+            for o in range(0, data_size - 4, 4):
+                v = struct.unpack('<i', raw[o:o+4])[0]
+                if v == 12:
+                    nvar_candidates.append(o)
+
+            # Load different dataset to verify
+            stata_exec(b'sysuse bpwide, clear')
+            buf2 = (ctypes.c_char * data_size)()
+            ctypes.memmove(buf2, ctypes.c_void_p(data_ptr), data_size)
+            raw2 = bytes(buf2)
+
+            nvar_verified = []
+            for o in nvar_candidates:
+                v2 = struct.unpack('<i', raw2[o:o+4])[0]
+                if v2 == 5:
+                    nvar_verified.append(o)
+
+            if not nvar_verified:
+                stata_exec(b'sysuse auto, clear')
+                return {}
+
+            gws_ptr = data_ptr + nvar_verified[0] - 0x68
+
+            # Read gws fields for both datasets
+            def read_int32(ptr, offset):
+                buf3 = (ctypes.c_int * 1)()
+                ctypes.memmove(buf3, ctypes.c_void_p(ptr + offset), 4)
+                return buf3[0]
+
+            gws_fields_auto = {}
+            for off in range(0, 256, 4):
+                val = read_int32(gws_ptr, off)
+                if 0 < val < 200000:
+                    gws_fields_auto[off] = val
+
+            stata_exec(b'sysuse bpwide, clear')
+            gws_fields_bpwide = {}
+            for off in range(0, 256, 4):
+                val = read_int32(gws_ptr, off)
+                if 0 < val < 200000:
+                    gws_fields_bpwide[off] = val
+
+            # Identify changing fields
+            memory_offsets = {}
+            for off in sorted(gws_fields_auto):
+                v1 = gws_fields_auto[off]
+                v2 = gws_fields_bpwide.get(off, 0)
+                if v1 != v2:
+                    if v1 == 74 and v2 == 36:
+                        memory_offsets['nobs_offset'] = off
+                    if v1 == 12 and v2 == 5:
+                        memory_offsets['nvar_offset'] = off
+
+            # Find maxvars by scanning for 5000
+            for o in range(0, data_size - 4, 4):
+                if struct.unpack('<I', raw[o:o+4])[0] == 5000:
+                    memory_offsets['maxvars_offset'] = o
+                    break
+
+            memory_offsets['gws_rva'] = gws_ptr - dll_handle
+            memory_offsets['gws_ptr'] = gws_ptr
+            memory_offsets['nvar_addr'] = gws_ptr + 0x68
+            memory_offsets['nvar_data_offset'] = nvar_verified[0]
+
+            # Restore auto dataset
+            stata_exec(b'sysuse auto, clear')
+
+            return memory_offsets
+        except Exception:
+            return {}
+
+    def pe_generate_manifest(self, dll_handle: int = 0) -> dict:
+        """Generate a complete Windows manifest including memory discovery.
+
+        Combines static PE analysis with runtime memory discovery.
+        """
+        manifest = self.generate_manifest()
+        mem_offsets = self.pe_discover_memory_layout(dll_handle)
+        if mem_offsets:
+            manifest['memory_offsets'] = mem_offsets
+            # Also update internal state
+            self._memory_offsets.update(mem_offsets)
+        return manifest
 
     def _analyze_elf_x86_64(self) -> None:
         """Run all x86_64-specific discovery passes."""
@@ -2051,15 +2208,17 @@ class StataBinary:
         }
 
         if self._format == 'pe':
-            # PE-specific manifest — merge info from PEStata
             pe_info = self._pe_info or {}
+            # Attempt runtime memory discovery if not yet done
+            if not self._memory_offsets.get('gws_ptr'):
+                self._memory_offsets = self.pe_discover_memory_layout()
             base.update({
                 "n_bist_symbols": len(self._symbols),
                 "symbols": dict(self._symbols),
                 "dispatch_entries": list(self._dispatch_entries),
                 "dispatch_vaddr": self._dispatch_vaddr,
                 "pe_info": pe_info.get('memory_discovery', {}),
-                "memory_offsets": pe_info.get('memory_offsets', {}),
+                "memory_offsets": dict(self._memory_offsets or {}),
             })
         else:
             base.update({
