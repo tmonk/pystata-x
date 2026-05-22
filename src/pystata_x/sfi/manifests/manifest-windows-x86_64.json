@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "sha256": "99a77d08372977ae60323c84557ca4b05b3f5008d1e7bbbdc2e775d2b8c906eb",
+  "platform": "win32",
+  "arch": "x86_64",
+  "format": "pe",
+  "n_bist_symbols": 6,
+  "symbols": {
+    "_bist_dispatch_10824": 24755920,
+    "_bist_dispatch_16208": 25646278,
+    "_bist_dispatch_21504": 25802676,
+    "_bist_dispatch_10632": 25905696,
+    "_bist_dispatch_5344": 30145346,
+    "_bist_dispatch_5360": 32615856
+  },
+  "dispatch_entries": [
+    24755920,
+    25646278,
+    25802676,
+    25905696,
+    30145346,
+    32615856
+  ],
+  "dispatch_vaddr": 35347408,
+  "pe_info": {},
+  "memory_offsets": {
+    "nvar_gws_offset": 104,
+    "gws_rva": 54703580,
+    "nvar_data_offset": 2168388,
+    "nvar_abs_addr": 6497154628,
+    "maxvars_offset": 123432
+  }
+}
