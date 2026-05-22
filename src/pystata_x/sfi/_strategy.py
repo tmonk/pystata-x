@@ -1533,15 +1533,14 @@ class _WindowsStrategy(_X86Strategy):
         self._exe(b'capture frame create ' + name.encode())
 
     def frame_exists(self, name: str) -> bool:
-        # frame exists not available on this build. Use frame create: rc=602 means exists.
-        # Read _rc via local macro + gen, avoiding backtick-equals evaluation which fails.
-        self._exe(b'capture frame create ' + name.encode())
+        # Try frame change — if it succeeds, the frame exists.
+        # frame exists command returns rc=198 on this build, but frame change works.
+        self._exe(b'capture frame change ' + name.encode())
         self._exe(b'capture local __px_rc = _rc')
         self._exe(b'capture drop __px_tmp')
         self._exe(b'capture gen long __px_tmp = `__px_rc')
         val = self._scratch_read_double()
-        # rc=602 means 'already exists', so frame exists
-        return val is not None and val == 602
+        return val is not None and val == 0
 
     def frame_change(self, name: str) -> None:
         self._exe(b'capture frame change ' + name.encode())
