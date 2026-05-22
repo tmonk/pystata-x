@@ -150,8 +150,8 @@ def _x86_read_encoded_str(source_expr, obs, is_dataset=False):
                 _init_px_ref()
         except Exception:
             _init_px_ref()
-        _LIB.StataSO_Execute(b"capture drop __px_s")
-        _LIB.StataSO_Execute(b"gen double __px_s = .")
+        _LIB.StataSO_Execute(b"capture drop __px_enc")
+        _LIB.StataSO_Execute(b"gen double __px_enc = .")
         idx = int(call_double("_bist_nvar"))
         raw_bytes = bytearray()
         for chk in range(3):
@@ -165,7 +165,7 @@ def _x86_read_encoded_str(source_expr, obs, is_dataset=False):
                     f" (strpos(__px_ref[1], substr({src},"
                     f" {pos}, 1)) + 31) * {pow256})")
             expr = " + ".join(terms)
-            cmd = f"replace __px_s = {expr}"
+            cmd = f"replace __px_enc = {expr}"
             _LIB.StataSO_Execute(cmd.encode())
             raw = call_double("_bist_data", 1, idx)
             if raw is None:
@@ -1041,12 +1041,16 @@ class Scalar:
     def getString(name: str) -> str:
         """Get the value of a string scalar."""
         if _IS_X86_64:
-            # Direct memory read via self-contained _engine._read_string_scalar_x86
-            from pystata_x.sfi._engine import _read_string_scalar_x86
             try:
-                val = _read_string_scalar_x86(name)
-                if val:
-                    return val
+                from pystata_x.sfi._engine import _LIB
+                # Create source variable with scalar value
+                _LIB.StataSO_Execute(b"capture drop __px_ss")
+                _LIB.StataSO_Execute(
+                    b"gen str2000 __px_ss = scalar("
+                    + name.encode() + b")")
+                # Use shared encoding reader
+                return _x86_read_encoded_str(
+                    lambda o1: "__px_ss[1]", 0, is_dataset=False)
             except Exception:
                 pass
             return ""

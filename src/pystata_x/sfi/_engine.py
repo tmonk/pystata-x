@@ -961,12 +961,12 @@ def _read_scalar_x86(name: str) -> Optional[float]:
 
 
 def _read_string_scalar_x86(name: str) -> str:
-    """Read a string scalar by name.
+    """Read a string scalar by name on x86_64.
 
     String dispatch functions echo input on x86_64. Direct memory
     scanning is unreliable. Returns empty string as fallback.
     """
-    # TODO: Implement via strvar hybrid when _bist_sdata is fixed
+    # Implemented in _core.py Scalar.getString
     return ''
 
 
