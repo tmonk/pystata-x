@@ -37,7 +37,14 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
 
 data_ptr = handle + data_rva
 # Read data section from loaded DLL using virtual size (not raw file size)
-data_vsize_from_pe = struct.unpack('<I', pe_data[sh_off + 8:sh_off + 12])[0]
+# Rescan to get correct virtual size
+for k in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
+    sk = pe_data[sh_off + k*40:sh_off + k*40 + 40]
+    if sk[:8].rstrip(b'\x00').decode('utf-8', errors='replace') == '.data':
+        data_vsize_from_pe = struct.unpack('<I', sk[8:12])[0]
+        break
+else:
+    data_vsize_from_pe = data_size
 data_size = data_vsize_from_pe  # Full virtual size in memory
 print('Data section: addr=%x vsize=%d rawsize=%d' % (data_ptr, data_size, data_rawsize))
 
