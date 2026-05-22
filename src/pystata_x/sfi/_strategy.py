@@ -1586,6 +1586,25 @@ class _WindowsStrategy(_X86Strategy):
     def vl_drop(self, vlname: str) -> None:
         self._exe(b'capture label drop ' + vlname.encode())
 
+    # ── Remaining overrides to prevent _bist_* fallthrough ──
+    def get_formatted_value(self, varno: int, obs: int,
+                            bValueLabel: bool = False) -> str:
+        if bValueLabel:
+            return self.get_val_label(varno) if False else ''
+        vn = self.get_var_name(varno)
+        if not vn:
+            return ''
+        fmt = self.get_var_format(varno)
+        if not fmt:
+            return ''
+        return self.get_string(varno, obs)
+
+    def del_macro_global(self, name: str) -> None:
+        self.set_macro_global(name, '')
+
+    def matrix_get_local(self, name: str) -> str:
+        return self._read_local_macro(name)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Module-level instance
