@@ -155,7 +155,9 @@ class StataBinary:
         self._analyzed = False
         # PE binary info (Windows)
         self._pe_info: Optional[dict] = None
+        self._pe: Optional[Any] = None
         self._format: str = self._detect_format()
+        self._memory_offsets: dict = {}
 
     def _detect_format(self) -> str:
         """Detect binary format: elf, mach-o, pe, or unknown."""
