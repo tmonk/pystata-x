@@ -1948,6 +1948,27 @@ def _matrix_exec(cmd: str) -> None:
 
 def _matrix_get_local(name: str) -> str:
     """Read a Stata local macro value (set by a previous executeCommand)."""
+    if _IS_X86_64:
+        # _bist_global crashes on x86_64; use gen + encoding instead
+        from pystata_x.sfi._engine import _LIB as _L
+        from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
+        from pystata_x.sfi._engine import call_double as _cd
+        _init_px_ref()
+        # gen needs at least 1 observation to populate data
+        nobs = _cd('_bist_nobs')
+        needs_obs = nobs is None or nobs == 0
+        if needs_obs:
+            _L.StataSO_Execute(b'set obs 1')
+        _L.StataSO_Execute(b'capture drop __px_lm')
+        # Backtick + apostrophe for Stata local macro expansion
+        cmd = b'gen str2000 __px_lm = "\x60' + name.encode() + b"'\""
+        _L.StataSO_Execute(cmd)
+        r = _x86_read_encoded_str(
+            lambda obs: '__px_lm[1]', 0, is_dataset=False)
+        _L.StataSO_Execute(b'drop __px_lm')
+        if needs_obs:
+            _L.StataSO_Execute(b'set obs 0')
+        return r if r else ''
     r = call_string("_bist_global", name.encode())
     return r if r else ''
 
