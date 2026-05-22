@@ -100,9 +100,36 @@ for o, bs in found_nobs:
         if struct.unpack('<q', raw2[o:o+8])[0] == 36:
             nobs_verified.append((o, 64))
 
-print('nobs 74->36: %d verified' % len(nobs_verified), flush=True)
+print('nobs 74->36: %d verified (by exact 74->36)' % len(nobs_verified), flush=True)
 for o, bs in nobs_verified[:10]:
     print('  offset=%s (%d-bit)' % (hex(o), bs), flush=True)
+
+# Additional nobs scan: try int8, int16, and float
+print('\nExtended nobs scan (int16, int8, float32, float64):', flush=True)
+# int16
+for o in range(0, len(raw) - 2, 2):
+    v16 = struct.unpack('<h', raw[o:o+2])[0]
+    v16_2 = struct.unpack('<h', raw2[o:o+2])[0]
+    if v16 == 74 and v16_2 == 36:
+        print('  INT16: offset=%s' % hex(o), flush=True)
+# int8
+for o in range(0, len(raw) - 1, 1):
+    v8 = raw[o]
+    v8_2 = raw2[o]
+    if v8 == 74 and v8_2 == 36:
+        print('  INT8: offset=%s' % hex(o), flush=True)
+# float32
+for o in range(0, len(raw) - 4, 4):
+    vf = struct.unpack('<f', raw[o:o+4])[0]
+    vf2 = struct.unpack('<f', raw2[o:o+4])[0]
+    if 73.9 < vf < 74.1 and 35.9 < vf2 < 36.1:
+        print('  FLOAT32: offset=%s' % hex(o), flush=True)
+# float64 (already covered above but let's verify)
+for o in range(0, len(raw) - 8, 8):
+    vd = struct.unpack('<d', raw[o:o+8])[0]
+    vd2 = struct.unpack('<d', raw2[o:o+8])[0]
+    if 73.9 < vd < 74.1 and 35.9 < vd2 < 36.1:
+        print('  FLOAT64: offset=%s' % hex(o), flush=True)
 
 # Maxvars
 found_5000 = []
