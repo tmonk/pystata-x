@@ -1207,6 +1207,62 @@ class _WindowsStrategy(_X86Strategy):
                     return formatted
             return str(val)
 
+    def macro_expand(self, name: str) -> str:
+        """Expand a Stata global/local macro via StataExecute + encoding."""
+        if name.startswith('$'):
+            name = name[1:]
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str2045 __px_tmp = "${{{name}}}"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def get_macro_global(self, name: str) -> str:
+        """Read a global Stata macro via StataExecute + encoding."""
+        if name.startswith('c(') and name.endswith(')'):
+            # c() values: use display
+            self._exe(f'capture drop __px_tmp')
+            self._exe(f'gen str2000 __px_tmp = "`={name}\'"')
+            result = self.read_encoded_str('__px_tmp[1]', obs=1)
+            if result:
+                return result
+            return ''
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str2000 __px_tmp = "${{{name}}}"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def get_macro_local(self, name: str) -> str:
+        """Read a local Stata macro via StataExecute + encoding."""
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str2000 __px_tmp = "`{name}\'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def set_macro_global(self, name: str, value: str) -> None:
+        """Set a global macro."""
+        self._exe(f'global {name} = "{value}"')
+
+    def set_macro_local(self, name: str, value: str) -> None:
+        """Set a local macro."""
+        self._exe(f'local {name} = "{value}"')
+
+    def set_scalar_value(self, name: str, val: float) -> None:
+        """Set a scalar value."""
+        self._exe(f'scalar {name} = {val}')
+
+    def set_scalar_string(self, name: str, val: str) -> None:
+        """Set a scalar string."""
+        self._exe(f'scalar {name} = \"{val}\"')
+
+    def get_scalar_string(self, name: str) -> str:
+        """Get a scalar string value."""
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str2000 __px_tmp = scalar({name})')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def get_temp_name(self) -> str:
+        """Get a temp name from Stata."""
+        self._exe('capture drop __px_tmp')
+        self._exe('gen str2000 __px_tmp = "`=tempname(1)\'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
     def get_max_vars(self) -> int:
         from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
         if _MEMORY_OFFSETS and 'maxvars_offset' in _MEMORY_OFFSETS:
