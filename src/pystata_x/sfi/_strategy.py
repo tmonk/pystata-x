@@ -1533,13 +1533,12 @@ class _WindowsStrategy(_X86Strategy):
         self._exe(b'capture frame create ' + name.encode())
 
     def frame_exists(self, name: str) -> bool:
-        # Try frame change — if it succeeds, the frame exists.
-        # IMPORTANT: do NOT use capture for the local assignment line,
-        # otherwise _rc is overwritten with 0 (success of the local set).
+        # Use scalar to capture _rc (local macro approach doesn't capture _rc correctly
+        # on this build due to macro evaluation timing).
         self._exe(b'capture frame change ' + name.encode())
-        self._exe(b'local __px_rc = _rc')
+        self._exe(b'scalar __px_rcx = _rc')
         self._exe(b'capture drop __px_tmp')
-        self._exe(b'capture gen long __px_tmp = `__px_rc')
+        self._exe(b'capture gen double __px_tmp = scalar(__px_rcx)')
         val = self._scratch_read_double()
         return val is not None and val == 0
 
