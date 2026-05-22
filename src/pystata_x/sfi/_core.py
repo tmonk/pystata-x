@@ -112,6 +112,24 @@ def _format_stata_value(val: float, varno: int) -> str:
     except Exception:
         return str(val)
 
+
+def _init_px_ref() -> None:
+    """Create the __px_ref ASCII lookup variable (x86_64 string reads)."""
+    try:
+        from pystata_x.sfi._engine import _LIB
+        chunks = '+'.join(f'char({i})' for i in range(32, 66))
+        chunk2 = '+'.join(f'char({i})' for i in range(66, 96))
+        chunk3 = '+'.join(f'char({i})' for i in range(96, 127))
+        _LIB.StataSO_Execute(b'capture drop __px_ref')
+        _LIB.StataSO_Execute(f'gen str95 __px_ref = {chunks}'.encode())
+        _LIB.StataSO_Execute(
+            f'replace __px_ref = __px_ref + {chunk2}'.encode())
+        _LIB.StataSO_Execute(
+            f'replace __px_ref = __px_ref + {chunk3}'.encode())
+    except Exception:
+        pass
+
+
 # Fast C extension path — lazy import, checked at call time
 _fast_path = None  # Will be set to module on first use
 
@@ -345,29 +363,65 @@ class Data:
 
         Uses ``_fast_path.get_string()`` when the C extension is
         available.  Falls back to the Python push+stack path.
-        On x86_64, ``_bist_sdata`` crashes in the dispatch path
-        so we use ``display <varname>[<obs + 1>]`` instead.
+        On x86_64, ``_bist_sdata`` crashes so we encode the string
+        bytes as doubles via ``strpos()`` + ``char()`` lookup, read
+        via ``_bist_data``, then decode.
         """
         if _IS_X86_64:
-            # Direct memory read for string cells — use _read_var_name_x86
-            # to get var name, then copy to temp var via execute (write-only)
             try:
-                from pystata_x.sfi._engine import _read_var_name_x86
+                from pystata_x.sfi._engine import (_read_var_name_x86,
+                    _LIB, call_double)
                 name = _read_var_name_x86(varno)
                 if name:
-                    from pystata_x.sfi._engine import execute
-                    from pystata_x.sfi._manifest import __PX_STR_VAR
-                    execute(f"quietly replace {__PX_STR_VAR} = {name}[{obs + 1}] in 1")
-                    # Read via _bist_data on the temp var — strings are hex-encoded
-                    # Use memory reader for the string value
-                    import struct, ctypes
-                    from pystata_x.sfi._engine import call_double
-                    raw_double = call_double("_bist_data", 1, __PX_STR_VAR_IDX)
-                    if raw_double is not None:
-                        raw_bytes = struct.pack("<Q", int(raw_double))
-                        result = raw_bytes.rstrip(b"\x00").decode("latin-1", errors="replace")
-                        if result:
-                            return result
+                    obs1 = obs + 1
+                    # Ensure __px_ref reference string exists
+                    _LIB.StataSO_Execute(
+                        b"capture confirm str var __px_ref, exact")
+                    # Check if __px_ref exists by peeking at var list
+                    try:
+                        from pystata_x.sfi._engine import _read_var_name_x86
+                        _pxr = _read_var_name_x86(nvar - 1)
+                        if _pxr != '__px_ref':
+                            _init_px_ref()
+                    except Exception:
+                        _init_px_ref()
+                    _LIB.StataSO_Execute(b"capture drop __px_s")
+                    _LIB.StataSO_Execute(b"gen double __px_s = .")
+                    nvar = int(call_double("_bist_nvar"))
+                    idx = nvar
+                    raw_bytes = bytearray()
+                    for chk in range(3):
+                        base = chk * 6
+                        terms = []
+                        for i in range(6):
+                            pos = base + i + 1
+                            pow256 = 256 ** i
+                            # Use cond() to return 0 for positions beyond
+                            # the string's actual length
+                            terms.append(
+                                f"cond(substr({name}[{obs1}],"
+                                f" {pos}, 1) == \"\", 0,"
+                                f" (strpos(__px_ref[1],"
+                                f" substr({name}[{obs1}],"
+                                f" {pos}, 1)) + 31) * {pow256})")
+                        expr = " + ".join(terms)
+                        cmd = f"replace __px_s = {expr}"
+                        _LIB.StataSO_Execute(cmd.encode())
+                        raw = call_double("_bist_data", 1, idx)
+                        if raw is None:
+                            break
+                        raw_int = int(raw)
+                        for i in range(6):
+                            b = (raw_int >> (i * 8)) & 0xFF
+                            if b == 0:
+                                break
+                            raw_bytes.append(b)
+                        if b == 0:
+                            break
+                    if raw_bytes:
+                        return bytes(raw_bytes).decode(
+                            "latin-1", errors="replace")
+
             except Exception:
                 pass
             return ""
