@@ -498,8 +498,9 @@ class StataBinary:
                         memory_offsets['nvar_gws_offset'] = off
 
             memory_offsets['gws_rva'] = gws_ptr - dll_handle
+            memory_offsets['data_rva'] = data_rva
             memory_offsets['nvar_data_offset'] = KNOWN_NVAR_OFF
-            memory_offsets['nvar_abs_addr'] = data_ptr + KNOWN_NVAR_OFF
+            memory_offsets['nvar_rva'] = data_rva + KNOWN_NVAR_OFF
 
             # Read data section for maxvars scan
             raw_buf = (ctypes.c_char * data_size)()

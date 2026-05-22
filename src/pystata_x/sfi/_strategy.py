@@ -984,14 +984,19 @@ class _WindowsStrategy(_X86Strategy):
             return None
 
     def _get_nvar_addr(self) -> int | None:
-        """Get the absolute address of nvar in .data section."""
-        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB, _BASE
-        if _MEMORY_OFFSETS and 'nvar_data_offset' in _MEMORY_OFFSETS:
-            # From manifest
-            ndo = _MEMORY_OFFSETS['nvar_data_offset']
-            dll = _LIB
-            if dll is not None and hasattr(dll, '_handle'):
-                return dll._handle + ndo  # handle is the DLL base
+        """Get the absolute address of nvar via DLL base + RVA offset."""
+        from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
+        if not _MEMORY_OFFSETS or _LIB is None:
+            return None
+        nvar_rva = _MEMORY_OFFSETS.get('nvar_rva')
+        if nvar_rva is None:
+            # Fallback: compute from nvar_data_offset + data_rva
+            ndo = _MEMORY_OFFSETS.get('nvar_data_offset')
+            data_rva = _MEMORY_OFFSETS.get('data_rva')
+            if ndo and data_rva:
+                nvar_rva = data_rva + ndo
+        if nvar_rva:
+            return _LIB._handle + nvar_rva
         return None
 
     def var_count(self) -> int:
