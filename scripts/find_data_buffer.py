@@ -65,27 +65,26 @@ print('Current nvar:', nvar)
 # We need to find the data buffer address
 # The data buffer stores all values in a contiguous block
 
-# Strategy: search .data section for pointers pointing to heap memory
-# that contains our sentinel value
-sentinel_match = None
+# Strategy 1: Scan gws struct for data buffer pointer
+# gws at data_ptr + 0x211644 - 0x68 = data_ptr + 0x2115DC
+gws_ptr = data_ptr + 0x211644 - 0x68
+print('\ngws at:', hex(gws_ptr))
 
-# Scan for 8-byte pointers in .data
+# The data buffer pointer could be at various offsets in gws
+# On Linux, gws.D is at offset 0x48
+# Let's read pointer values in gws and try them
 count = 0
-for off in range(0, data_size - 8, 8):
-    ptr = struct.unpack('<Q', raw[off:off+8])[0]
-    # Check if pointer looks like a heap address (not in DLL range)
-    if ptr < 0x10000 or (handle <= ptr < handle + 0x04000000):
+sentinel_match = None
+for gws_off in range(0, 256, 8):
+    ptr = struct.unpack('<Q', raw[gws_ptr - data_ptr + gws_off:gws_ptr - data_ptr + gws_off + 8])[0]
+    if ptr < 0x10000:
         continue
-    if ptr > 0x800000000000:
-        continue  # Not a valid user-space address
-    # Try to read a double at this address
     try:
         test_buf = (ctypes.c_double * 1)()
         ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
         if abs(test_buf[0] - sentinel_val) < 0.0001:
-            print('Found sentinel via pointer at .data+%x: ptr=%x val=%f' 
-                  % (off, ptr, test_buf[0]))
-            sentinel_match = (off, ptr)
+            print('Found sentinel via gws+%x: ptr=%x val=%f' % (gws_off, ptr, test_buf[0]))
+            sentinel_match = (gws_off, ptr)
             count += 1
     except:
         pass
