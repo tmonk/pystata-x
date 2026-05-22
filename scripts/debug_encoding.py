@@ -1,5 +1,5 @@
-"""Debug var name encoding on Windows."""
-import ctypes, sys
+"""Debug variable name reading step by step."""
+import ctypes, sys, json
 sys.path.insert(0, 'src')
 
 dll_path = r'C:\Program Files\StataNow19\se-64.dll'
@@ -12,75 +12,62 @@ dll.StataSO_Execute.restype = ctypes.c_int
 
 dll.StataSO_Execute(b'sysuse auto, clear')
 
-# Test 1: strpos with simple literal
-print('=== Test strpos ===')
-cmd1 = b"scalar __px_p = strpos('abcdefghijklmnopqrstuvwxyz','p')"
-print('cmd1:', repr(cmd1))
-dll.StataSO_Execute(cmd1)
-dll.StataSO_Execute(b'capture drop __px_t')
-dll.StataSO_Execute(b'gen double __px_t = __px_p')
-# Read scratch
-import json
+# Load manifest for scratch rva
 with open('src/pystata_x/sfi/manifests/manifest-windows-x86_64.json') as f:
     m = json.load(f)
-mo = m.get('memory_offsets', {})
-scratch_rva = mo.get('scratch_buffer_rva', 0)
-buf = (ctypes.c_double * 1)()
-ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
-print('scalar result:', buf[0])
+scratch_rva = m['memory_offsets']['scratch_buffer_rva']
 
-# Test 2: local macro + strpos
-print('\n=== Test local macro ===')
-dll.StataSO_Execute(b'local __px_name : variable 1')
-print('After local command')
+def exe(cmd):
+    return dll.StataSO_Execute(cmd.encode() if isinstance(cmd, str) else cmd)
 
-# Verify macro exists
-dll.StataSO_Execute(b'gen str32 __px_test = "`__px_name\'"')
-print('gen str32 with macro: rc=0 for success')
+def scratch():
+    buf = (ctypes.c_double * 1)()
+    ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
+    return buf[0]
 
-# Read its value via encoding
-# First char of __px_test[1]
-pos = 1
-alphabet_bytes = b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
-# Construct command directly
-cmd2 = b'scalar __px_c = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr(__px_test[1], 1, 1))'
-print('cmd2:', repr(cmd2))
-dll.StataSO_Execute(cmd2)
-dll.StataSO_Execute(b'capture drop __px_t')
-dll.StataSO_Execute(b'gen double __px_t = __px_c')
-ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
-print('first char code:', buf[0])
+print("=== Step 1: Local macro ===")
+rc = exe('local __px_name : variable 1')
+print(f'local rc: {rc}')
+
+print("\n=== Step 2: gen with macro expansion ===")
+rc = exe('capture drop __px_vn')
+print(f'drop rc: {rc}')
+rc = exe('gen str32 __px_vn = "`__px_name\'"')
+print(f'gen rc: {rc}')
+
+print("\n=== Step 3: verify gen worked ===")
+# Try to get a summary
+rc = exe('describe __px_vn')
+print(f'describe rc: {rc}')
+
+print("\n=== Step 4: encode single char via scalar ===")
+# Use stprpos with the gen'd variable
+rc = exe('scalar __px_c = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr(__px_vn[1], 1, 1))')
+print(f'scalar rc: {rc}')
+rc = exe('capture drop __px_tmp')
+rc = exe('gen double __px_tmp = __px_c')
+print(f'gen rc: {rc}')
+code = scratch()
+print(f'char code: {code}')
 
 # Decode
-alphabet = b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
-code = int(buf[0])
-if 1 <= code <= len(alphabet):
-    print('first char:', chr(alphabet[code - 1]), '(expected p)')
+alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+idx = int(code) - 1 if code and int(code) > 0 else -1
+if 0 <= idx < len(alphabet):
+    print(f'First char: "{alphabet[idx]}"')
+else:
+    print(f'Cannot decode code={code}')
 
-# Test 3: the exact cmd from _WindowsStrategy
-print('\n=== Test _WindowsStrategy command ===')
-alphabet = '"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"'
-cmd3 = 'scalar __px_c = strpos(' + alphabet + ', substr("`__px_name\'"' + f', {pos}, 1))'
-print('cmd3:', cmd3)
-# This won't work directly because it uses macro __px_name which might not exist
+print("\n=== Step 5: Try with double-quoted macro ===")
+rc = exe('capture drop __px_vn2')
+rc = exe('gen str32 __px_vn2 = "`__px_name\'"')  
+rc = exe('scalar __px_c2 = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", substr(__px_vn2[1], 1, 1))')
+rc = exe('capture drop __px_tmp')
+rc = exe('gen double __px_tmp = __px_c2')
+code2 = scratch()
+print(f'char code: {code2}')
+idx2 = int(code2) - 1 if code2 and int(code2) > 0 else -1
+if 0 <= idx2 < len(alphabet):
+    print(f'First char: "{alphabet[idx2]}"')
 
-# Let me test with a simpler version: replace macro with str32 variable
-cmd4 = 'scalar __px_c = strpos(' + alphabet + f', substr(__px_test[1], {pos}, 1))'
-print('cmd4:', cmd4)
-dll.StataSO_Execute(cmd4.encode())
-dll.StataSO_Execute(b'capture drop __px_t')
-dll.StataSO_Execute(b'gen double __px_t = __px_c')
-ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
-print('result:', buf[0])
-
-# Test 5: Why does strpos return 22 for 'p'?
-print('\n=== Debug strpos ===')
-for test_char in [b'p', b'P', b'a', b'v']:
-    cmd = b'scalar __px_r = strpos("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_","' + test_char + b'")'
-    dll.StataSO_Execute(cmd)
-    dll.StataSO_Execute(b'capture drop __px_t')
-    dll.StataSO_Execute(b'gen double __px_t = __px_r')
-    ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
-    print(f'  strpos("{chr(test_char[0])}"): {buf[0]}')
-
-print('\nDone')
+print("\nDone")
