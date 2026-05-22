@@ -73,31 +73,81 @@ print('Current nvar:', nvar)
 # We need to find the data buffer address
 # The data buffer stores all values in a contiguous block
 
-# Strategy 1: Scan gws struct for data buffer pointer
-# gws at data_ptr + 0x211644 - 0x68 = data_ptr + 0x2115DC
-gws_ptr = data_ptr + 0x211644 - 0x68
-print('\ngws at:', hex(gws_ptr))
+# Strategy 1: Scan nearby memory for the sentinel value
+# The sentinel value should be stored in the data buffer
+# Let's search the data section for the actual sentinel bytes
+import binascii
+sentinel_hex = sentinel_bytes.hex()
+print('\nSearching .data for sentinel bytes:', sentinel_hex)
+raw_hex = binascii.hexlify(raw).decode()
+idx = raw_hex.find(sentinel_hex)
+if idx >= 0:
+    data_off = idx // 2
+    print('Found sentinel at .data+%x' % data_off)
+    # Now check if this is pointed to by something
+    abs_addr = data_ptr + data_off
+    print('  absolute addr: %x' % abs_addr)
+    # Search for a pointer to this address
+    for off in range(0, len(raw) - 8, 8):
+        ptr = struct.unpack('<Q', raw[off:off+8])[0]
+        if ptr == abs_addr:
+            print('  Referenced by pointer at .data+%x' % off)
+        # Also check nearby (indirect pointers)
+        for delta in range(-256, 256, 8):
+            if abs_addr - 16384 <= ptr <= abs_addr + 16384:
+                if abs(ptr - abs_addr) < 256:
+                    pass
+else:
+    print('Sentinel NOT in .data section - stored in heap memory')
+    print('Trying alternative: search gws for data buffer ptr')
+    # The data buffer pointer is a heap address stored in gws
+    # Scan gws for interesting pointer values
+    gws_ptr = data_ptr + 0x211644 - 0x68
+    for gws_off in range(0, 512, 8):
+        abs_gws_off = gws_ptr - data_ptr + gws_off
+        if abs_gws_off < 0 or abs_gws_off + 8 > len(raw):
+            continue
+        ptr = struct.unpack('<Q', raw[abs_gws_off:abs_gws_off+8])[0]
+        if ptr < 0x10000:
+            continue
+        # Try to read a value at this pointer
+        try:
+            test_buf = (ctypes.c_double * 1)()
+            ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
+            if abs(test_buf[0] - sentinel_val) < 0.0001:
+                print('  Found sentinel via gws+%x: ptr=%x' % (gws_off, ptr))
+        except:
+            pass
+    
+    # Also scan ALL pointers in .data for anything pointing to heap memory
+    # that contains the sentinel somewhere within a buffer
+    print('\nScanning all pointers in .data...')
+    count = 0
+    for off in range(0, len(raw) - 8, 8):
+        ptr = struct.unpack('<Q', raw[off:off+8])[0]
+        if ptr < 0x10000 or ptr > 0x7FFFFFFF0000:
+            continue
+        # Skip pointers into the DLL itself
+        if handle <= ptr < handle + 0x04000000:
+            continue
+        try:
+            test_buf = (ctypes.c_double * 8)()  # Read 8 values
+            ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 64)
+            for i in range(8):
+                if abs(test_buf[i] - sentinel_val) < 0.0001:
+                    print('  Match at .data+%x ptr=%x offset=%d' % (off, ptr, i))
+                    count += 1
+                    if count >= 3:
+                        break
+        except:
+            pass
+        if count >= 3:
+            break
 
-# The data buffer pointer could be at various offsets in gws
-# On Linux, gws.D is at offset 0x48
-# Let's read pointer values in gws and try them
-count = 0
-sentinel_match = None
-for gws_off in range(0, 256, 8):
-    ptr = struct.unpack('<Q', raw[gws_ptr - data_ptr + gws_off:gws_ptr - data_ptr + gws_off + 8])[0]
-    if ptr < 0x10000:
-        continue
-    try:
-        test_buf = (ctypes.c_double * 1)()
-        ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
-        if abs(test_buf[0] - sentinel_val) < 0.0001:
-            print('Found sentinel via gws+%x: ptr=%x val=%f' % (gws_off, ptr, test_buf[0]))
-            sentinel_match = (gws_off, ptr)
-            count += 1
-    except:
-        pass
+print('Done scanning')
 
-print('Sentinel matches found: %d' % count)
+if sentinel_match:
+    off, data_buffer = sentinel_match
 
 if sentinel_match:
     off, data_buffer = sentinel_match
