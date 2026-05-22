@@ -73,6 +73,45 @@ from pystata_x.sfi._engine import (
 # x86_64 platform detection (used for architecture-specific dispatch)
 _IS_X86_64 = sys.platform in ("linux", "linux2") and platform.machine() in ("x86_64", "amd64")
 
+
+def _format_stata_value(val: float, varno: int) -> str:
+    """Format a Stata cell value using the variable's display format (x86_64)."""
+    import re
+    try:
+        from pystata_x.sfi._engine import _read_var_format_x86
+        fmt = _read_var_format_x86(varno)
+        if not fmt:
+            return str(val)
+        m = re.match(r"%(-)?(\d+)(?:\.(\d+))?([a-zA-Z]+)", fmt)
+        if m:
+            left_align = bool(m.group(1))
+            width = int(m.group(2))
+            precision = int(m.group(3)) if m.group(3) else 0
+            fmt_type = m.group(4)
+            if fmt_type == "s":
+                return str(val)[:width] if width else str(val)
+            elif fmt_type in ("f", "g"):
+                if precision > 0:
+                    formatted = f"{val:.{precision}f}"
+                else:
+                    formatted = f"{val:g}"
+                if width and len(formatted) < width:
+                    padding = width - len(formatted)
+                    formatted = (" " * padding) + formatted if not left_align else formatted + (" " * padding)
+                return formatted
+            elif fmt_type in ("gc",):
+                if precision > 0:
+                    formatted = f"{val:,.{precision}f}"
+                else:
+                    formatted = f"{val:,.0f}"
+                if width and len(formatted) < width:
+                    padding = width - len(formatted)
+                    formatted = (" " * padding) + formatted if not left_align else formatted + (" " * padding)
+                return formatted
+        return str(val)
+    except Exception:
+        return str(val)
+
 # Fast C extension path — lazy import, checked at call time
 _fast_path = None  # Will be set to module on first use
 
