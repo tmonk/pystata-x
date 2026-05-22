@@ -1,0 +1,112 @@
+{
+  "_meta": {
+    "generator": "scripts/gen_oracle_docker.py",
+    "dataset": "auto.dta",
+    "sha256": "4c924902ad250242"
+  },
+  "data": {
+    "obs_total": 74,
+    "var_count": 12,
+    "var_names": [
+      "make",
+      "price",
+      "mpg",
+      "rep78",
+      "headroom",
+      "trunk",
+      "weight",
+      "length",
+      "turn",
+      "displacement",
+      "gear_ratio",
+      "foreign"
+    ],
+    "var_labels": [
+      "Make and model",
+      "Price",
+      "Mileage (mpg)",
+      "Repair record 1978",
+      "Headroom (in.)",
+      "Trunk space (cu. ft.)",
+      "Weight (lbs.)",
+      "Length (in.)",
+      "Turn circle (ft.)",
+      "Displacement (cu. in.)",
+      "Gear ratio",
+      "Car origin"
+    ],
+    "var_types": [
+      "str18",
+      "int",
+      "int",
+      "int",
+      "float",
+      "int",
+      "int",
+      "int",
+      "int",
+      "int",
+      "float",
+      "byte"
+    ],
+    "var_formats": [
+      "%-18s",
+      "%8.0gc",
+      "%8.0g",
+      "%8.0g",
+      "%6.1f",
+      "%8.0g",
+      "%8.0gc",
+      "%8.0g",
+      "%8.0g",
+      "%8.0g",
+      "%6.2f",
+      "%8.0g"
+    ],
+    "price_obs0": {
+      "price": []
+    },
+    "make_obs0": {
+      "make": []
+    },
+    "max_vars": 5000
+  },
+  "macro": {
+    "global_test": "42"
+  },
+  "scalar": {
+    "myscalar": 3.14,
+    "mystr": "hello"
+  },
+  "valuelabel": {
+    "names": [
+      "origin",
+      "yesno"
+    ]
+  },
+  "characteristic": {
+    "dta_char_mychar": "hello"
+  },
+  "datetime": {
+    "format_0": "01 Jan 1960 00:00:00"
+  },
+  "frame": {
+    "frames": [
+      "testframe"
+    ]
+  },
+  "matrix": {
+    "mymat_rows": 2,
+    "mymat_row_names": [
+      "row1",
+      "row2"
+    ],
+    "mymat_at_0_0": 1.0
+  },
+  "platform": {
+    "is_linux": true
+  },
+  "sfitoolkit": {
+    "is_valid_name": true
+  }
+}

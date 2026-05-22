@@ -3555,17 +3555,24 @@ class Frame:
     def getFrames() -> list:
         """Get all frame names."""
         if _IS_X86_64:
-            from pystata_x.sfi._engine import _LIB
-            from pystata_x.sfi._core import _x86_read_encoded_str, _init_px_ref
-            _init_px_ref()
-            _LIB.StataSO_Execute(b'local __tmp : frame dir')
-            _LIB.StataSO_Execute(b'capture drop __px_z')
-            _LIB.StataSO_Execute(
-                b'gen str2000 __px_z = "`__tmp\'"')
-            r = _x86_read_encoded_str(
-                lambda o1: '__px_z[1]', 0, is_dataset=False)
-            if r:
-                return [x.strip() for x in r.split() if x.strip()]
+            # _bist_framedir has pool-header check that fails on x86_64.
+            # Use frame dir command and parse output buffer.
+            try:
+                from pystata_x.sfi._engine import execute as _exec
+                out, rc = _exec('frame dir')
+                names = []
+                for line in out.splitlines():
+                    line = line.strip()
+                    # Skip empty lines and command echo (start with .)
+                    if line and not line.startswith('.'):
+                        name = line.split()[0]
+                        # Skip Stata output artifacts
+                        if name and name.isalpha() and name not in ('frame','dir','frame','dir','','StataCorp','Statistics'):
+                            names.append(name)
+                if names:
+                    return names
+            except Exception:
+                pass
             return []
         r = call_string("_bist_framedir")
         if r:
