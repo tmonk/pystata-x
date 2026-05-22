@@ -31,7 +31,7 @@ data_tests = [
     (1, 9, 40, 'turn[1]'),
     (1, 10, 121, 'displacement[1]'),
     (1, 11, 3.58, 'gear_ratio[1]'),
-    (2, 11, 3.08, 'gear_ratio[2]'),
+    (2, 11, 2.53, 'gear_ratio[2]'),
     (1, 12, 0, 'foreign[1]'),
 ]
 data_failures = []
