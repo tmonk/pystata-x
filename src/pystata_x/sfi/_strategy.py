@@ -1156,6 +1156,57 @@ class _WindowsStrategy(_X86Strategy):
                 break
         return ''.join(result_chars)
 
+    def get_var_type(self, varno: int) -> int:
+        """Get variable storage type via Stata :type extended macro."""
+        vn = self.get_var_name(varno)
+        if not vn:
+            return 0
+        self._exe(f'local __px_tp : type {vn}')
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str8 __px_tmp = "`__px_tp\'"')
+        type_str = self.read_encoded_str('__px_tmp[1]', obs=1)
+        type_map = {'byte': 0x80, 'int': 0x81, 'long': 0x84,
+                    'float': 0x82, 'double': 0x83, 'str': 0xF5}
+        for prefix, code in type_map.items():
+            if type_str.startswith(prefix):
+                return code
+        return 0
+
+    def get_var_format(self, varno: int) -> str:
+        """Get variable display format."""
+        vn = self.get_var_name(varno)
+        if not vn:
+            return ''
+        self._exe(f'local __px_fmt : format {vn}')
+        self._exe('capture drop __px_tmp')
+        self._exe(f'gen str32 __px_tmp = "`__px_fmt\'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+    def get_string(self, obs: int, var: int) -> str:
+        """Read a variable value as string."""
+        vn = self.get_var_name(var)
+        if not vn:
+            return ''
+        vtype = self.get_var_type(var)
+        if vtype == 0xF5:  # String variable
+            self._exe(f'capture drop __px_tmp')
+            self._exe(f'gen str2045 __px_tmp = {vn}[{obs}]')
+            return self.read_encoded_str('__px_tmp[1]', obs=1)
+        else:
+            val = self.data_get(obs, var)
+            if val is None:
+                return ''
+            fmt = self.get_var_format(var)
+            if fmt:
+                self._exe(f'capture drop __px_tmp')
+                self._exe(f'gen double __px_tmp = {vn}[{obs}]')
+                self._exe(f'capture drop __px_fmt')
+                self._exe(f'gen str32 __px_fmt = string(__px_tmp[1],"{fmt}")')
+                formatted = self.read_encoded_str('__px_fmt[1]', obs=1)
+                if formatted:
+                    return formatted
+            return str(val)
+
     def get_max_vars(self) -> int:
         from pystata_x.sfi._engine import _MEMORY_OFFSETS, _LIB
         if _MEMORY_OFFSETS and 'maxvars_offset' in _MEMORY_OFFSETS:
