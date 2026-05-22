@@ -103,7 +103,10 @@ o['scalar'] = scalar
 macro = {}
 macro['px_global'] = _STRATEGY.get_macro_global('px_global')
 macro['px_local'] = _STRATEGY.get_macro_local('px_local')
-macro['c_level'] = _STRATEGY.macro_expand('c(level)')
+# c(level) via strofreal (macro_expand with $c(level) doesn't work)
+_LIB.StataSO_Execute(b'capture drop __px_gs')
+_LIB.StataSO_Execute(b'gen str2000 __px_gs = strofreal(c(level))')
+macro['c_level'] = _STRATEGY.read_encoded_str('__px_gs[1]', obs=1)
 macro['pi'] = _STRATEGY.macro_expand('=pi')
 o['macro'] = macro
 
