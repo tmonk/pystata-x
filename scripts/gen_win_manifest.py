@@ -25,6 +25,10 @@ except Exception as e:
     traceback.print_exc()
     mem = {}
 
+# Store discovered offsets so manifest includes them
+if mem:
+    b._memory_offsets.update(mem)
+
 print('Generating manifest...', flush=True)
 m = b.generate_manifest()
 print('Manifest generated.', flush=True)
