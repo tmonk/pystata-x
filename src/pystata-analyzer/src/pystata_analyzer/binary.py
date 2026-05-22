@@ -26,6 +26,16 @@ from pystata_analyzer.helpers import (
 )
 
 
+# Known infrastructure globals to exclude from memory layout discovery
+# These are the push+stack protocol addresses, not data tables
+_INFRASTRUCTURE_ADDRS = {
+    ARG_PTR_ADDR,        # 0x500C6A0 — push+stack argument pointer
+    SP_GLOBAL_ADDR,      # 0x500C638 — SP-resetting global
+    ARG_PTR_ADDR - 8,    # 0x500C698 — near ARG_PTR (part of same struct)
+    ARG_PTR_ADDR - 0x68, # 0x500C638 — same as SP_GLOBAL
+}
+
+
 class StataBinary:
     """Core analysis engine for a Stata shared library binary.
 
@@ -2117,59 +2127,60 @@ class StataBinary:
                 fn_mem_refs[name] = refs
 
         # Correlate references across functions to identify known tables
-        # 1. Find the most-referenced .data/.bss addresses
         from collections import Counter
-        all_refs: list[int] = []
-        for name, refs in fn_mem_refs.items():
-            all_refs.extend(refs)
 
-        ref_counter = Counter(all_refs)
+        # Filter out infrastructure addresses from all reference pools
+        def _filter_infra(refs: list[int]) -> list[int]:
+            return [r for r in refs if r not in _INFRASTRUCTURE_ADDRS]
 
-        # 2. Identify known tables by correlating with function names
+        # Identify known tables by correlating with function names
         memory_offsets: dict = {}
 
         # Functions that should access var_name table
-        var_name_fns = [n for n in fn_mem_refs
-                        if "varname" in n or "varlabel" in n]
+        var_name_fns = {n: _filter_infra(refs)
+                        for n, refs in fn_mem_refs.items()
+                        if "varname" in n or "varlabel" in n}
         if var_name_fns:
             # Find the most common reference among these
             common_targets: Counter = Counter()
-            for fn in var_name_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in var_name_fns.items():
+                common_targets.update(refs)
             if common_targets:
                 most_common = common_targets.most_common(1)[0]
                 memory_offsets["var_name_table"] = {
                     "vaddr": most_common[0],
                     "stride": 96,  # known from empirical analysis
-                    "confidence": min(1.0, most_common[1] / len(var_name_fns)),
+                    "confidence": min(1.0, most_common[1] / max(len(var_name_fns), 1)),
                 }
 
         # Functions that should access var_type table
-        var_type_fns = [n for n in fn_mem_refs
-                        if "vartype" in n or "varformat" in n]
+        var_type_fns = {n: _filter_infra(refs)
+                        for n, refs in fn_mem_refs.items()
+                        if "vartype" in n or "varformat" in n}
         if var_type_fns:
             common_targets = Counter()
-            for fn in var_type_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in var_type_fns.items():
+                common_targets.update(refs)
             if common_targets:
-                # Exclude the already-identified var_name table
-                known = memory_offsets.get("var_name_table", {}).get("vaddr")
+                known = {memory_offsets.get(k, {}).get("vaddr")
+                         for k in ("var_name_table",)}
                 candidates = [(t, c) for t, c in common_targets.most_common(5)
-                              if t != known]
+                              if t not in known]
                 if candidates:
                     memory_offsets["var_type_table"] = {
                         "vaddr": candidates[0][0],
                         "stride": 2,
-                        "confidence": min(1.0, candidates[0][1] / len(var_type_fns)),
+                        "confidence": min(1.0, candidates[0][1] / max(len(var_type_fns), 1)),
                     }
 
         # Functions that should access scalar table
-        scalar_fns = [n for n in fn_mem_refs
-                      if "numscalar" in n or "strscalar" in n]
+        scalar_fns = {n: _filter_infra(refs)
+                      for n, refs in fn_mem_refs.items()
+                      if "numscalar" in n or "strscalar" in n}
         if scalar_fns:
             common_targets = Counter()
-            for fn in scalar_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in scalar_fns.items():
+                common_targets.update(refs)
             if common_targets:
                 known = {memory_offsets.get(k, {}).get("vaddr")
                          for k in ("var_name_table", "var_type_table")}
@@ -2178,16 +2189,17 @@ class StataBinary:
                 if candidates:
                     memory_offsets["scalar_table"] = {
                         "vaddr": candidates[0][0],
-                        "confidence": min(1.0, candidates[0][1] / len(scalar_fns)),
+                        "confidence": min(1.0, candidates[0][1] / max(len(scalar_fns), 1)),
                     }
 
         # Functions that should access macro table
-        macro_fns = [n for n in fn_mem_refs
-                     if "macroexpand" in n or "global" in n]
+        macro_fns = {n: _filter_infra(refs)
+                     for n, refs in fn_mem_refs.items()
+                     if "macroexpand" in n or "global" in n}
         if macro_fns:
             common_targets = Counter()
-            for fn in macro_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in macro_fns.items():
+                common_targets.update(refs)
             if common_targets:
                 known = {memory_offsets.get(k, {}).get("vaddr")
                          for k in ("var_name_table", "var_type_table",
@@ -2197,16 +2209,17 @@ class StataBinary:
                 if candidates:
                     memory_offsets["macro_table"] = {
                         "vaddr": candidates[0][0],
-                        "confidence": min(1.0, candidates[0][1] / len(macro_fns)),
+                        "confidence": min(1.0, candidates[0][1] / max(len(macro_fns), 1)),
                     }
 
         # Functions that should access value label table
-        vl_fns = [n for n in fn_mem_refs
-                  if n.startswith("_bist_vl")]
+        vl_fns = {n: _filter_infra(refs)
+                  for n, refs in fn_mem_refs.items()
+                  if n.startswith("_bist_vl")}
         if vl_fns:
             common_targets = Counter()
-            for fn in vl_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in vl_fns.items():
+                common_targets.update(refs)
             if common_targets:
                 known = {memory_offsets.get(k, {}).get("vaddr")
                          for k in memory_offsets}
@@ -2215,18 +2228,17 @@ class StataBinary:
                 if candidates:
                     memory_offsets["valuelabel_table"] = {
                         "vaddr": candidates[0][0],
-                        "confidence": min(1.0, candidates[0][1] / len(vl_fns)),
+                        "confidence": min(1.0, candidates[0][1] / max(len(vl_fns), 1)),
                     }
 
         # Look for c(maxvar) / max_vars location
-        # Common patterns: functions that reference a global with value 32767
-        # nearby in code
-        max_vars_fns = [n for n in fn_mem_refs
-                        if "k" in n or "nvar" in n]
+        max_vars_fns = {n: _filter_infra(refs)
+                        for n, refs in fn_mem_refs.items()
+                        if "k" in n or "nvar" in n}
         if max_vars_fns:
             common_targets = Counter()
-            for fn in max_vars_fns:
-                common_targets.update(fn_mem_refs[fn])
+            for fn, refs in max_vars_fns.items():
+                common_targets.update(refs)
             if common_targets:
                 known = {memory_offsets.get(k, {}).get("vaddr")
                          for k in memory_offsets}
