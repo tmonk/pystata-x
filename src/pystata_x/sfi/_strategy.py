@@ -1119,7 +1119,7 @@ class _WindowsStrategy(_X86Strategy):
         stored in a base-256 packed integer. Decoding reverses this:
         (byte - 1) becomes the 0-based index into the alphabet.
         """
-        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/"
+        alphabet = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/"
         chunk_size = 5  # 5 chars per chunk avoids double precision loss (< 2.7e11)
         result_chars = []
         for chunk in range(6):  # Up to 30 characters (6 groups of 5)
@@ -1200,39 +1200,35 @@ class _WindowsStrategy(_X86Strategy):
                 self._exe(f'capture drop __px_tmp')
                 self._exe(f'gen double __px_tmp = {vn}[{obs}]')
                 self._exe(f'capture drop __px_fmt')
-                self._exe(f'gen str32 __px_fmt = string(__px_tmp[1],"{fmt}")')
+                # Strip non-format chars (like 'c' for comma display)
+                clean_fmt = fmt.rstrip('c')
+                self._exe(f'gen str32 __px_fmt = string(__px_tmp[1],"{clean_fmt}")')
                 formatted = self.read_encoded_str('__px_fmt[1]', obs=1)
                 if formatted:
                     return formatted
             return str(val)
 
+    def _gen_from_str(self, varname: str, src_str: str) -> str:
+        """Helper: gen a str var then read_encoded_str from it."""
+        self._exe('capture drop __px_gs')
+        self._exe(f'gen str2000 __px_gs = {src_str}')
+        return self.read_encoded_str(f'{varname}[1]', obs=1)
+
     def macro_expand(self, name: str) -> str:
         """Expand a Stata global/local macro via StataExecute + encoding."""
         if name.startswith('$'):
             name = name[1:]
-        self._exe('capture drop __px_tmp')
-        self._exe(f'gen str2045 __px_tmp = "${{{name}}}"')
-        return self.read_encoded_str('__px_tmp[1]', obs=1)
+        return self._gen_from_str('__px_gs', f'"${name}"')
 
     def get_macro_global(self, name: str) -> str:
         """Read a global Stata macro via StataExecute + encoding."""
         if name.startswith('c(') and name.endswith(')'):
-            # c() values: use display
-            self._exe(f'capture drop __px_tmp')
-            self._exe(f'gen str2000 __px_tmp = "`={name}\'"')
-            result = self.read_encoded_str('__px_tmp[1]', obs=1)
-            if result:
-                return result
-            return ''
-        self._exe('capture drop __px_tmp')
-        self._exe(f'gen str2000 __px_tmp = "${{{name}}}"')
-        return self.read_encoded_str('__px_tmp[1]', obs=1)
+            return self._gen_from_str('__px_gs', f'`={name}\'')
+        return self._gen_from_str('__px_gs', f'"${name}"')
 
     def get_macro_local(self, name: str) -> str:
         """Read a local Stata macro via StataExecute + encoding."""
-        self._exe('capture drop __px_tmp')
-        self._exe(f'gen str2000 __px_tmp = "`{name}\'"')
-        return self.read_encoded_str('__px_tmp[1]', obs=1)
+        return self._gen_from_str('__px_gs', f'"`{name}\'"')
 
     def set_macro_global(self, name: str, value: str) -> None:
         """Set a global macro."""
