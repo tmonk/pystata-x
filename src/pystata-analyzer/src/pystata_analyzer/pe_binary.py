@@ -133,6 +133,65 @@ class PEStata:
         self.thin_wrappers = wrappers
         self.dispatch_ids = sorted(set(w['dispatch_id'] for w in wrappers))
 
+    # ── Export table parsing ──
+    def _exports_by_name(self) -> list[tuple[str, int, int]]:
+        """Parse PE export table, return [(name, ordinal, rva), ...]."""
+        d = self.data
+        e_lfanew = struct.unpack('<I', d[0x3c:0x40])[0]
+        pe = d[e_lfanew:e_lfanew+0x200]
+        num_sections = struct.unpack('<H', pe[6:8])[0]
+        opt_hdr_size = struct.unpack('<H', pe[20:22])[0]
+        data_dir_offset = e_lfanew + 24 + opt_hdr_size
+
+        # Export directory is first data directory
+        export_rva = struct.unpack('<I', d[data_dir_offset:data_dir_offset+4])[0]
+        export_size = struct.unpack('<I', d[data_dir_offset+4:data_dir_offset+8])[0]
+
+        if export_rva == 0 or export_size == 0:
+            return []
+
+        # Find section containing export dir
+        sec = self.pe
+        for s in self.pe.sections:
+            if s['va'] <= export_rva < s['va'] + s['vsize']:
+                export_off = export_rva - s['va'] + s['raw_offset']
+                break
+        else:
+            return []
+
+        # Parse export table
+        ord_base = struct.unpack('<I', d[export_off+16:export_off+20])[0]
+        num_funcs = struct.unpack('<I', d[export_off+20:export_off+24])[0]
+        num_names = struct.unpack('<I', d[export_off+24:export_off+28])[0]
+        funcs_rva = struct.unpack('<I', d[export_off+28:export_off+32])[0]
+        names_rva = struct.unpack('<I', d[export_off+32:export_off+36])[0]
+        ords_rva = struct.unpack('<I', d[export_off+36:export_off+40])[0]
+
+        def rva_to_file(rva):
+            for s in self.pe.sections:
+                if s['va'] <= rva < s['va'] + s.get('raw_size', s['vsize']):
+                    return rva - s['va'] + s['raw_offset']
+            return None
+
+        names_off = rva_to_file(names_rva)
+        ords_off = rva_to_file(ords_rva)
+        funcs_off = rva_to_file(funcs_rva)
+
+        if None in (names_off, ords_off, funcs_off):
+            return []
+
+        exports = []
+        for i in range(num_names):
+            name_rva = struct.unpack('<I', d[names_off + i*4:names_off + i*4 + 4])[0]
+            name_off = rva_to_file(name_rva)
+            if name_off is None:
+                continue
+            name = d[name_off:d.index(b'\x00', name_off)].decode('utf-8', errors='replace')
+            ordinal = struct.unpack('<H', d[ords_off + i*2:ords_off + i*2 + 2])[0]
+            func_rva = struct.unpack('<I', d[funcs_off + ordinal*4:funcs_off + ordinal*4 + 4])[0]
+            exports.append((name, ordinal + ord_base, func_rva))
+        return exports
+
     # ── Memory discovery via DLL loading ──
     def discover_memory_offsets(self, dll_handle: int):
         """Discover memory offsets by loading DLL and scanning for known values.
@@ -170,23 +229,29 @@ class PEStata:
 
         Returns dict matching the v3 manifest format.
         """
+        # Include StataSO exports as symbols
+        symbols = {}
+        try:
+            exports = self._exports_by_name()
+            for name, ordinal, rva in exports:
+                if 'StataSO' in name:
+                    symbols[name] = rva
+        except Exception:
+            pass
+
+        # Add dispatch thin wrappers as symbols
+        for w in getattr(self, 'thin_wrappers', []):
+            name = f"_bist_dispatch_{w['dispatch_id']}"
+            symbols[name] = w['rva']
+
         manifest = {
             'format_version': 3,
             'platform': 'windows-x86_64',
             'sha256': self.sha256,
             'analysis_date': __import__('datetime').datetime.now().isoformat(),
-            'binary': {
-                'path': os.path.basename(self.path),
-                'size': len(self.data),
-                'sha256': self.sha256,
-            },
-            'dispatch_table': {
-                'main_dispatcher_rva': self.main_dispatcher,
-                'num_callers': self.dispatcher_count,
-                'num_thin_wrappers': len(self.thin_wrappers),
-                'dispatch_ids': self.dispatch_ids,
-            },
-            'memory_discovery': {},
+            'symbols': symbols,
+            'dispatch_vaddr': self.main_dispatcher or 0,
+            'dispatch_entries': [w['rva'] for w in getattr(self, 'thin_wrappers', [])],
         }
         if dll_handle:
             offsets = self.discover_memory_offsets(dll_handle)

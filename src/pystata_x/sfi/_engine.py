@@ -122,7 +122,11 @@ def _find_lib() -> str:
     elif sys.platform in ("linux", "linux2"):
         candidates = ["/usr/local/stata19/libstata-se.so"]
     elif sys.platform == "win32":
-        candidates = ["C:\\Program Files\\StataNow\\libstata-se.dll"]
+        candidates = [
+            "C:\\Program Files\\StataNow19\\se-64.dll",
+            "C:\\Program Files\\StataNow\\se-64.dll",
+            "C:\\Program Files\\StataNow\\libstata-se.dll",
+        ]
     else:
         candidates = []
     for p in candidates:
@@ -534,20 +538,37 @@ def initialize():
     except (ImportError, AttributeError):
         pass
 
+    # On Windows, use WinDLL; on Unix use CDLL
     if _LIB is None:
-        _LIB = ctypes.CDLL(lib_path)
+        if sys.platform == "win32":
+            _LIB = ctypes.WinDLL(lib_path)
+        else:
+            _LIB = ctypes.CDLL(lib_path)
 
     # Ensure symbol table is populated
     _ensure_symbols(lib_path)
 
     # Compute base address: _BASE = st_main - st_main_vmaddr
-    # ELF scanner stores StataSO_Main (no underscore); shipped manifest
-    # has _StataSO_Main (Mach-O convention).  Try both.
     main_vmaddr = _sym_addr("_StataSO_Main")
     if main_vmaddr is None:
         main_vmaddr = _sym_addr("StataSO_Main")
     if main_vmaddr is None:
-        raise RuntimeError("StataSO_Main not found in symbol table")
+        # Windows: StataSO_Main is a PE export, get RVA from manifest or exports
+        if sys.platform == "win32":
+            try:
+                from pystata_analyzer.pe_binary import PEStata
+                pe = PEStata(lib_path)
+                pe.analyze()
+                manifest = pe.generate_manifest()
+                # Get export table info containing StataSO_Main
+                for name, ordinal, rva in pe._exports_by_name():
+                    if name == 'StataSO_Main':
+                        main_vmaddr = rva
+                        break
+            except ImportError:
+                pass
+        if main_vmaddr is None:
+            raise RuntimeError("StataSO_Main not found in symbol table")
     st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
     _BASE = st_main - main_vmaddr
 
@@ -558,9 +579,14 @@ def initialize():
             ctypes.c_int,
             ctypes.POINTER(ctypes.c_char_p),
         ]
-        av = (ctypes.c_char_p * 2)(b"", None)
-        ret = _LIB.StataSO_Main(1, av)
-        if ret not in (0, 1):
+        # On Windows, use -q flag to suppress splash
+        if sys.platform == "win32":
+            av = (ctypes.c_char_p * 2)(b"stata", b"-q")
+            ret = _LIB.StataSO_Main(2, av)
+        else:
+            av = (ctypes.c_char_p * 2)(b"", None)
+            ret = _LIB.StataSO_Main(1, av)
+        if ret not in (0, 1) and ret != -7100:
             raise RuntimeError(f"StataSO_Main returned {ret}")
 
     # Set up output buffer and execute (needed for wrappers, not for _bist_*)
