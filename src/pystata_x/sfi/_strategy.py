@@ -1134,8 +1134,8 @@ class _WindowsStrategy(_X86Strategy):
             expr = " + ".join(terms)
             # Store via scalar intermediate (bypasses expression-in-scratch issue)
             self._exe(f'scalar __px_enc_c{chunk} = {expr}')
-            self._exe('capture drop __px_tmp')
-            self._exe(f'gen double __px_tmp = __px_enc_c{chunk}')
+            self._exe('capture drop __px_enc_d')
+            self._exe(f'gen double __px_enc_d = __px_enc_c{chunk}')
             raw_val = self._scratch_read_double()
             if raw_val is None or raw_val <= 0:
                 break
