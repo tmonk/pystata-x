@@ -394,6 +394,7 @@ class StataBinary:
         Instead we discover:
         - Main bytecode dispatcher via call-target frequency
         - Thin wrappers (mov eax, <id>; call dispatcher)
+        - Export table (StataSO_* functions)
         - Memory offsets via gws pointer discovery in .data section
         """
         try:
@@ -411,6 +412,14 @@ class StataBinary:
                 name = f"_bist_dispatch_{did}"
                 self._symbols[name] = rva
                 self._dispatch_entries.append(rva)
+
+            # Also register PE exports (StataSO_*) as symbols
+            try:
+                for name, ordinal, rva in self._pe._exports_by_name():
+                    if 'StataSO' in name:
+                        self._symbols[name] = rva
+            except Exception:
+                pass
 
             self._dispatch_entries.sort()
         except ImportError:

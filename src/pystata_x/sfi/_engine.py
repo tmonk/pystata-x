@@ -553,24 +553,24 @@ def initialize():
     if main_vmaddr is None:
         main_vmaddr = _sym_addr("StataSO_Main")
     if main_vmaddr is None:
-        # Windows: StataSO_Main is a PE export, get RVA from manifest or exports
         if sys.platform == "win32":
+            # On Windows, StataSO_Main is a PE export. Compute BASE directly.
             try:
-                from pystata_analyzer.pe_binary import PEStata
-                pe = PEStata(lib_path)
-                pe.analyze()
-                manifest = pe.generate_manifest()
-                # Get export table info containing StataSO_Main
-                for name, ordinal, rva in pe._exports_by_name():
-                    if name == 'StataSO_Main':
-                        main_vmaddr = rva
-                        break
-            except ImportError:
+                kernel32 = ctypes.windll.kernel32
+                kernel32.GetProcAddress.restype = ctypes.c_void_p
+                st_main = kernel32.GetProcAddress(
+                    ctypes.c_void_p(_LIB._handle), b'StataSO_Main')
+                if st_main:
+                    _BASE = st_main  # Use the actual function address as base
+            except Exception:
                 pass
-        if main_vmaddr is None:
+        if main_vmaddr is None and _BASE == 0:
             raise RuntimeError("StataSO_Main not found in symbol table")
-    st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
-    _BASE = st_main - main_vmaddr
+        else:
+            main_vmaddr = _BASE if _BASE != 0 else 0
+    if _BASE == 0:
+        st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
+        _BASE = st_main - main_vmaddr
 
     # Init engine if needed (no -pyexec!)
     if not already_inited:
