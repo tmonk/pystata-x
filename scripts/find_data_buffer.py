@@ -1,6 +1,5 @@
-"""Understand data buffer layout relative to .data section.
-The sentinel is at data+0x922c00 with 1 var + 1 obs.
-Vary the dataset size to see how the data buffer shifts."""
+"""Understand data buffer layout on Windows.
+Sentinel is at data+0x922C00 for tiny datasets. Find it for larger ones."""
 import ctypes
 import struct
 
@@ -29,9 +28,9 @@ for i in range(num_sections):
         break
 data_ptr = handle + data_rva
 print('data_ptr:', hex(data_ptr))
+gws_off = 0x211644 - 0x68  # 0x2115DC
 
 def find_sentinel_in_data(dll, data_ptr, data_vsize, sentinel_val):
-    """Search .data section for a double value, return offset or None."""
     s_bytes = struct.pack('<d', sentinel_val)
     chunk_size = 256 * 1024
     for chunk_start in range(0, data_vsize, chunk_size):
@@ -40,77 +39,137 @@ def find_sentinel_in_data(dll, data_ptr, data_vsize, sentinel_val):
         try:
             ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur_size)
         except:
-            return None  # Access violation (trying to read beyond real committed pages)
+            return None
         chunk_raw = bytes(buf)
         idx = chunk_raw.find(s_bytes)
         if idx >= 0:
             return chunk_start + idx
     return None
 
+def search_gws_for_val(dll, data_ptr, data_vsize, gws_off, target_val, search_radius=65536):
+    """Search vicinity of gws for a pointer containing target_val."""
+    read_start = max(0, gws_off - search_radius)
+    read_size = min(data_vsize - read_start, search_radius * 2)
+    buf = (ctypes.c_char * read_size)()
+    ctypes.memmove(buf, ctypes.c_void_p(data_ptr + read_start), read_size)
+    raw = bytes(buf)
+    matches = []
+    for j in range(0, len(raw) - 8, 8):
+        ptr = struct.unpack('<Q', raw[j:j+8])[0]
+        if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
+            continue
+        if handle <= ptr < handle + 0x04000000:
+            continue
+        try:
+            test_buf = (ctypes.c_double * 1)()
+            ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
+            if abs(test_buf[0] - target_val) < 0.0001:
+                abs_off = read_start + j
+                matches.append((abs_off, ptr))
+        except:
+            pass
+    return matches
+
+# Test 1: tiny dataset
 print('\n=== Test 1: 1 var, 1 obs ===')
 dll.StataSO_Execute(b'clear')
 dll.StataSO_Execute(b'set obs 1')
-dll.StataSO_Execute(b'gen double __px_sentinel = 12345.6789')
+dll.StataSO_Execute(b'gen double __px_a = 12345.6789')
 off1 = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
-print('  sentinel at data+%x' % off1)
-# nvar
-nv_buf = (ctypes.c_int * 1)()
-ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-print('  nvar:', nv_buf[0])
-# Read nearby - what's around the sentinel?
-buf = (ctypes.c_char * 256)()
-ctypes.memmove(buf, ctypes.c_void_p(data_ptr + off1 - 64), 256)
-raw = bytes(buf)
-for k in range(0, 256, 8):
-    val = struct.unpack('<d', raw[k:k+8])[0]
-    val_int = struct.unpack('<Q', raw[k:k+8])[0]
-    marker = ' <-- SENTINEL' if k == 64 else ''
-    addr = data_ptr + off1 - 64 + k
-    print('  [%s] %.1f (0x%x)%s' % ('%+d' % (k - 64), val, val_int, marker))
+print('  data+%s (1 obs)' % ('None' if off1 is None else hex(off1)))
 
+# Test 2: medium dataset
 print('\n=== Test 2: 3 vars, 2 obs ===')
 dll.StataSO_Execute(b'clear')
 dll.StataSO_Execute(b'set obs 2')
-dll.StataSO_Execute(b'gen double __px_a = 12345.6789')
-dll.StataSO_Execute(b'gen double __px_b = 112233.4455')
-dll.StataSO_Execute(b'gen double __px_c = 998877.6655')
+dll.StataSO_Execute(b'gen double __px_a = 1111.2222')
+dll.StataSO_Execute(b'gen double __px_b = 3333.4444')
+dll.StataSO_Execute(b'gen double __px_c = 5555.6666')
+for label, val in [('a', 1111.2222), ('b', 3333.4444), ('c', 5555.6666)]:
+    off = find_sentinel_in_data(dll, data_ptr, data_vsize, val)
+    if off is not None:
+        print('  __px_%s at data+%s (IN .data)' % (label, hex(off)))
+    else:
+        print('  __px_%s NOT in .data (must be in heap)' % label)
+        matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, val)
+        if matches:
+            for moff, mptr in matches:
+                print('    Found via gws_vic+%x -> ptr=%x' % (moff, mptr))
+        else:
+            print('    Not found via gws vicinity either')
 
-off2a = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
-off2b = find_sentinel_in_data(dll, data_ptr, data_vsize, 112233.4455)
-off2c = find_sentinel_in_data(dll, data_ptr, data_vsize, 998877.6655)
-print('  sentinel_a at data+%s' % ('None' if off2a is None else hex(off2a)))
-print('  sentinel_b at data+%s' % ('None' if off2b is None else hex(off2b)))
-print('  sentinel_c at data+%s' % ('None' if off2c is None else hex(off2c)))
-if None not in (off2a, off2b, off2c):
-    print('  deltas: a-c=%d obs stride=%d' % (off2a - off2c, off2a - off2b))
-
-# nvar
-ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-print('  nvar:', nv_buf[0])
-
-print('\n=== Test 3: 1 var, 5 obs ===')
+# Test 3: larger dataset
+print('\n=== Test 3: 12 vars, 74 obs (auto) ===')
 dll.StataSO_Execute(b'clear')
-dll.StataSO_Execute(b'set obs 5')
-dll.StataSO_Execute(b'gen double __px_sentinel = 12345.6789')
-off3 = find_sentinel_in_data(dll, data_ptr, data_vsize, 12345.6789)
-print('  sentinel at data+%x' % off3)
+dll.StataSO_Execute(b'sysuse auto, clear')
+print('  nvar:', struct.unpack('<I', bytes(
+    (ctypes.c_int * 1)()))[0] if False else 0)
+nv_buf = (ctypes.c_int * 1)()
 ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
 print('  nvar:', nv_buf[0])
 
-# Also try auto dataset
-print('\n=== Test 4: auto dataset ===')
+# Find price (first obs, first var = 4099)
+off = find_sentinel_in_data(dll, data_ptr, data_vsize, 4099.0)
+if off is not None:
+    print('  price(obs0) at data+%s (IN .data)' % hex(off))
+else:
+    print('  price(obs0) NOT in .data (must be in heap)')
+    matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, 4099.0)
+    if matches:
+        for moff, mptr in matches[:5]:
+            print('    Found via gws_vic+%x -> ptr=%x' % (moff, mptr))
+    else:
+        print('    Not found via gws vicinity either')
+
+# Test 4: huge search - find the data buffer by searching ALL .data for heap pointers
+print('\n=== Test 4: Search ALL .data section for heap ptrs to var values ===')
 dll.StataSO_Execute(b'clear')
-rc = dll.StataSO_Execute(b'sysuse auto, clear')
-print('  sysuse rc:', rc)
-ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + 0x211644), 4)
-print('  nvar:', nv_buf[0])
+dll.StataSO_Execute(b'sysuse auto, clear')
+# Use a unique value
+dll.StataSO_Execute(b'gen double __px_unique = 888888.9999')
+test_val = 888888.9999
 
-# Where is price (var 1) for obs 0? It should be 4099.
-off_price = find_sentinel_in_data(dll, data_ptr, data_vsize, 4099.0)
-off_mpg = find_sentinel_in_data(dll, data_ptr, data_vsize, 22.0)
-print('  price (4099) at data+%s' % ('None' if off_price is None else hex(off_price)))
-print('  mpg (22) at data+%s' % ('None' if off_mpg is None else hex(off_mpg)))
-if off_price and off_mpg:
-    print('  delta price-mpg: %d' % (off_price - off_mpg))
+# Check if in .data
+off = find_sentinel_in_data(dll, data_ptr, data_vsize, test_val)
+print('  __px_unique in .data:', off is not None, 'at' if off else '', hex(off) if off else '')
+if off is None:
+    # It's in heap. Find the data buffer pointer.
+    print('  Searching gws vicinity for the pointer...')
+    matches = search_gws_for_val(dll, data_ptr, data_vsize, gws_off, test_val, 65536*4)
+    if matches:
+        for moff, mptr in matches:
+            print('    FOUND at .data+%x: ptr=%x' % (moff, mptr))
+            print('    RVA:', hex(mptr - handle))
+    else:
+        print('  NOT found in gws vicinity. Trying FULL .data scan...')
+        # Full scan of .data for heap pointers
+        s_bytes = struct.pack('<d', test_val)
+        count = 0
+        for chunk_start in range(0, data_vsize, 65536):
+            cur = min(65536, data_vsize - chunk_start)
+            buf = (ctypes.c_char * cur)()
+            try:
+                ctypes.memmove(buf, ctypes.c_void_p(data_ptr + chunk_start), cur)
+            except:
+                continue
+            raw = bytes(buf)
+            for j in range(0, len(raw) - 8, 8):
+                ptr = struct.unpack('<Q', raw[j:j+8])[0]
+                if ptr < 0x10000 or ptr > 0x7FFFFFFFFFFF:
+                    continue
+                if handle <= ptr < handle + 0x04000000:
+                    continue
+                try:
+                    test_buf = (ctypes.c_double * 1)()
+                    ctypes.memmove(test_buf, ctypes.c_void_p(ptr), 8)
+                    if abs(test_buf[0] - test_val) < 0.0001:
+                        print('    FOUND at .data+%x: ptr=%x (RVA: %x)' 
+                              % (chunk_start + j, ptr, ptr - handle))
+                        count += 1
+                        if count >= 3:
+                            break
+            if count >= 3:
+                break
+        print('  Total matches:', count)
 
 print('\nDone')
