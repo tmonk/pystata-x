@@ -218,8 +218,15 @@ class _BaseStrategy:
     def macro_expand(self, name: str) -> str:
         return call_string("_bist_macroexpand", name.encode())
 
-    def get_temp_name(self, prefix: str) -> str:
-        return call_string("_bist_dir", b"tmp", prefix.encode())
+    def get_temp_name(self, prefix: str = '') -> str:
+        """Get a temp name from Stata (prefix used if provided)."""
+        pfx = prefix if prefix else 'px'
+        self._exe(b'capture local __px_tn : di "' + pfx.encode() + b'" + string(floor(runiform()*1e12))')
+        self._exe(b'capture drop __px_tmp')
+        self._exe(b'gen str2000 __px_tmp = "' + b'\x60' + b'__px_tn' + b"'" + b'"')
+        return self.read_encoded_str('__px_tmp[1]', obs=1)
+
+
 
     # ── Matrix operations ──
     def matrix_get_names(self) -> list:
@@ -1258,8 +1265,10 @@ class _WindowsStrategy(_X86Strategy):
 
     def get_temp_name(self, prefix: str = '') -> str:
         """Get a temp name from Stata (prefix used if provided)."""
+        pfx = prefix if prefix else 'px'
+        self._exe('capture local __px_tn : di "' + pfx + '" + string(floor(runiform()*1e12))')
         self._exe(b'capture drop __px_tmp')
-        self._exe(b'gen str2000 __px_tmp = "`=tempname(1)\'"')
+        self._exe(b'capture gen str2000 __px_tmp = "\x60__px_tn\x27"')
         return self.read_encoded_str('__px_tmp[1]', obs=1)
 
     def get_max_vars(self) -> int:
