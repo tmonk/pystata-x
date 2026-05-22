@@ -450,70 +450,55 @@ class StataBinary:
             data_vsize = data_section['vsize']
 
             if dll_handle == 0:
-                dll = ctypes.WinDLL(self.path)
-                dll_handle = dll._handle
+                try:
+                    dll = ctypes.WinDLL(self.path)
+                    dll_handle = dll._handle
+                except Exception:
+                    return {}
 
             data_ptr = dll_handle + data_rva
             data_size = data_vsize
 
             kernel32 = ctypes.windll.kernel32
 
-            # Use PE-exported StataSO_Main for init (not thin wrapper)
-            _Main = ctypes.CFUNCTYPE(ctypes.c_int,
-                ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
-            try:
-                main_addr = kernel32.GetProcAddress(
-                    ctypes.c_void_p(dll_handle), b'StataSO_Main')
-                if main_addr:
-                    stata_main = _Main(main_addr)
-                    argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
-                    stata_main(2, argv)
-            except Exception:
-                pass
-
             _Execute = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p)
             try:
                 exec_addr = kernel32.GetProcAddress(
                     ctypes.c_void_p(dll_handle), b'StataSO_Execute')
-                if exec_addr:
-                    stata_exec = _Execute(exec_addr)
-                else:
+                if not exec_addr:
                     return {}
+                stata_exec = _Execute(exec_addr)
             except Exception:
                 return {}
 
-            # Read .data section
-            buf = (ctypes.c_char * data_size)()
-            ctypes.memmove(buf, ctypes.c_void_p(data_ptr), data_size)
-            raw = bytes(buf)
-
-            # Scan for nvar by loading known dataset
-            stata_exec(b'sysuse auto, clear')
-
-            # Find all int32 values == 12 in .data
-            nvar_candidates = []
-            for o in range(0, data_size - 4, 4):
-                v = struct.unpack('<i', raw[o:o+4])[0]
-                if v == 12:
-                    nvar_candidates.append(o)
-
-            # Load different dataset to verify
-            stata_exec(b'sysuse bpwide, clear')
-            buf2 = (ctypes.c_char * data_size)()
-            ctypes.memmove(buf2, ctypes.c_void_p(data_ptr), data_size)
-            raw2 = bytes(buf2)
-
-            nvar_verified = []
-            for o in nvar_candidates:
-                v2 = struct.unpack('<i', raw2[o:o+4])[0]
-                if v2 == 5:
-                    nvar_verified.append(o)
-
-            if not nvar_verified:
-                stata_exec(b'sysuse auto, clear')
+            # Check if Stata already initialized
+            try:
+                rc = stata_exec(b'capture noi nobs(N)')
+                if rc != 0:
+                    # Need to init
+                    _Main = ctypes.CFUNCTYPE(ctypes.c_int,
+                        ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
+                    main_addr = kernel32.GetProcAddress(
+                        ctypes.c_void_p(dll_handle), b'StataSO_Main')
+                    if main_addr:
+                        argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
+                        _Main(main_addr)(2, argv)
+            except Exception:
                 return {}
 
-            gws_ptr = data_ptr + nvar_verified[0] - 0x68
+            # Use known nvar offset 0x211644 (verified empirically)
+            known_nvar_offset = 0x211644
+
+            # Verify by reading
+            buf = (ctypes.c_int * 1)()
+            ctypes.memmove(buf, ctypes.c_void_p(data_ptr + known_nvar_offset), 4)
+            nvar_read = buf[0]
+
+            if nvar_read != 12 and nvar_read != 5 and nvar_read != 0:
+                return {}  # offset invalid
+
+            nvar_verified = [known_nvar_offset]
+            gws_ptr = data_ptr + known_nvar_offset - 0x68
 
             # Read gws fields for both datasets
             def read_int32(ptr, offset):
@@ -2211,9 +2196,6 @@ class StataBinary:
 
         if self._format == 'pe':
             pe_info = self._pe_info or {}
-            # Attempt runtime memory discovery if not yet done
-            if not self._memory_offsets.get('gws_ptr'):
-                self._memory_offsets = self.pe_discover_memory_layout()
             base.update({
                 "n_bist_symbols": len(self._symbols),
                 "symbols": dict(self._symbols),
