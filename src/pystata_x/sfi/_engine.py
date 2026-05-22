@@ -173,12 +173,20 @@ def _ensure_symbols(lib_path: str) -> None:
 
     fhash = _file_sha256(lib_path)
 
+    def _has_main_sym(syms):
+        """Check if symbols contain StataSO_Main."""
+        if any('StataSO_Main' in k for k in syms):
+            return True
+        # Windows: StataSO_Main is a PE export, not a symbol
+        if sys.platform == "win32":
+            return True
+        return False
+
     # Tier 1: Check shipped manifest.json (current directory)
     if _MANIFEST.get("sha256") == fhash:
         _SYMS.clear()
         _SYMS.update(_MANIFEST.get("symbols", {}))
-        _has_main = any('StataSO_Main' in k for k in _SYMS)
-        if _SYMS and _has_main:
+        if _SYMS or sys.platform == "win32":
             # Also update memory offsets if present
             _mem_offsets = _MANIFEST.get("memory_offsets") or {}
             if _mem_offsets:
@@ -196,9 +204,8 @@ def _ensure_symbols(lib_path: str) -> None:
                     _MANIFEST = mdata
                     _SYMS.clear()
                     _SYMS.update(mdata.get("symbols", {}))
-                    # Verify manifest has essential symbols before accepting
-                    _has_main = any('StataSO_Main' in k for k in _SYMS)
-                    if _SYMS and _has_main:
+                    # Accept manifest if it has symbols or on Windows
+                    if _SYMS or sys.platform == "win32":
                         # Also update data offsets from the cached manifest
                         _ddo_offsets = mdata.get("data_offsets") or {}
                         if _ddo_offsets.get("stack_ptr_delta"):
@@ -554,23 +561,22 @@ def initialize():
         main_vmaddr = _sym_addr("StataSO_Main")
     if main_vmaddr is None:
         if sys.platform == "win32":
-            # On Windows, StataSO_Main is a PE export. Compute BASE directly.
+            # On Windows, StataSO_Main is a PE export. Get address directly.
             try:
                 kernel32 = ctypes.windll.kernel32
                 kernel32.GetProcAddress.restype = ctypes.c_void_p
-                st_main = kernel32.GetProcAddress(
+                st_main_ptr = kernel32.GetProcAddress(
                     ctypes.c_void_p(_LIB._handle), b'StataSO_Main')
-                if st_main:
-                    _BASE = st_main  # Use the actual function address as base
+                if st_main_ptr:
+                    _BASE = st_main_ptr  # Actual DLL base on Windows
             except Exception:
                 pass
-        if main_vmaddr is None and _BASE == 0:
+        if _BASE == 0:
             raise RuntimeError("StataSO_Main not found in symbol table")
-        else:
-            main_vmaddr = _BASE if _BASE != 0 else 0
-    if _BASE == 0:
-        st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
-        _BASE = st_main - main_vmaddr
+    else:
+        if _BASE == 0:
+            st_main = ctypes.cast(_LIB.StataSO_Main, ctypes.c_void_p).value
+            _BASE = st_main - main_vmaddr
 
     # Init engine if needed (no -pyexec!)
     if not already_inited:
