@@ -49,7 +49,7 @@ for vi in range(1, min(6, nv + 1)):
     name = o['var_names'][vi - 1]
     for oi in [1, 2, no]:
         key = f'{name}_obs{oi}'
-        val = _STRATEGY.data_get(oi, vi)
+        val = _STRATEGY.data_get(vi, oi)
         if val is not None:
             data_reads[key] = val
 o['data_reads'] = data_reads

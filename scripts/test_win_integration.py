@@ -20,15 +20,15 @@ for i in range(1, 13):
     print(f'  var{i} {vn}: type={hex(vt)} fmt="{vf}"')
 
 print('\n=== Data ===')
-print('  price[1]:', _STRATEGY.data_get(1, 2))
+print('  price[1]:', _STRATEGY.data_get(2, 1))
 print('  price[2]:', _STRATEGY.data_get(2, 2))
-print('  mpg[1]:', _STRATEGY.data_get(1, 3))
-print('  trunk[1]:', _STRATEGY.data_get(1, 6))
+print('  mpg[1]:', _STRATEGY.data_get(3, 1))
+print('  trunk[1]:', _STRATEGY.data_get(6, 1))
 
 print('\n=== String ===')
 print('  make[1]:', repr(_STRATEGY.get_string(1, 1)))
-print('  price[1] formatted:', repr(_STRATEGY.get_string(1, 2)))
-print('  weight[1] formatted:', repr(_STRATEGY.get_string(1, 7)))
+print('  price[1] formatted:', repr(_STRATEGY.get_string(2, 1)))
+print('  weight[1] formatted:', repr(_STRATEGY.get_string(7, 1)))
 
 print('\n=== Scalar ===')
 _LIB.StataSO_Execute(b'scalar __px_test = 42.5')

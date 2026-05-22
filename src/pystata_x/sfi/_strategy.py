@@ -1045,10 +1045,10 @@ class _WindowsStrategy(_X86Strategy):
         val = self._scratch_read_double()
         return int(val) if val is not None else 0
 
-    def data_get(self, obs: int, var: int) -> float | None:
+    def data_get(self, varno: int, obs: int) -> float | None:
         """Read numeric variable value via scalar + gen + scratch buffer."""
         # Get variable name
-        vn = self.get_var_name(var)
+        vn = self.get_var_name(varno)
         if not vn:
             return None
         self._exe(f'scalar __px_val = {vn}[{obs}]')
@@ -1182,21 +1182,21 @@ class _WindowsStrategy(_X86Strategy):
         self._exe(f'gen str32 __px_tmp = "`__px_fmt\'"')
         return self.read_encoded_str('__px_tmp[1]', obs=1)
 
-    def get_string(self, obs: int, var: int) -> str:
+    def get_string(self, varno: int, obs: int) -> str:
         """Read a variable value as string."""
-        vn = self.get_var_name(var)
+        vn = self.get_var_name(varno)
         if not vn:
             return ''
-        vtype = self.get_var_type(var)
+        vtype = self.get_var_type(varno)
         if vtype == 0xF5:  # String variable
             self._exe(f'capture drop __px_tmp')
             self._exe(f'gen str2045 __px_tmp = {vn}[{obs}]')
             return self.read_encoded_str('__px_tmp[1]', obs=1)
         else:
-            val = self.data_get(obs, var)
+            val = self.data_get(varno, obs)
             if val is None:
                 return ''
-            fmt = self.get_var_format(var)
+            fmt = self.get_var_format(varno)
             if fmt:
                 self._exe(f'capture drop __px_tmp')
                 self._exe(f'gen double __px_tmp = {vn}[{obs}]')
