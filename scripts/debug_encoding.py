@@ -1,4 +1,4 @@
-"""Debug string reading: does gen str from string var work?"""
+"""Debug macro expansion."""
 import ctypes, json, sys
 sys.path.insert(0, 'src')
 
@@ -25,93 +25,67 @@ def scratch():
     ctypes.memmove(buf, ctypes.c_void_p(dll._handle + scratch_rva), 8)
     return buf[0]
 
-# Test: can we read make[1] by encoding it?
-print("=== Test: gen from make[1] ===")
+# Set a global macro
+rc = exe('global px_test_g = "hello_global"')
+print(f'global rc: {rc}')
+
+# Try to read it via display
 rc = exe('capture drop __px_t')
-rc = exe('gen str2045 __px_t = make[1]')
-print('gen rc:', rc)
+rc = exe('gen str2000 __px_t = "$px_test_g"')
+print(f'gen from $ rc: {rc}')
+print(f'  value: gen variable created')
 
-# Test encoding of first char
-alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/'
-pos = 1
-rc = exe(f'scalar __px_c = strpos("{alphabet}", substr(__px_t[1], {pos}, 1))')
-rc = exe('capture drop __px_t2')
-rc = exe('gen double __px_t2 = __px_c')
-code = scratch()
-print(f'char {pos}: strpos={code}')
-if code and int(code) > 0:
-    idx = int(code) - 2
-    if 0 <= idx < len(alphabet):
-        print(f'  decoded: "{alphabet[idx]}"')
+# Read it via encode
+alphabet = ' abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_%.-+#/'
+for chunk in range(2):
+    terms = []
+    for i in range(5):
+        p = chunk * 5 + i + 1
+        pw = 256 ** i
+        terms.append(f'cond(substr(__px_t[1], {p}, 1) == "", 0, (strpos("{alphabet}", substr(__px_t[1], {p}, 1)) + 1) * {pw})')
+    expr = ' + '.join(terms)
+    rc = exe(f'scalar __px_c{chunk} = {expr}')
+    if rc != 0: print(f'chunk {chunk} FAILED rc={rc}')
+    exe('capture drop __px_d')
+    exe(f'gen double __px_d = __px_c{chunk}')
+    val = scratch()
+    decoded = ''
+    raw_int = int(val)
+    for i in range(5):
+        b = (raw_int >> (i * 8)) & 0xFF
+        if b == 0: break
+        idx = b - 2
+        if 0 <= idx < len(alphabet): decoded += alphabet[idx]
+    print(f'  chunk {chunk}: decoded="{decoded}"')
 
-# Encode first 6 chars as single scalar
+# Try with display
+rc = exe('capture drop __px_t')
+rc = exe('gen str2000 __px_t = "": display "$px_test_g""')
+print(f'gen from display rc: {rc}')
+
+# Try di capture
+rc = exe('capture drop __px_t')
+rc = exe('gen str2000 __px_t = "`=c(level)\'"')
+rc = exe('capture drop __px_d')
+rc = exe('gen double __px_d = 1')
 terms = []
-for i in range(6):
+for i in range(2):
     p = i + 1
     pw = 256 ** i
     terms.append(f'cond(substr(__px_t[1], {p}, 1) == "", 0, (strpos("{alphabet}", substr(__px_t[1], {p}, 1)) + 1) * {pw})')
 expr = ' + '.join(terms)
-print(f'\nExpression length: {len(expr)}')
-rc = exe(f'scalar __px_c0 = {expr}')
-if rc != 0:
-    print('scalar chunk 0 FAILED, rc=', rc)
-else:
-    rc = exe('capture drop __px_t2')
-    rc = exe('gen double __px_t2 = __px_c0')
-    val = scratch()
-    print(f'chunk 0 encoded value: {val}')
-    if val and val > 0:
-        raw_int = int(val)
-        decoded = ''
-        for i in range(6):
-            b = (raw_int >> (i * 8)) & 0xFF
-            if b == 0:
-                break
-            idx = b - 2
-            if 0 <= idx < len(alphabet):
-                decoded += alphabet[idx]
-            else:
-                break
-        print(f'  decoded: "{decoded}"')
-
-# Second chunk
-terms = []
-for i in range(6):
-    p = 7 + i
-    pw = 256 ** i
-    terms.append(f'cond(substr(__px_t[1], {p}, 1) == "", 0, (strpos("{alphabet}", substr(__px_t[1], {p}, 1)) + 1) * {pw})')
-expr = ' + '.join(terms)
-print(f'\nExpression length: {len(expr)}')
-rc = exe(f'scalar __px_c1 = {expr}')
-if rc != 0:
-    print('scalar chunk 1 FAILED, rc=', rc)
-else:
-    # Need to gen to see the value
-    rc = exe('capture drop __px_t2')
-    rc = exe('gen double __px_t2 = __px_c1')
-    val = scratch()
-    print(f'chunk 1 encoded value: {val}')
-
-print('\n=== Test: gen from AMC Concord literal ===')
-rc = exe('capture drop __px_t')
-rc = exe('gen str2045 __px_t = "AMC Concord"')
-terms = []
-for i in range(6):
-    p = i + 1
-    pw = 256 ** i
-    terms.append(f'cond(substr(__px_t[1], {p}, 1) == "", 0, (strpos("{alphabet}", substr(__px_t[1], {p}, 1)) + 1) * {pw})')
-expr = ' + '.join(terms)
-rc = exe(f'scalar __px_c0 = {expr}')
-rc = exe('capture drop __px_t2')
-rc = exe('gen double __px_t2 = __px_c0')
+exe(f'scalar __px_c0 = {expr}')
+exe('capture drop __px_d')
+exe('gen double __px_d = __px_c0')
 val = scratch()
-decoded = ''
+print(f'c(level) encoded: {val}')
 raw_int = int(val)
-for i in range(6):
+decoded = ''
+for i in range(2):
     b = (raw_int >> (i * 8)) & 0xFF
     if b == 0: break
     idx = b - 2
     if 0 <= idx < len(alphabet): decoded += alphabet[idx]
-print(f'Direct literal: "{decoded}"')
+print(f'  decoded: "{decoded}"')
 
 print('\nDone')
