@@ -45,3 +45,6 @@ stata19-linux/manifests/
 /src/stata-fast/*.o
 /src/stata-fast/compile_check
 /src/stata-fast/test_stata_fast
+.DS_Store
+._*
+test-results/

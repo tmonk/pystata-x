@@ -30,5 +30,7 @@ def stata():
     from pystata_x.sfi._engine import execute
     yield execute, None
 
-    from pystata_x.sfi._engine import shutdown as eng_shutdown
-    eng_shutdown()
+    # NOTE: shutdown() is deliberately omitted here because it calls
+    # dlclose(StataSO) which SIGSEGVs on x86_64 (fixed in _engine.py
+    # but dlclose may still crash).  Python will unload the library
+    # naturally when the process exits, so shutdown is unnecessary.

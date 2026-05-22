@@ -167,7 +167,8 @@ def _x86_read_encoded_str(source_expr, obs, is_dataset=False):
         _LIB.StataSO_Execute(b"gen double __px_enc = .")
         idx = int(call_double("_bist_nvar"))
         raw_bytes = bytearray()
-        for chk in range(3):
+        # Read up to 2100 bytes (str2045 max) in 6-byte chunks
+        for chk in range(350):
             base = chk * 6
             terms = []
             for i in range(6):
@@ -1120,7 +1121,7 @@ class SFIToolkit:
         Uses executeCommand to format the value via Stata's string() function.
         """
         SFIToolkit.executeCommand(f'local __pv = string({value},{fmt})')
-        r = call_string('_bist_global', b'__pv')
+        r = Macro.getLocal('__pv')
         return r if r else ''
 
     @staticmethod
@@ -1138,7 +1139,7 @@ class SFIToolkit:
         for macro in ['level', 'N', 'g', 'rank', 'F', 'r2', 'rmse', 'mss', 'rss',
                        'N_missing', 'N_sumW', 'k', 'df_r', 'df_m', 'll', 'N_clust',
                        'title', 'depvar', 'cmd', 'predict', 'model']:
-            r = call_string('_bist_global', f'{cat}({macro})'.encode())
+            r = Macro.getGlobal(f'{cat}({macro})')
             if r:
                 results.append((macro, r))
         return results
@@ -1176,8 +1177,8 @@ class SFIToolkit:
 
     @staticmethod
     def getWorkingDir() -> str:
-        """Get working directory via _bist_c_local."""
-        r = call_string("_bist_c_local", b'c(pwd)')
+        """Get working directory via Macro.getGlobal."""
+        r = Macro.getGlobal('c(pwd)')
         if r:
             return r.strip()
         return os.getcwd()
@@ -1230,7 +1231,7 @@ class SFIToolkit:
         """
         if not s:
             return "_" if prefix else ""
-        result = "".join(c for c in s if c.isalnum())
+        result = "".join(c for c in s if c.isalnum() or c == '_')
         if not result:
             return "_" if prefix else "x"
         if result[0].isdigit():
@@ -2040,9 +2041,11 @@ class Matrix:
             True if the matrix exists.
         """
         _matrix_name_validate(name)
-        # Use confirm matrix command (works even when matrix_get_names returns empty)
-        from pystata_x.sfi._engine import execute
-        _, rc = execute(f'capture confirm matrix {name}')
+        from pystata_x.sfi._engine import _LIB
+        # confirm matrix without capture — returns rc > 0 if doesn't exist
+        _LIB.StataSO_ClearOutputBuffer.restype = None
+        _LIB.StataSO_ClearOutputBuffer()
+        rc = _LIB.StataSO_Execute(f'confirm matrix {name}'.encode())
         return rc == 0
 
     @staticmethod

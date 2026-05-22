@@ -690,6 +690,10 @@ class _X86Strategy(_BaseStrategy):
             b'gen str2000 __px_z = "\x60__tmp\x27"')
         r = _x86_read_encoded_str(
             lambda o1: '__px_z[1]', 0, is_dataset=False)
+        # Stata char extended macro returns the value WITH surrounding
+        # single-quote delimiters.  Strip them for a clean return.
+        if r and len(r) >= 2 and r.startswith("'") and r.endswith("'"):
+            r = r[1:-1]
         return r if r else ""
 
     def get_var_char(self, varname: str, name: str) -> str:
@@ -704,6 +708,10 @@ class _X86Strategy(_BaseStrategy):
             b'gen str2000 __px_z = "\x60__tmp\x27"')
         r = _x86_read_encoded_str(
             lambda o1: '__px_z[1]', 0, is_dataset=False)
+        # Stata char extended macro returns the value WITH surrounding
+        # single-quote delimiters.  Strip them for a clean return.
+        if r and len(r) >= 2 and r.startswith("'") and r.endswith("'"):
+            r = r[1:-1]
         return r if r else ""
 
     def set_dta_char(self, name: str, value: str) -> None:
