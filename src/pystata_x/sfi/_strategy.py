@@ -152,7 +152,8 @@ class _BaseStrategy:
 
     # ── Value Label operations ──
     def vl_exists(self, name: str) -> bool:
-        return bool(call_int("_bist_vlexists", name.encode()))
+        label = self.vl_get_label(name, 0.0)
+        return bool(label)
 
     def vl_get_label(self, vlname: str, value: float) -> str:
         r = call_string("_bist_vlmap", vlname.encode(), ctypes.c_double(value))
@@ -1384,8 +1385,10 @@ class _WindowsStrategy(_X86Strategy):
 
     # ── ValueLabel operations via StataExecute ──
     def vl_exists(self, name: str) -> bool:
-        self._exe(b'capture label list ' + name.encode())
-        self._exe(b'capture local __px_rc = _rc')
+        # Use capture + extended macro to check if label exists
+        self._exe(f'capture local __px_vle : label list {name}')
+        self._exe(f'capture local __px_rc = _rc')
+        self._exe(b'capture drop __px_tmp')
         self._exe(b'capture gen long __px_tmp = `__px_rc')
         val = self._scratch_read_double()
         return val is not None and val == 0
