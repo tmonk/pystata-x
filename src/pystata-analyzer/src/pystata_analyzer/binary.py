@@ -471,20 +471,23 @@ class StataBinary:
             except Exception:
                 return {}
 
-            # Check if Stata already initialized
+            # Init Stata
             try:
-                rc = stata_exec(b'capture noi nobs(N)')
-                if rc != 0:
-                    # Need to init
-                    _Main = ctypes.CFUNCTYPE(ctypes.c_int,
-                        ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
-                    main_addr = kernel32.GetProcAddress(
-                        ctypes.c_void_p(dll_handle), b'StataSO_Main')
-                    if main_addr:
-                        argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
-                        _Main(main_addr)(2, argv)
+                _Main = ctypes.CFUNCTYPE(ctypes.c_int,
+                    ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
+                main_addr = kernel32.GetProcAddress(
+                    ctypes.c_void_p(dll_handle), b'StataSO_Main')
+                if not main_addr:
+                    return {}
+                argv = (ctypes.c_char_p * 2)(b'stata', b'-q')
+                rc_init = _Main(main_addr)(2, argv)
+                if rc_init < 0 and rc_init != -7100:
+                    return {}
             except Exception:
                 return {}
+
+            # Load a known dataset
+            stata_exec(b'sysuse auto, clear')
 
             # Use known nvar offset 0x211644 (verified empirically)
             known_nvar_offset = 0x211644
@@ -494,8 +497,8 @@ class StataBinary:
             ctypes.memmove(buf, ctypes.c_void_p(data_ptr + known_nvar_offset), 4)
             nvar_read = buf[0]
 
-            if nvar_read != 12 and nvar_read != 5 and nvar_read != 0:
-                return {}  # offset invalid
+            if nvar_read != 12:
+                return {}  # offset invalid, or dataset not loaded
 
             nvar_verified = [known_nvar_offset]
             gws_ptr = data_ptr + known_nvar_offset - 0x68
