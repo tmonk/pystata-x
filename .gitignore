@@ -32,8 +32,11 @@ stata19-linux/manifests/
 /stata19-linux
 /docs
 /benchmarks/history
-/manifests
-/src/pystata_x/sfi/manifests
+/manifests/
+/src/pystata_x/sfi/manifests/*.json
+!/src/pystata_x/sfi/manifests/manifest-linux-*.json
+!/src/pystata_x/sfi/manifests/manifest-windows-*.json
+!/src/pystata_x/sfi/manifests/manifest-darwin-*.json
 /src/stata-fast/.DS_Store
 /src/stata-fast/build/
 /src/stata-fast/build2/
