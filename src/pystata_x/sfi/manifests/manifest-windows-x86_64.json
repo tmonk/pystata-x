@@ -4,14 +4,28 @@
   "platform": "win32",
   "arch": "x86_64",
   "format": "pe",
-  "n_bist_symbols": 6,
+  "n_bist_symbols": 20,
   "symbols": {
     "_bist_dispatch_10824": 24755920,
     "_bist_dispatch_16208": 25646278,
     "_bist_dispatch_21504": 25802676,
     "_bist_dispatch_10632": 25905696,
     "_bist_dispatch_5344": 30145346,
-    "_bist_dispatch_5360": 32615856
+    "_bist_dispatch_5360": 32615856,
+    "StataSO_AllowStataExitCommand": 23947856,
+    "StataSO_AppendOutputBuffer": 23948016,
+    "StataSO_ClearOutputBuffer": 23947904,
+    "StataSO_EchoStdout": 23947920,
+    "StataSO_Execute": 23947872,
+    "StataSO_GetOutputBuffer": 23947888,
+    "StataSO_Main": 31344816,
+    "StataSO_QueueInteractiveCommand": 23948064,
+    "StataSO_RunInteractiveLoop": 23948032,
+    "StataSO_SetBreak": 23947984,
+    "StataSO_SetOutputBufferSz": 23947936,
+    "StataSO_SetOutputBufferSz_K": 23947952,
+    "StataSO_SetOutputBufferSz_M": 23947968,
+    "StataSO_Shutdown": 23947840
   },
   "dispatch_entries": [
     24755920,
@@ -26,8 +40,11 @@
   "memory_offsets": {
     "nvar_gws_offset": 104,
     "gws_rva": 54703580,
+    "data_rva": 52535296,
     "nvar_data_offset": 2168388,
-    "nvar_abs_addr": 6497154628,
-    "maxvars_offset": 123432
+    "nvar_rva": 54703684,
+    "maxvars_offset": 123432,
+    "scratch_buffer_rva": 62114816,
+    "scratch_buffer_offset": 9579520
   }
 }
