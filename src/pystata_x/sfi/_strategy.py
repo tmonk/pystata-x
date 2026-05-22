@@ -1225,7 +1225,9 @@ class _WindowsStrategy(_X86Strategy):
         if name.startswith('c(') and name.endswith(')'):
             # c() values are numeric — need strofreal() to convert for gen str
             return self._gen_from_str('__px_gs', 'strofreal(' + name + ')')
-        return self._gen_from_str('__px_gs', '"' + '$' + name + '"')
+        # Use ${name} which is unambiguous for Stata macro expansion
+        # The $ must be literal, not Python-interpolated
+        return self._gen_from_str('__px_gs', chr(34) + chr(36) + '{' + name + '}' + chr(34))
 
     def get_macro_local(self, name: str) -> str:
         """Read a local Stata macro via StataExecute + encoding."""
