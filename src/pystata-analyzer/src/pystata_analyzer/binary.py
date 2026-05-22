@@ -1842,18 +1842,557 @@ class StataBinary:
 
     def _to_manifest(self) -> dict:
         """Build a manifest dict from discovered data."""
-        return {
+        return self.generate_manifest()
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Extended manifest (version 3)
+    # ═══════════════════════════════════════════════════════════════
+
+    def generate_manifest(self) -> dict:
+        """Generate a compact per-platform manifest (version 3).
+
+        Extends the existing _to_manifest() format with:
+        - memory_offsets (var tables, hash tables discovered via analysis)
+        - dispatch_function_status (working/echo/unknown per function)
+        - platform + arch fields for cross-platform diff support
+        - manifest_version = 3
+        """
+        # Check each dispatch function for echo behavior
+        dispatch_status = {}
+        if HAS_CAPSTONE:
+            for name in sorted(self._symbols):
+                if name.startswith("_bist_") and name != "_bist_store":
+                    status = self._classify_dispatch_fn(name)
+                    if status:
+                        dispatch_status[name] = status
+
+        base = {
+            "manifest_version": 3,
             "sha256": self.sha256,
             "platform": sys.platform,
+            "arch": self.arch,
             "n_bist_symbols": len(self._symbols),
             "symbols": dict(self._symbols),
             "dispatch_entries": list(self._dispatch_entries),
             "dispatch_vaddr": self._dispatch_vaddr,
-            "st_entries": [(idx, name, hex(flags)) for idx, name, flags in self._st_entries],
+            "st_entries": [(idx, name, hex(flags))
+                           for idx, name, flags in self._st_entries],
             "push_fns": dict(self._push_fns),
             "data_offsets": {
                 "stack_ptr_delta": self._stack_ptr_vaddr,
                 "err_addr_delta": self._err_addr_vaddr,
             },
-            "manifest_version": 2,
+            "memory_offsets": self.analyze_memory_layout(),
+            "dispatch_function_status": dispatch_status,
         }
+        return base
+
+    def _classify_dispatch_fn(self, name: str) -> dict | None:
+        """Classify a dispatch function as 'working', 'echo', or 'unknown'.
+
+        Uses combined static analysis:
+        - Checks for expression parser calls (strong echo signal)
+        - Checks for meaningful memory reads to .data/.bss
+        - Delegates to ``auto_test_call_convention()`` for deeper analysis
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return None
+        vaddr = self._symbols.get(name)
+        if not vaddr:
+            return None
+        text_raw = self._elf.text_raw
+        text_vaddr = self._elf.text_vaddr
+        off = vaddr - text_vaddr
+        if off < 0 or off >= len(text_raw):
+            return None
+
+        md = _Cs(CS_ARCH_X86, CS_MODE_64)
+        scan_start = max(0, off - 2048)
+        chunk = text_raw[scan_start:min(scan_start + 8192, len(text_raw))]
+        scan_base = vaddr - (off - scan_start)
+
+        try:
+            insns = list(md.disasm(chunk, scan_base))
+        except Exception:
+            return None
+
+        has_mem_read = False
+        has_ret = False
+        instr_count = 0
+        calls_expression_parser = False
+        calls_push_function = False
+        has_real_table_lookup = False
+
+        for insn in insns:
+            addr = insn.address
+            if addr < vaddr:
+                continue
+            if addr > vaddr + 512:
+                break
+            instr_count += 1
+            if insn.mnemonic == "ret":
+                has_ret = True
+
+            # Check for calls to expression parser (0x81c988) — strong echo signal
+            if insn.mnemonic == "call" and "0x" in insn.op_str:
+                for tok in insn.op_str.split():
+                    tok = tok.strip()
+                    try:
+                        target = int(tok, 16)
+                        # Expression parser — identity function calls this to
+                        # evaluate the input and push it back
+                        if abs(target - 0x81c988) < 10:
+                            calls_expression_parser = True
+                        # Push functions
+                        for pname, paddr in self._push_fns.items():
+                            if abs(target - paddr) < 10:
+                                calls_push_function = True
+                                break
+                    except ValueError:
+                        pass
+
+            # RIP-relative memory reads
+            if "rip" in insn.op_str and insn.mnemonic in ("mov", "lea", "add", "cmp"):
+                m = re.search(r"\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]", insn.op_str)
+                if m:
+                    sign = 1 if m.group(1) == "+" else -1
+                    disp = int(m.group(2), 16) * sign
+                    target = addr + insn.size + disp
+                    # Check if target is in .data or .bss
+                    for sname, sdata in (self._elf.sections.items()
+                                         if self._elf else {}):
+                        saddr = sdata.get("addr", 0)
+                        ssize = sdata.get("size", 0)
+                        if saddr <= target < saddr + ssize:
+                            # Reads from .bss are more meaningful than .text reads
+                            if sname in (".bss", ".data", ".data.rel.ro"):
+                                has_real_table_lookup = True
+                            has_mem_read = True
+                            break
+
+        if instr_count == 0:
+            return None
+
+        evidence = []
+
+        # Strong echo signals
+        if calls_expression_parser:
+            evidence.append("calls expression parser")
+            # Expression parser + push function = identity stub
+            if calls_push_function:
+                return {
+                    "classification": "echo",
+                    "instr_count": instr_count,
+                    "has_mem_read": has_mem_read,
+                    "calls_expression_parser": True,
+                    "note": "Calls expression parser and push functions — "
+                            "identity stub that echoes input",
+                }
+            return {
+                "classification": "likely_echo",
+                "instr_count": instr_count,
+                "has_mem_read": has_mem_read,
+                "calls_expression_parser": True,
+                "note": "Calls expression parser — likely echoes or "
+                        "evaluates expression rather than doing table lookup",
+            }
+
+        # Strong working signal: reads from .bss/.data tables
+        if has_real_table_lookup and instr_count >= 30:
+            return {
+                "classification": "working",
+                "instr_count": instr_count,
+                "has_mem_read": True,
+                "has_table_lookup": True,
+                "note": f"Reads from data/bss tables, {instr_count} instr — "
+                        "likely real implementation",
+            }
+
+        # Short function with no real table reads — likely echo
+        if instr_count < 20 and not has_real_table_lookup:
+            return {
+                "classification": "likely_echo",
+                "instr_count": instr_count,
+                "has_mem_read": has_mem_read,
+                "note": f"Short ({instr_count} instr) with no table reads — "
+                        "likely identity stub",
+            }
+
+        # Fall back to auto_test_call_convention for deeper analysis
+        try:
+            cc = self.auto_test_call_convention(name)
+            behavior = cc.get("behavior_type", "unknown")
+            likely_id = cc.get("likely_identity", False)
+            if likely_id:
+                return {
+                    "classification": "echo",
+                    "instr_count": instr_count,
+                    "has_mem_read": has_mem_read,
+                    "behavior_type": behavior,
+                    "note": cc.get("identity_reason", "auto_test: likely_identity"),
+                }
+        except Exception:
+            pass
+
+        # Default: working (conservative, as most functions do work)
+        return {
+            "classification": "working",
+            "instr_count": instr_count,
+            "has_mem_read": has_mem_read,
+            "has_table_lookup": has_real_table_lookup,
+            "note": f"{instr_count} instr, mem_read={has_mem_read}, "
+                    f"table_lookup={has_real_table_lookup}",
+        }
+
+    # ═══════════════════════════════════════════════════════════════
+    #  Memory Layout Discovery
+    # ═══════════════════════════════════════════════════════════════
+
+    def analyze_memory_layout(self) -> dict:
+        """Discover internal memory locations from dispatch function code.
+
+        For each dispatch function, disassembles its code to find
+        RIP-relative memory references.  By correlating references
+        across related functions, we can identify:
+        - Variable name/type/format tables
+        - Scalar hash tables
+        - Macro hash tables
+        - Value label hash tables
+        - c() constant locations
+        - Other .bss/.data globals
+
+        Returns a dict of discovered memory regions:
+        {
+            "var_name_table": {"vaddr": 0x..., "stride": 96},
+            "var_type_table": {"vaddr": 0x..., "stride": 2},
+            "scalar_table": {"vaddr": 0x...},
+            "macro_table": {"vaddr": 0x...},
+            "valuelabel_table": {"vaddr": 0x...},
+            "max_vars_addr": 0x...,
+        }
+        """
+        if not HAS_CAPSTONE or not self._elf:
+            return {}
+
+        # Track all RIP-relative targets found, grouped by function
+        fn_mem_refs: dict[str, list[int]] = {}
+
+        for name in sorted(self._symbols):
+            if not name.startswith("_bist_") or name == "_bist_store":
+                continue
+            vaddr = self._symbols.get(name)
+            if not vaddr:
+                continue
+
+            text_raw = self._elf.text_raw
+            text_vaddr = self._elf.text_vaddr
+            off = vaddr - text_vaddr
+            if off < 0 or off >= len(text_raw):
+                continue
+
+            md = _Cs(CS_ARCH_X86, CS_MODE_64)
+            scan_start = max(0, off - 2048)
+            chunk = text_raw[scan_start:min(scan_start + 8192, len(text_raw))]
+            scan_base = vaddr - (off - scan_start)
+
+            try:
+                insns = list(md.disasm(chunk, scan_base))
+            except Exception:
+                continue
+
+            refs = []
+            for insn in insns:
+                if insn.address < vaddr or insn.address > vaddr + 256:
+                    continue
+                if "rip" in insn.op_str:
+                    m = re.search(r"\[rip\s*([+-])\s*(0x[0-9a-fA-F]+)\]",
+                                  insn.op_str)
+                    if m:
+                        sign = 1 if m.group(1) == "+" else -1
+                        disp = int(m.group(2), 16) * sign
+                        target = insn.address + insn.size + disp
+                        refs.append(target)
+
+            if refs:
+                fn_mem_refs[name] = refs
+
+        # Correlate references across functions to identify known tables
+        # 1. Find the most-referenced .data/.bss addresses
+        from collections import Counter
+        all_refs: list[int] = []
+        for name, refs in fn_mem_refs.items():
+            all_refs.extend(refs)
+
+        ref_counter = Counter(all_refs)
+
+        # 2. Identify known tables by correlating with function names
+        memory_offsets: dict = {}
+
+        # Functions that should access var_name table
+        var_name_fns = [n for n in fn_mem_refs
+                        if "varname" in n or "varlabel" in n]
+        if var_name_fns:
+            # Find the most common reference among these
+            common_targets: Counter = Counter()
+            for fn in var_name_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                most_common = common_targets.most_common(1)[0]
+                memory_offsets["var_name_table"] = {
+                    "vaddr": most_common[0],
+                    "stride": 96,  # known from empirical analysis
+                    "confidence": min(1.0, most_common[1] / len(var_name_fns)),
+                }
+
+        # Functions that should access var_type table
+        var_type_fns = [n for n in fn_mem_refs
+                        if "vartype" in n or "varformat" in n]
+        if var_type_fns:
+            common_targets = Counter()
+            for fn in var_type_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                # Exclude the already-identified var_name table
+                known = memory_offsets.get("var_name_table", {}).get("vaddr")
+                candidates = [(t, c) for t, c in common_targets.most_common(5)
+                              if t != known]
+                if candidates:
+                    memory_offsets["var_type_table"] = {
+                        "vaddr": candidates[0][0],
+                        "stride": 2,
+                        "confidence": min(1.0, candidates[0][1] / len(var_type_fns)),
+                    }
+
+        # Functions that should access scalar table
+        scalar_fns = [n for n in fn_mem_refs
+                      if "numscalar" in n or "strscalar" in n]
+        if scalar_fns:
+            common_targets = Counter()
+            for fn in scalar_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                known = {memory_offsets.get(k, {}).get("vaddr")
+                         for k in ("var_name_table", "var_type_table")}
+                candidates = [(t, c) for t, c in common_targets.most_common(5)
+                              if t not in known]
+                if candidates:
+                    memory_offsets["scalar_table"] = {
+                        "vaddr": candidates[0][0],
+                        "confidence": min(1.0, candidates[0][1] / len(scalar_fns)),
+                    }
+
+        # Functions that should access macro table
+        macro_fns = [n for n in fn_mem_refs
+                     if "macroexpand" in n or "global" in n]
+        if macro_fns:
+            common_targets = Counter()
+            for fn in macro_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                known = {memory_offsets.get(k, {}).get("vaddr")
+                         for k in ("var_name_table", "var_type_table",
+                                   "scalar_table")}
+                candidates = [(t, c) for t, c in common_targets.most_common(5)
+                              if t not in known]
+                if candidates:
+                    memory_offsets["macro_table"] = {
+                        "vaddr": candidates[0][0],
+                        "confidence": min(1.0, candidates[0][1] / len(macro_fns)),
+                    }
+
+        # Functions that should access value label table
+        vl_fns = [n for n in fn_mem_refs
+                  if n.startswith("_bist_vl")]
+        if vl_fns:
+            common_targets = Counter()
+            for fn in vl_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                known = {memory_offsets.get(k, {}).get("vaddr")
+                         for k in memory_offsets}
+                candidates = [(t, c) for t, c in common_targets.most_common(5)
+                              if t not in known]
+                if candidates:
+                    memory_offsets["valuelabel_table"] = {
+                        "vaddr": candidates[0][0],
+                        "confidence": min(1.0, candidates[0][1] / len(vl_fns)),
+                    }
+
+        # Look for c(maxvar) / max_vars location
+        # Common patterns: functions that reference a global with value 32767
+        # nearby in code
+        max_vars_fns = [n for n in fn_mem_refs
+                        if "k" in n or "nvar" in n]
+        if max_vars_fns:
+            common_targets = Counter()
+            for fn in max_vars_fns:
+                common_targets.update(fn_mem_refs[fn])
+            if common_targets:
+                known = {memory_offsets.get(k, {}).get("vaddr")
+                         for k in memory_offsets}
+                candidates = [(t, c) for t, c in common_targets.most_common(5)
+                              if t not in known]
+                if candidates:
+                    memory_offsets["max_vars_addr"] = candidates[0][0]
+
+        return memory_offsets
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Module-level helpers
+# ═══════════════════════════════════════════════════════════════════
+
+
+def diff_manifests(m1_path: str, m2_path: str) -> dict:
+    """Compare two manifest JSON files and report differences.
+
+    Useful for detecting platform drift between Linux and Windows
+    manifests, or changes across Stata versions.
+
+    Parameters
+    ----------
+    m1_path : str
+        Path to first manifest (e.g. Linux ELF manifest).
+    m2_path : str
+        Path to second manifest (e.g. Windows PE manifest).
+
+    Returns
+    -------
+    dict with keys:
+        - ``same_symbols``: symbols present in both with their addrs
+        - ``linux_only``: symbols only in m1
+        - ``windows_only``: symbols only in m2
+        - ``offset_diffs``: list of data_offsets/memory_offsets that differ
+        - ``aligned_symbols``: count of symbols at same address
+        - ``misaligned_symbols``: count of symbols at different addresses
+        - ``compatible``: True if structural differences are minor
+        - ``summary``: human-readable summary string
+    """
+    def _load(path: str) -> dict:
+        with open(path) as f:
+            return json.load(f)
+
+    m1 = _load(m1_path)
+    m2 = _load(m2_path)
+
+    syms1 = set(m1.get("symbols", {}))
+    syms2 = set(m2.get("symbols", {}))
+
+    both = syms1 & syms2
+    only_m1 = syms1 - syms2
+    only_m2 = syms2 - syms1
+
+    same_addr = 0
+    diff_addr = 0
+    addr_diffs = []
+    for name in sorted(both):
+        a1 = m1["symbols"][name]
+        a2 = m2["symbols"][name]
+        if a1 == a2:
+            same_addr += 1
+        else:
+            diff_addr += 1
+            addr_diffs.append({
+                "name": name,
+                f"{m1.get('platform', 'm1')}_addr": hex(a1),
+                f"{m2.get('platform', 'm2')}_addr": hex(a2),
+            })
+
+    # Diff data_offsets
+    offset_diffs = []
+    do1 = m1.get("data_offsets", {}) or {}
+    do2 = m2.get("data_offsets", {}) or {}
+    for key in set(list(do1.keys()) + list(do2.keys())):
+        v1 = do1.get(key)
+        v2 = do2.get(key)
+        if v1 != v2:
+            offset_diffs.append({
+                "field": key,
+                "m1": hex(v1) if isinstance(v1, int) else v1,
+                "m2": hex(v2) if isinstance(v2, int) else v2,
+            })
+
+    # Diff memory_offsets
+    mo1 = m1.get("memory_offsets", {}) or {}
+    mo2 = m2.get("memory_offsets", {}) or {}
+    for region in set(list(mo1.keys()) + list(mo2.keys())):
+        r1 = mo1.get(region, {})
+        r2 = mo2.get(region, {})
+        vaddr1 = r1.get("vaddr") if isinstance(r1, dict) else r1
+        vaddr2 = r2.get("vaddr") if isinstance(r2, dict) else r2
+        if vaddr1 != vaddr2:
+            offset_diffs.append({
+                "field": f"memory_offsets.{region}",
+                "m1": hex(vaddr1) if isinstance(vaddr1, int) else str(vaddr1),
+                "m2": hex(vaddr2) if isinstance(vaddr2, int) else str(vaddr2),
+            })
+
+    # Diff dispatch function status
+    status_diffs = []
+    ds1 = m1.get("dispatch_function_status", {}) or {}
+    ds2 = m2.get("dispatch_function_status", {}) or {}
+    for name in sorted(set(list(ds1.keys()) + list(ds2.keys()))):
+        c1 = ds1.get(name, {}).get("classification", "unknown")
+        c2 = ds2.get(name, {}).get("classification", "unknown")
+        if c1 != c2:
+            status_diffs.append({
+                "name": name,
+                "m1": c1,
+                "m2": c2,
+            })
+
+    n_total = len(syms1 | syms2)
+    n_both = len(both)
+    compatibility_issues = []
+    diff_addr_threshold = 0.05  # 5%
+
+    if diff_addr / max(n_both, 1) > diff_addr_threshold:
+        compatibility_issues.append(
+            f"{diff_addr}/{n_both} shared symbols have different addresses "
+            f"({100 * diff_addr / max(n_both, 1):.1f}%)")
+    if offset_diffs:
+        compatibility_issues.append(
+            f"{len(offset_diffs)} offset differences")
+    if status_diffs:
+        compatibility_issues.append(
+            f"{len(status_diffs)} function status differences")
+
+    compatible = len(compatibility_issues) == 0
+
+    summary_parts = [
+        f"Manifest diff: {m1.get('platform', '?')} vs {m2.get('platform', '?')}",
+        f"  Symbols: {n_both} shared, {len(only_m1)} only in m1, "
+        f"{len(only_m2)} only in m2",
+        f"  Address alignment: {same_addr} same, {diff_addr} different",
+        f"  Offset diffs: {len(offset_diffs)}",
+        f"  Status diffs: {len(status_diffs)}",
+        f"  Compatible: {compatible}",
+    ]
+    if not compatible:
+        summary_parts.append("  Issues:")
+        for issue in compatibility_issues:
+            summary_parts.append(f"    - {issue}")
+
+    return {
+        "m1_platform": m1.get("platform", "?"),
+        "m2_platform": m2.get("platform", "?"),
+        "m1_arch": m1.get("arch", "?"),
+        "m2_arch": m2.get("arch", "?"),
+        "total_symbols_m1": len(syms1),
+        "total_symbols_m2": len(syms2),
+        "same_symbols": {name: {
+            m1.get("platform", "m1"): hex(m1["symbols"][name]),
+            m2.get("platform", "m2"): hex(m2["symbols"][name]),
+        } for name in sorted(both)},
+        "m1_only": sorted(only_m1),
+        "m2_only": sorted(only_m2),
+        "aligned_symbols": same_addr,
+        "misaligned_symbols": diff_addr,
+        "addr_diffs": addr_diffs,
+        "offset_diffs": offset_diffs,
+        "status_diffs": status_diffs,
+        "compatible": compatible,
+        "compatibility_issues": compatibility_issues,
+        "summary": "\n".join(summary_parts),
+    }
+
