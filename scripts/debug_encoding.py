@@ -7,7 +7,7 @@ initialize()
 
 from pystata_x.sfi._strategy import _STRATEGY
 from pystata_x.sfi._engine import _LIB
-from pystata_x.sfi._manifest import _MEMORY_OFFSETS
+from pystata_x.sfi._engine import _MEMORY_OFFSETS
 import ctypes
 
 _LIB.StataSO_Execute(b'sysuse auto, clear')
