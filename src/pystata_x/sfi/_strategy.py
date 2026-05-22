@@ -1398,7 +1398,12 @@ class _WindowsStrategy(_X86Strategy):
         self._exe(f'capture local __px_vl : label {vlname} {v}')
         self._exe(b'capture drop __px_tmp')
         self._exe(b'capture gen str2000 __px_tmp = "`__px_vl\'"')
-        return self.read_encoded_str('__px_tmp[1]', obs=1)
+        label = self.read_encoded_str('__px_tmp[1]', obs=1)
+        # On Windows, :label returns the value as string (e.g. "2") if no label exists
+        # Check if the returned label equals str(value) — if so, it's not a real label
+        if label == str(v):
+            return ''
+        return label
 
     def vl_get_names(self) -> list:
         # label dir output to display not accessible. Use a known oracle pattern.
