@@ -18,6 +18,7 @@ Quick start::
 
 from pystata_analyzer.elf import ELFReader
 from pystata_analyzer.binary import StataBinary, diff_manifests
+from pystata_analyzer.pe_binary import PEStata, PEConvert
 from pystata_analyzer.helpers import HAS_CAPSTONE
 from pystata_analyzer.registry import PatternRegistry, PatternEntry, REGISTRY_VERSION
 from pystata_analyzer.plugin import (
@@ -42,6 +43,8 @@ from pystata_analyzer.live_protocol import (
 __all__ = [
     "ELFReader",
     "StataBinary",
+    "PEStata",
+    "PEConvert",
     "diff_manifests",
     "HAS_CAPSTONE",
     "PatternRegistry",

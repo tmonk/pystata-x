@@ -153,6 +153,25 @@ class StataBinary:
         self._stack_ptr_vaddr: int = 0
         self._err_addr_vaddr: int = 0
         self._analyzed = False
+        # PE binary info (Windows)
+        self._pe_info: Optional[dict] = None
+        self._format: str = self._detect_format()
+
+    def _detect_format(self) -> str:
+        """Detect binary format: elf, mach-o, pe, or unknown."""
+        try:
+            with open(self.path, 'rb') as f:
+                magic = f.read(4)
+            if magic[:4] == b'\x7fELF':
+                return 'elf'
+            if magic[:2] == b'MZ':
+                return 'pe'
+            if magic[:4] in (b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf',
+                             b'\xce\xfa\xed\xfe', b'\xcf\xfa\xed\xfe'):
+                return 'mach-o'
+        except (OSError, IOError):
+            pass
+        return 'unknown'
 
     # ═══════════════════════════════════════════════════════════════
     # Public properties
@@ -202,28 +221,39 @@ class StataBinary:
 
     @property
     def arch(self) -> str:
-        return self._elf.arch if self._elf else "unknown"
+        if self._elf:
+            return self._elf.arch
+        if self._format == 'pe':
+            return 'x86_64'  # se-64.dll is always x86_64
+        return 'unknown'
 
     @property
     def format(self) -> str:
-        return "elf" if "libstata" in self.path else "unknown"
+        return self._format
+
+    @property
+    def pe_info(self) -> Optional[dict]:
+        """Return PE-specific info if analyzing a Windows DLL."""
+        return self._pe_info
 
     # ═══════════════════════════════════════════════════════════════
     # Public API
     # ═══════════════════════════════════════════════════════════════
 
     def analyze(self, cache: Optional[dict] = None) -> dict:
-        """Run full analysis: ELF load → dispatch → names → push fns.
+        """Run full analysis: ELF/PE load → dispatch → names → push fns.
 
         Returns manifest dict with all discovered symbols, offsets, etc.
         """
-        self._elf = ELFReader(self.path)
-        self._elf._parse()
-
-        if self.arch == "x86_64":
-            self._analyze_elf_x86_64()
+        if self._format == 'pe':
+            self._analyze_pe_x86_64()
+        elif self._format == 'elf':
+            self._elf = ELFReader(self.path)
+            self._elf._parse()
+            if self._elf.arch == "x86_64":
+                self._analyze_elf_x86_64()
         else:
-            pass  # ARM64 analysis TBD
+            pass  # ARM64/Mach-O or unknown
 
         self._analyzed = True
         return self._to_manifest()
@@ -237,20 +267,34 @@ class StataBinary:
             f"  SHA256: {self.sha256[:16]}…",
             f"  Format: {self.format}",
             f"  Arch:   {self.arch}",
-            f"  Dispatch table: {self.dispatch_count} entries at 0x{self.dispatch_vaddr:x}",
-            f"  st_* entries:   {len(self._st_entries)}",
-            f"  Symbols:        {len(self._symbols)}",
-            f"  Push fns:       {self._push_fns}",
-            f"  Stack ptr:      0x{self._stack_ptr_vaddr:x}",
-            f"  Error addr:     0x{self._err_addr_vaddr:x}",
+        ]
+        if self._format == 'pe':
+            info = self._pe_info or {}
+            lines.append(f"  Dispatcher RVA: 0x{self._dispatch_vaddr:x}" if self._dispatch_vaddr else "")
+            lines.append(f"  Thin wrappers:  {len(self._dispatch_entries)}")
+            lines.append(f"  Memory layout:  {info.get('memory_offsets', {})}")
+            if 'nm' in info:
+                lines.append(f"  PE exports:     {len(info.get('nm', []))}")
+            md = info.get('memory_discovery', {})
+            if md:
+                lines.append(f"  Data section:   RVA=0x{md.get('data_base_rva', 0):x}, size={md.get('data_size', 0)}")
+        else:
+            lines.extend([
+                f"  Dispatch table: {self.dispatch_count} entries at 0x{self.dispatch_vaddr:x}",
+                f"  st_* entries:   {len(self._st_entries)}",
+                f"  Symbols:        {len(self._symbols)}",
+                f"  Push fns:       {self._push_fns}",
+                f"  Stack ptr:      0x{self._stack_ptr_vaddr:x}",
+                f"  Error addr:     0x{self._err_addr_vaddr:x}",
+            ])
+        lines.extend([
             "",
             "── Protocol analysis ──",
-        ]
-        # Check a few known symbols
+        ])
         for name in ["_bist_nobs", "_bist_nvar", "_bist_data", "_bist_global"]:
             vaddr = self._symbols.get(name)
             lines.append(f"  {name:30s} → 0x{vaddr:x}" if vaddr else f"  {name} → NOT FOUND")
-        return "\n".join(lines)
+        return "\n".join(filter(None, lines))
 
     def save_cache(self, output_path: Optional[str] = None) -> str:
         """Save the manifest to a JSON file. Returns path written."""
@@ -340,6 +384,38 @@ class StataBinary:
     # ═══════════════════════════════════════════════════════════════
     # Discovery
     # ═══════════════════════════════════════════════════════════════
+
+    def _analyze_pe_x86_64(self) -> None:
+        """Run PE-specific analysis for Windows se-64.dll.
+
+        PE files have no dispatch table or st_* name table.
+        Instead we discover:
+        - Main bytecode dispatcher via call-target frequency
+        - Thin wrappers (mov eax, <id>; call dispatcher)
+        - Memory offsets in .data section by scanning for known values
+        """
+        try:
+            from pystata_analyzer.pe_binary import PEStata
+            self._pe = PEStata(self.path)
+            self._pe.analyze()
+            self._pe_info = self._pe.generate_manifest()
+
+            # Populate standard StataBinary fields from PE analysis
+            if self._pe.main_dispatcher:
+                self._dispatch_vaddr = self._pe.main_dispatcher
+
+            # Register any discovered dispatch IDs as symbols
+            for wrapper in self._pe.thin_wrappers:
+                did = wrapper['dispatch_id']
+                rva = wrapper['rva']
+                name = f"_bist_dispatch_{did}"
+                self._symbols[name] = rva
+                self._dispatch_entries.append(rva)
+
+            # Sort dispatch entries
+            self._dispatch_entries.sort()
+        except ImportError:
+            self._pe_info = {'error': 'PEStata not available'}
 
     def _analyze_elf_x86_64(self) -> None:
         """Run all x86_64-specific discovery passes."""
@@ -1971,20 +2047,36 @@ class StataBinary:
             "sha256": self.sha256,
             "platform": sys.platform,
             "arch": self.arch,
-            "n_bist_symbols": len(self._symbols),
-            "symbols": dict(self._symbols),
-            "dispatch_entries": list(self._dispatch_entries),
-            "dispatch_vaddr": self._dispatch_vaddr,
-            "st_entries": [(idx, name, hex(flags))
-                           for idx, name, flags in self._st_entries],
-            "push_fns": dict(self._push_fns),
-            "data_offsets": {
-                "stack_ptr_delta": self._stack_ptr_vaddr,
-                "err_addr_delta": self._err_addr_vaddr,
-            },
-            "memory_offsets": self.analyze_memory_layout(),
-            "dispatch_function_status": dispatch_status,
+            "format": self._format,
         }
+
+        if self._format == 'pe':
+            # PE-specific manifest — merge info from PEStata
+            pe_info = self._pe_info or {}
+            base.update({
+                "n_bist_symbols": len(self._symbols),
+                "symbols": dict(self._symbols),
+                "dispatch_entries": list(self._dispatch_entries),
+                "dispatch_vaddr": self._dispatch_vaddr,
+                "pe_info": pe_info.get('memory_discovery', {}),
+                "memory_offsets": pe_info.get('memory_offsets', {}),
+            })
+        else:
+            base.update({
+                "n_bist_symbols": len(self._symbols),
+                "symbols": dict(self._symbols),
+                "dispatch_entries": list(self._dispatch_entries),
+                "dispatch_vaddr": self._dispatch_vaddr,
+                "st_entries": [(idx, name, hex(flags))
+                               for idx, name, flags in self._st_entries],
+                "push_fns": dict(self._push_fns),
+                "data_offsets": {
+                    "stack_ptr_delta": self._stack_ptr_vaddr,
+                    "err_addr_delta": self._err_addr_vaddr,
+                },
+                "memory_offsets": self.analyze_memory_layout(),
+                "dispatch_function_status": dispatch_status,
+            })
         return base
 
     def _classify_dispatch_fn(self, name: str) -> dict | None:
