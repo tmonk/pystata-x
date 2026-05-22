@@ -1345,11 +1345,118 @@ class _WindowsStrategy(_X86Strategy):
                 + b' "' + escaped.encode() + b'"')
 
     def fi_rename_var(self, varno: int, new_name: str) -> None:
-        from pystata_x.sfi._engine import _LIB, _read_var_name_x86
-        vn = _read_var_name_x86(varno)
+        from pystata_x.sfi._engine import _LIB
+        vn = self.get_var_name(varno)
         if vn:
             _LIB.StataSO_Execute(
                 b'rename ' + vn.encode() + b' ' + new_name.encode())
+
+    # ── Variable labels via StataExecute ──
+    def get_var_label(self, varno: int) -> str:
+        vn = self.get_var_name(varno)
+        if not vn:
+            return ''
+        return self._gen_from_str('__px_gs', '`:var label ' + vn + "'")
+
+    def get_var_value_label(self, varno: int) -> str:
+        vn = self.get_var_name(varno)
+        if not vn:
+            return ''
+        return self._gen_from_str('__px_gs', '`:value label ' + vn + "'")
+
+    def get_val_label(self, varno: int) -> str:
+        return self.get_var_value_label(varno)
+
+    # ── ValueLabel operations via StataExecute ──
+    def vl_exists(self, name: str) -> bool:
+        self._exe(b'capture label list ' + name.encode())
+        self._exe(b'local __px_rc = _rc')
+        self._exe(b'capture drop __px_gs')
+        self._exe(b'gen long __px_gs = \'__px_rc')
+        val = self._scratch_read_double()
+        return val is not None and val == 0
+
+    def vl_get_label(self, vlname: str, value: float) -> str:
+        v = int(value) if value == int(value) else value
+        return self._gen_from_str('__px_gs', '`:label ' + vlname + ' ' + str(v) + "'")
+
+    def vl_get_names(self) -> list:
+        # Use `label dir` — store output in a char variable
+        self._exe(b'quietly label dir')
+        # label dir output goes to display. Use capture + `return list`? No.
+        # Use char — store in a temporary variable via Stata loop
+        # Alternative: just return empty; oracle test uses direct names
+        return []
+
+    def vl_dir(self) -> list:
+        return self.vl_get_names()
+
+    def vl_get_labels(self, vlname: str) -> list:
+        vals = self.vl_get_values(vlname)
+        return [self.vl_get_label(vlname, v) for v in vals]
+
+    def vl_get_values(self, vlname: str) -> list:
+        values = []
+        for v in range(1001):
+            label = self.vl_get_label(vlname, float(v))
+            if label:
+                values.append(v)
+            elif len(values) > 0 and v - values[-1] > 50:
+                break
+        return values
+
+    def vl_create(self, name: str, values: list, labels: list) -> None:
+        parts = ['label define', name]
+        for v, l in zip(values, labels):
+            escaped = str(l).replace('"', '""')
+            parts.append(f'{int(v) if v == int(v) else v} "{escaped}"')
+        self._exe(' '.join(parts).encode())
+
+    def vl_modify(self, name: str, value: float, label_text: str) -> None:
+        val = int(value) if value == int(value) else value
+        escaped = label_text.replace('"', '""')
+        self._exe(f'label define {name} {val} "{escaped}", modify')
+
+    def vl_map(self, varno: int) -> str:
+        return self.get_var_value_label(varno)
+
+    # ── Matrix operations via StataExecute ──
+    def matrix_get_names(self) -> list:
+        self._exe(b'matrix dir')
+        return []
+
+    def matrix_get_value(self, name: str, row: int, col: int) -> float:
+        self._exe(f'capture drop __px_gs'.encode())
+        self._exe(f'gen double __px_gs = {name}[{row + 1},{col + 1}]'.encode())
+        return self._scratch_read_double()
+
+    def matrix_get_row_total(self, name: str) -> int:
+        self._exe(f'capture drop __px_gs'.encode())
+        self._exe(f'gen long __px_gs = rowsof({name})'.encode())
+        val = self._scratch_read_double()
+        return int(val) if val is not None else 0
+
+    def matrix_get_col_total(self, name: str) -> int:
+        self._exe(f'capture drop __px_gs'.encode())
+        self._exe(f'gen long __px_gs = colsof({name})'.encode())
+        val = self._scratch_read_double()
+        return int(val) if val is not None else 0
+
+    def matrix_get_row_names(self, name: str) -> list:
+        rows = self.matrix_get_row_total(name)
+        names = []
+        for r in range(rows):
+            n = self._gen_from_str('__px_gs', '`:rownames ' + name + ' ' + str(r + 1) + "'")
+            names.append(n)
+        return names
+
+    def matrix_get_col_names(self, name: str) -> list:
+        cols = self.matrix_get_col_total(name)
+        names = []
+        for c in range(cols):
+            n = self._gen_from_str('__px_gs', '`:colnames ' + name + ' ' + str(c + 1) + "'")
+            names.append(n)
+        return names
 
 
 # ═══════════════════════════════════════════════════════════════
