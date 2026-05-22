@@ -1055,33 +1055,15 @@ class _WindowsStrategy(_X86Strategy):
         self._exe('gen double __px_tmp = __px_val')
         return self._scratch_read_double()
 
-    def _encode_char(self, varno_or_str, pos):
-        """Encode one character of a variable name or string as double via scratch.
-        """
-        # Build Stata command: scalar __px_c = strpos(... substr("`__px_name'", pos, 1))
-        # Use explicit string concatenation to avoid escape issues
-        alphabet = "\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\""
-        cmd = 'scalar __px_c = strpos(' + alphabet + ', substr("`__px_name\'"' + f', {pos}, 1))'
-        self._exe(cmd)
-        self._exe('capture drop __px_tmp')
-        self._exe('gen double __px_tmp = __px_c')
-        return self._scratch_read_double()
-
     def get_var_name(self, varno: int) -> str:
-        """Get variable name via Stata extended macro + encoding."""
+        """Get variable name via Stata extended macro + gen str32 + encoding."""
+        # Store variable name in a string variable via macro
+        self._exe(f'capture drop __px_vn')
         self._exe(f'local __px_name : variable {varno}')
-        name_chars = []
-        for pos in range(1, 33):
-            code = self._encode_char(varno, pos)
-            if code is None or code <= 0:
-                break
-            alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-            idx = int(code) - 1
-            if 0 <= idx < len(alphabet):
-                name_chars.append(alphabet[idx])
-            else:
-                break
-        return ''.join(name_chars)
+        # gen str32 stores the macro-expanded name
+        self._exe(f'gen str32 __px_vn = "`__px_name\'"')
+        # Use read_encoded_str to decode the string variable
+        return self.read_encoded_str('__px_vn[1]', obs=1)
 
     # ── Override all _bist_*-dependent methods ──
     def find_var_index(self, name: str) -> int:
