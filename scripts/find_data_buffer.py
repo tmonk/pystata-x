@@ -35,6 +35,7 @@ for i in range(struct.unpack('<H', pe_data[e_lfanew+6:e_lfanew+8])[0]):
         data_size = min(data_vsize, data_rawsize)
         break
 
+data_ptr = handle + data_rva
 # Read data section from loaded DLL using virtual size (not raw file size)
 data_vsize_from_pe = struct.unpack('<I', pe_data[sh_off + 8:sh_off + 12])[0]
 data_size = data_vsize_from_pe  # Full virtual size in memory
