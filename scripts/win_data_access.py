@@ -112,8 +112,70 @@ for var_idx in range(1, min(13, read_nvar() + 1)):
     dll.StataSO_Execute(('local __px_name : variable %d' % var_idx).encode())
     dll.StataSO_Execute(('replace __px_vn = "`__px_name\'" in %d' % var_idx).encode())
 
+# Check what's actually at 0x922C00
+buf = (ctypes.c_double * 20)()
+ctypes.memmove(buf, ctypes.c_void_p(data_ptr + SCRATCH_OFF), 160)
+print('\n=== Raw scratch buffer at 0x922C00 ===')
+for i, v in enumerate(buf):
+    if v != 0:
+        print('  [+%d] %f' % (i*8, v))
+
+# And check: is 0x922C00 the same address each time?
+sysuse_val = 4099.0
+dll.StataSO_Execute(b'replace __px_get = price[1] in 1')
+buf2 = (ctypes.c_double * 1)()
+ctypes.memmove(buf2, ctypes.c_void_p(data_ptr + SCRATCH_OFF), 8)
+print('After replace price[1]: ptr value = %f' % buf2[0])
+
+# Try different offsets near 0x922C00
+print('\nSearching for price value near 0x922C00...')
+for delta in range(-1024, 1024, 8):
+    try:
+        buf = (ctypes.c_double * 1)()
+        ctypes.memmove(buf, ctypes.c_void_p(data_ptr + SCRATCH_OFF + delta), 8)
+        if abs(buf[0] - 4099.0) < 0.1:
+            print('  Found at +%d: %f' % (delta, buf[0]))
+            break
+    except:
+        pass
+
+# Actually, let's verify: does the scratch value ever change?
+nv_buf = (ctypes.c_int * 1)()
+ctypes.memmove(nv_buf, ctypes.c_void_p(data_ptr + NVAR_OFF), 4)
+print('\nnvar:', nv_buf[0])
+
+# After 'gen double __px_get', the new variable is at position nvar
+# But the scratch buffer might be at a dynamic location, not fixed
+# Let me find the actual data buffer for the LAST variable
+
+# Try: the data buffer is at maxvars * 8 * ???
+# Or: the data buffer could be at gws + some_offset
+
+# Let me check: what if the data buffer for __px_get is at the END of data section?
+# Scan for price (4099) in the full .data section
+s_bytes = struct.pack('<d', 4099.0)
+print('\nSearching for price[1]=4099 in all .data...')
+for cs in range(0, data_vsize, 256*1024):
+    cur = min(256*1024, data_vsize - cs)
+    try:
+        buf = (ctypes.c_char * cur)()
+        ctypes.memmove(buf, ctypes.c_void_p(data_ptr + cs), cur)
+    except:
+        continue
+    idx = bytes(buf).find(s_bytes)
+    if idx >= 0:
+        print('  price[1] at data+%x' % (cs + idx))
+        # Also read what's around it
+        nearby = (ctypes.c_double * 20)()
+        base_off = cs + idx - 80
+        try:
+            ctypes.memmove(nearby, ctypes.c_void_p(data_ptr + base_off), 160)
+            print('  Values around: ' + ' '.join(['%.1f' % nearby[k] for k in range(20) if nearby[k] != 0]))
+        except:
+            pass
+        break
+
 # Read the string variable via the "encode as double" trick
-# This is what _x86_read_encoded_str does
 print('Reading var names via encoding:')
 for var_idx in range(1, min(13, read_nvar() + 1)):
     # Use strpos encoding: convert each character to a double
