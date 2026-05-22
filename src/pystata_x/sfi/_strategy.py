@@ -1256,10 +1256,10 @@ class _WindowsStrategy(_X86Strategy):
         self._exe(f'gen str2000 __px_tmp = scalar({name})')
         return self.read_encoded_str('__px_tmp[1]', obs=1)
 
-    def get_temp_name(self) -> str:
-        """Get a temp name from Stata."""
-        self._exe('capture drop __px_tmp')
-        self._exe('gen str2000 __px_tmp = "`=tempname(1)\'"')
+    def get_temp_name(self, prefix: str = '') -> str:
+        """Get a temp name from Stata (prefix used if provided)."""
+        self._exe(b'capture drop __px_tmp')
+        self._exe(b'gen str2000 __px_tmp = "`=tempname(1)\'"')
         return self.read_encoded_str('__px_tmp[1]', obs=1)
 
     def get_max_vars(self) -> int:
