@@ -339,14 +339,17 @@ class _X86Strategy(_BaseStrategy):
 
     def get_var_format(self, varno: int) -> str:
         # Use StataExecute with :format extended macro (avoids broken _bist_varformat)
-        from pystata_x.sfi._engine import _LIB
+        from pystata_x.sfi._engine import _LIB, call_double as _cd
+        from pystata_x.sfi._core import _x86_read_encoded_str
         vn = self.get_var_name(varno)
         if not vn:
             return ''
         _LIB.StataSO_Execute(f'capture local __px_fmt : format {vn}'.encode())
         _LIB.StataSO_Execute(b'capture drop __px_tmp')
         _LIB.StataSO_Execute(f'gen str32 __px_tmp = "`__px_fmt\'"'.encode())
-        return self.read_encoded_str('__px_tmp[1]', obs=1)
+        nv = int(_cd('_bist_nvar'))
+        return _x86_read_encoded_str(
+            lambda o1: f'__px_tmp[{o1}]', 0, is_dataset=False)
 
     def find_var_index(self, name: str) -> int:
         from pystata_x.sfi._engine import _read_var_name_x86, call_double as _cd

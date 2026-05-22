@@ -184,6 +184,7 @@ class TestOracleCompliance:
         from pystata_x.sfi._core import (
             Data, Macro, Scalar, ValueLabel, Missing,
             Characteristic, Frame, Matrix, Datetime, Platform,
+            Preference,
         )
         cls._D = Data
         cls._M = Macro
@@ -195,6 +196,7 @@ class TestOracleCompliance:
         cls._MX = Matrix
         cls._DT = Datetime
         cls._PL = Platform
+        cls._PR = Preference
 
         from pystata_x.sfi._engine import initialize, execute
         initialize()
@@ -202,12 +204,15 @@ class TestOracleCompliance:
         execute("global testglobal = 42")
         execute("scalar myscalar = 3.14")
         execute('scalar mystr = "hello"')
-        execute('matrix mymat = (1,2\\3,4)')
+        # Create a 2x2 matrix using semicolons (avoids \ escaping issues)
+        execute('matrix mymat = 1,2\\3,4')
+        # The above sends \\ which Python converts to \, then Stata sees \ as row sep
         execute('matrix rownames mymat = row1 row2')
         execute('matrix colnames mymat = col1 col2')
         execute('char _dta[mychar] hello')
         execute('capture frame drop testframe')
         execute('frame create testframe')
+        execute('global px_oracle_test = "oracle_value"')
         execute('label define yesno 0 No 1 Yes')
         execute("label values foreign yesno")
 
@@ -391,6 +396,15 @@ class TestOracleCompliance:
         assert self._PL.isUnix() == self._o("platform", "is_unix")
         assert self._PL.isLinux() == self._o("platform", "is_linux")
         assert self._PL.isSolaris() == self._o("platform", "is_solaris")
+
+    # ── Preference ──────────────────────────────────────────────
+
+    def test_preference_set_get(self):
+        pref_key = "px_oracle_test"
+        assert self._PR.getSavedPref(pref_key) == self._o("preference", "set_and_get")
+
+    def test_preference_nonexistent(self):
+        assert self._PR.getSavedPref("__nonexistent__") == self._o("preference", "nonexistent")
 
 class TestCellReads:
     """getDouble / getString — 1-based indexing verified."""

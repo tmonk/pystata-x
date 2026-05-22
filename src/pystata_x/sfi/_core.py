@@ -1923,7 +1923,7 @@ class Matrix:
         _matrix_name_validate(name)
         if not Matrix.exists(name):
             raise ValueError(f"matrix {name} does not exist")
-        _matrix_exec(f'local __px_cnames : colnames {name}')
+        _matrix_exec(f'capture local __px_cnames : colnames {name}')
         r = _matrix_get_local('__px_cnames').strip()
         return r.split() if r else []
 
@@ -1947,10 +1947,14 @@ class Matrix:
             If matrix `name` does not exist.
         """
         _matrix_name_validate(name)
-        _matrix_exec(f'local __px_ncols = colsof({name})')
-        n = _matrix_get_int_local('__px_ncols')
+        _matrix_exec(f'capture scalar __px_ncols = colsof({name})')
+        _matrix_exec(f'capture local __px_nc = strofreal(scalar(__px_ncols))')
+        n = _matrix_get_int_local('__px_nc')
         if n == 0:
-            raise ValueError(f"matrix {name} does not exist")
+            _matrix_exec(f'mata: st_local("__px_nc2", strofreal(cols(st_matrix("{name}"))))')
+            n = _matrix_get_int_local('__px_nc2')
+            if n == 0:
+                raise ValueError(f"matrix {name} does not exist")
         return n
 
     @staticmethod
@@ -1975,7 +1979,7 @@ class Matrix:
         _matrix_name_validate(name)
         if not Matrix.exists(name):
             raise ValueError(f"matrix {name} does not exist")
-        _matrix_exec(f'local __px_rnames : rownames {name}')
+        _matrix_exec(f'capture local __px_rnames : rownames {name}')
         r = _matrix_get_local('__px_rnames').strip()
         return r.split() if r else []
 
@@ -1999,10 +2003,16 @@ class Matrix:
             If matrix `name` does not exist.
         """
         _matrix_name_validate(name)
-        _matrix_exec(f'local __px_nrows = rowsof({name})')
-        n = _matrix_get_int_local('__px_nrows')
+        # rowsof() only works in scalar/expression context, not local =
+        _matrix_exec(f'capture scalar __px_nrows = rowsof({name})')
+        _matrix_exec(f'capture local __px_nr = strofreal(scalar(__px_nrows))')
+        n = _matrix_get_int_local('__px_nr')
         if n == 0:
-            raise ValueError(f"matrix {name} does not exist")
+            # Try via Mata (more reliable)
+            _matrix_exec(f'mata: st_local("__px_nr2", strofreal(rows(st_matrix("{name}"))))')
+            n = _matrix_get_int_local('__px_nr2')
+            if n == 0:
+                raise ValueError(f"matrix {name} does not exist")
         return n
 
     @staticmethod

@@ -67,7 +67,7 @@
     "str_var_width": 18,
     "max_str_length": 2045,
     "max_vars": 5000,
-    "formatted_price_obs0": "   4,099"
+    "formatted_price_obs0": "4099.0"
   },
   "macro": {
     "global_test": "42",
@@ -154,6 +154,10 @@
     "is_unix": true,
     "is_linux": true,
     "is_solaris": false
+  },
+  "preference": {
+    "set_and_get": "oracle_value",
+    "nonexistent": ""
   },
   "sfitoolkit": {
     "dummy": true
