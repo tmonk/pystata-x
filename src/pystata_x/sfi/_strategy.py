@@ -1356,8 +1356,10 @@ class _WindowsStrategy(_X86Strategy):
         """Read a local macro value into a gen'd string variable."""
         self._exe(b'capture drop __px_tmp')
         # Build: capture gen str2000 __px_tmp = "`local_name'"
-        cmd = (b'capture gen str2000 __px_tmp = "' + b'`' + 
-               local_name.encode() + b"'" + '"')
+        # where ` is backtick (0x60) and ' is apostrophe (0x27)
+        lname = local_name.encode() if isinstance(local_name, str) else local_name
+        cmd = (b'capture gen str2000 __px_tmp = "'
+               + b'\x60' + lname + b"'" + b'"')
         self._exe(cmd)
         return self.read_encoded_str('__px_tmp[1]', obs=1)
 
